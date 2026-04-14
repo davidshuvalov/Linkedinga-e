@@ -6,7 +6,7 @@ weekly leaderboards into the group, and allocates weekly prizes.
 
 ## Status
 
-Phase 1 (repo scaffold + parsers + schema) — **in progress**. See the
+Phase 2 (Twilio webhook + player/score persistence) complete. See the
 "Build plan" section below for what's still pending.
 
 ## Stack
@@ -39,7 +39,41 @@ cp .env.example .env
 
 # 5. Run the tests
 pytest
+
+# 6. Run the webhook locally
+uvicorn app.main:app --reload
 ```
+
+With no Supabase credentials set, the app boots against an in-memory
+repository so you can smoke-test the webhook end-to-end without a database.
+
+### Simulating Twilio webhook POSTs
+
+With `uvicorn` running, in a second Git Bash terminal:
+
+```bash
+./scripts/curl_webhook.sh
+```
+
+That posts form-encoded payloads (`From`, `Body`, `ProfileName`) that mirror
+what Twilio sends, and prints each TwiML reply. To post a single custom
+message:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/webhook \
+    -d 'From=whatsapp:+61400000001' \
+    -d 'ProfileName=Alice' \
+    --data-urlencode 'Body=Queens #365 | 1:23'
+```
+
+### Wiring up the real Twilio sandbox
+
+1. Enable the WhatsApp sandbox in the Twilio console.
+2. Expose your local server with `ngrok http 8000` (or similar).
+3. In **Twilio Console → Messaging → Sandbox settings**, set the *"When a
+   message comes in"* URL to `https://<ngrok-id>.ngrok.io/webhook`, method `POST`.
+4. From your phone, join the sandbox and send `Queens #1 | 0:30` — you should
+   get a reply and a row in `scores`.
 
 ## Database
 
@@ -92,7 +126,7 @@ Sunday** in `Australia/Sydney`.
 ## Build plan
 
 - [x] Phase 1 — Core: repo scaffold, schema, parsers + unit tests
-- [ ] Phase 2 — Webhook: FastAPI `/webhook`, Twilio payload handling, dedup
+- [x] Phase 2 — Webhook: FastAPI `/webhook`, Twilio payload handling, dedup
 - [ ] Phase 3 — Scoring & recaps: `scoring.py`, `scheduler.py`, CLI
 - [ ] Phase 4 — Scheduling & deploy: APScheduler, Railway config
 - [ ] Phase 5 — Polish: `stats` and `unparsed` DM commands
