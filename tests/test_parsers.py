@@ -237,3 +237,81 @@ class TestLooksLikeScore:
 
     def test_rejects_empty(self):
         assert not looks_like_score("")
+
+
+# ---------------------------------------------------------------------------
+# Regression fixtures: verbatim real share-text samples
+# ---------------------------------------------------------------------------
+
+
+class TestRealSamples:
+    """Verbatim share-text pasted by the user, captured 2026-04.
+
+    If any of these break, LinkedIn changed the format — update the regex
+    in ``app/parsers.py`` and keep this class faithful to the new reality.
+    """
+
+    REAL_QUEENS = "Queens #714\n0:10 👑\nlnkd.in/queens."
+    REAL_TANGO = "Tango #554\n0:35 🌗\nlnkd.in/tango."
+    REAL_ZIP = "Zip #393\n0:09 🏁\nlnkd.in/zip."
+    REAL_CROSSCLIMB = "Crossclimb #714\n1:44 🪜\nlnkd.in/crossclimb."
+    REAL_PINPOINT = (
+        "Pinpoint #714 | 4 guesses\n"
+        "1\ufe0f\u20e3  | 2% match\n"
+        "2\ufe0f\u20e3  | 9% match\n"
+        "3\ufe0f\u20e3  | 3% match\n"
+        "4\ufe0f\u20e3  | 100% match 📌\n"
+        "lnkd.in/pinpoint."
+    )
+
+    def test_real_queens(self):
+        assert parse_queens(self.REAL_QUEENS) == ParsedScore(
+            "queens", 714, 10, self.REAL_QUEENS
+        )
+
+    def test_real_tango(self):
+        assert parse_tango(self.REAL_TANGO) == ParsedScore(
+            "tango", 554, 35, self.REAL_TANGO
+        )
+
+    def test_real_zip(self):
+        assert parse_zip(self.REAL_ZIP) == ParsedScore(
+            "zip", 393, 9, self.REAL_ZIP
+        )
+
+    def test_real_crossclimb(self):
+        assert parse_crossclimb(self.REAL_CROSSCLIMB) == ParsedScore(
+            "crossclimb", 714, 104, self.REAL_CROSSCLIMB
+        )
+
+    def test_real_pinpoint(self):
+        assert parse_pinpoint(self.REAL_PINPOINT) == ParsedScore(
+            "pinpoint", 714, 4, self.REAL_PINPOINT
+        )
+
+    @pytest.mark.parametrize(
+        "attr,expected_game,expected_no,expected_raw",
+        [
+            ("REAL_QUEENS", "queens", 714, 10),
+            ("REAL_TANGO", "tango", 554, 35),
+            ("REAL_ZIP", "zip", 393, 9),
+            ("REAL_CROSSCLIMB", "crossclimb", 714, 104),
+            ("REAL_PINPOINT", "pinpoint", 714, 4),
+        ],
+    )
+    def test_parse_any_dispatches_real_samples(
+        self, attr, expected_game, expected_no, expected_raw
+    ):
+        text = getattr(self, attr)
+        result = parse_any(text)
+        assert result is not None, f"parse_any returned None for {expected_game}"
+        assert result.game == expected_game
+        assert result.puzzle_no == expected_no
+        assert result.raw_score == expected_raw
+
+    def test_pinpoint_keycap_digits_not_mismatched(self):
+        """Make sure ``1️⃣``/``2️⃣``/``3️⃣``/``4️⃣`` rows aren't misread as a
+        guess count. The ``4 guesses`` header is what should win."""
+        r = parse_pinpoint(self.REAL_PINPOINT)
+        assert r is not None
+        assert r.raw_score == 4  # from "4 guesses", not the keycaps

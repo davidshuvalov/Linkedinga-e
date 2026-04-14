@@ -9,12 +9,12 @@ dispatches across all known games and returns the first hit.
   (lower is better).
 - ``pinpoint`` → number of guesses used, 1–5 (lower is better).
 
-.. note::
-   These regexes are **permissive first drafts** built from common LinkedIn
-   share-text shapes. They intentionally ignore emoji, stray whitespace, and
-   trailing ``lnkd.in/...`` links. Once we have real share-text samples from
-   each of the five games, tighten them and add regression fixtures — see
-   the ``TODO`` markers on each parser.
+The regexes are tuned against real share-text samples captured 2026-04.
+The time-based games currently put the score on its own second line
+(e.g. ``Queens #714\\n0:10 👑``), while pinpoint keeps ``X guesses`` on the
+same line as the puzzle number. See :class:`TestRealSamples` in
+``tests/test_parsers.py`` for the verbatim fixtures used as regression
+tests — update both together if LinkedIn ever changes the format again.
 """
 
 from __future__ import annotations
@@ -48,12 +48,21 @@ class ParsedScore:
 # ---------------------------------------------------------------------------
 
 _TIME_PATTERN = r"(\d{1,2}:\d{2}(?::\d{2})?)"
-# Allow arbitrary whitespace (including newlines) between the game name and
-# its "#N", but only non-digit/non-newline filler between the number and the
-# time/guess-count — this keeps matches on the same line as the score so a
-# chatty message like "Queens failed, tried Zip #1 | 0:30" doesn't get
-# mis-attributed to Queens.
 _NUM_PATTERN = r"\s*#\s*(\d+)"
+# Filler allowed between the puzzle ``#N`` and the score.
+#
+# The time-based games currently render the time on its own line, so we
+# allow any non-digit characters (including newlines) between the puzzle
+# number and the first ``M:SS`` we find. ``[^\d]`` (rather than ``.*``) is
+# important: because the filler can't contain digits, a chatty message
+# like "Queens failed, tried Zip #1 | 0:30" still can't be mis-attributed
+# to Queens — the engine can't skip over Zip's ``1`` to reach the time.
+_TIME_GAME_FILLER = r"[^\d]*?"
+# Pinpoint keeps "X guesses" on the same line as ``#N``, so we restrict
+# its filler to non-newline. This also prevents us from accidentally
+# matching the ASCII digit inside keycap emoji like ``1️⃣`` on the rows
+# underneath the header.
+_PINPOINT_FILLER = r"[^\d\n]*?"
 
 
 def _time_to_seconds(time_str: str) -> Optional[int]:
@@ -79,7 +88,7 @@ def _time_to_seconds(time_str: str) -> Optional[int]:
 
 def _match_time_based(game: str, text: str) -> Optional[ParsedScore]:
     """Shared implementation for the four time-based games."""
-    pattern = rf"\b{game}\b{_NUM_PATTERN}[^\d\n]*?{_TIME_PATTERN}"
+    pattern = rf"\b{game}\b{_NUM_PATTERN}{_TIME_GAME_FILLER}{_TIME_PATTERN}"
     m = re.search(pattern, text, re.IGNORECASE)
     if not m:
         return None
@@ -102,11 +111,11 @@ def _match_time_based(game: str, text: str) -> Optional[ParsedScore]:
 def parse_queens(text: str) -> Optional[ParsedScore]:
     """Parse a Queens share.
 
-    TODO: tune once a real share-text sample is available. Expected shape::
+    Real share-text shape (verified 2026-04)::
 
-        Queens #365 | 1:23
-        First solve of the day
-        lnkd.in/queens
+        Queens #714
+        0:10 👑
+        lnkd.in/queens.
     """
     return _match_time_based("queens", text)
 
@@ -114,11 +123,11 @@ def parse_queens(text: str) -> Optional[ParsedScore]:
 def parse_tango(text: str) -> Optional[ParsedScore]:
     """Parse a Tango share.
 
-    TODO: tune once a real share-text sample is available. Expected shape::
+    Real share-text shape (verified 2026-04)::
 
-        Tango #123 | 0:45 and flawless
-        ☀️🌑🌑☀️
-        lnkd.in/tango
+        Tango #554
+        0:35 🌗
+        lnkd.in/tango.
     """
     return _match_time_based("tango", text)
 
@@ -126,11 +135,11 @@ def parse_tango(text: str) -> Optional[ParsedScore]:
 def parse_crossclimb(text: str) -> Optional[ParsedScore]:
     """Parse a Crossclimb share.
 
-    TODO: tune once a real share-text sample is available. Expected shape::
+    Real share-text shape (verified 2026-04)::
 
-        Crossclimb #77 | 1:45
-        🪜
-        lnkd.in/crossclimb
+        Crossclimb #714
+        1:44 🪜
+        lnkd.in/crossclimb.
     """
     return _match_time_based("crossclimb", text)
 
@@ -138,11 +147,11 @@ def parse_crossclimb(text: str) -> Optional[ParsedScore]:
 def parse_zip(text: str) -> Optional[ParsedScore]:
     """Parse a Zip share.
 
-    TODO: tune once a real share-text sample is available. Expected shape::
+    Real share-text shape (verified 2026-04)::
 
-        Zip #88 | 0:42 🏁
-        With 0 backtracks
-        lnkd.in/zip
+        Zip #393
+        0:09 🏁
+        lnkd.in/zip.
     """
     return _match_time_based("zip", text)
 
@@ -150,13 +159,16 @@ def parse_zip(text: str) -> Optional[ParsedScore]:
 def parse_pinpoint(text: str) -> Optional[ParsedScore]:
     """Parse a Pinpoint share.
 
-    TODO: tune once a real share-text sample is available. Expected shape::
+    Real share-text shape (verified 2026-04)::
 
-        Pinpoint #200 | 3 guesses
-        📌 📌 ✅
-        lnkd.in/pinpoint
+        Pinpoint #714 | 4 guesses
+        1️⃣  | 2% match
+        2️⃣  | 9% match
+        3️⃣  | 3% match
+        4️⃣  | 100% match 📌
+        lnkd.in/pinpoint.
     """
-    pattern = rf"\bpinpoint\b{_NUM_PATTERN}[^\d\n]*?(\d+)\s*guess"
+    pattern = rf"\bpinpoint\b{_NUM_PATTERN}{_PINPOINT_FILLER}(\d+)\s*guess"
     m = re.search(pattern, text, re.IGNORECASE)
     if not m:
         return None
