@@ -18,6 +18,8 @@ _GAME_DISPLAY = {
     "pinpoint": "Pinpoint",
     "crossclimb": "Crossclimb",
     "zip": "Zip",
+    "patches": "Patches",
+    "mini_sudoku": "Mini Sudoku",
 }
 
 
@@ -34,8 +36,8 @@ def _format_score(game: str, raw_score: int) -> str:
 def _help_text() -> str:
     return (
         "Hi! Send me your LinkedIn game share text (Queens, Tango, "
-        "Pinpoint, Crossclimb, or Zip) and I'll track it for the weekly "
-        "leaderboard."
+        "Pinpoint, Crossclimb, Zip, Patches, or Mini Sudoku) and I'll "
+        "track it for the weekly leaderboard."
     )
 
 

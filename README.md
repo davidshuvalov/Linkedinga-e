@@ -1,8 +1,9 @@
 # LinkedIn Games WhatsApp Score Tracker
 
 A WhatsApp bot that tracks LinkedIn game scores (Queens, Tango, Pinpoint,
-Crossclimb, Zip) for a friend group of 6–12 people, posts daily recaps and
-weekly leaderboards into the group, and allocates weekly prizes.
+Crossclimb, Zip, Patches, and Mini Sudoku) for a friend group of 6–12
+people, posts daily recaps and weekly leaderboards into the group, and
+allocates weekly prizes.
 
 ## Status
 
@@ -93,13 +94,15 @@ Tables:
 
 `raw_score` convention:
 
-| Game        | Unit                |
-| ----------- | ------------------- |
-| queens      | seconds (lower ↓)   |
-| tango       | seconds (lower ↓)   |
-| crossclimb  | seconds (lower ↓)   |
-| zip         | seconds (lower ↓)   |
-| pinpoint    | guess count 1–5 ↓   |
+| Game         | Unit                |
+| ------------ | ------------------- |
+| queens       | seconds (lower ↓)   |
+| tango        | seconds (lower ↓)   |
+| crossclimb   | seconds (lower ↓)   |
+| zip          | seconds (lower ↓)   |
+| patches      | seconds (lower ↓)   |
+| mini_sudoku  | seconds (lower ↓)   |
+| pinpoint     | guess count 1–5 ↓   |
 
 ## Scoring rules
 
@@ -113,7 +116,7 @@ Rank-based per game per day:
 Ties share the better rank (standard competition ranking — two players tied
 for 1st each get 5 points, and the next rank is 3rd).
 
-Weekly total = sum of daily points across all 5 games. Weeks run **Monday to
+Weekly total = sum of daily points across all 7 games. Weeks run **Monday to
 Sunday** in `Australia/Sydney`.
 
 ## Weekly prize categories
@@ -131,9 +134,9 @@ Sunday** in `Australia/Sydney`.
 - [ ] Phase 4 — Scheduling & deploy: APScheduler, Railway config
 - [ ] Phase 5 — Polish: `stats` and `unparsed` DM commands
 
-## Known unknowns (help wanted)
+## Share-text format regression fixtures
 
-The exact current share-text format for each of the 5 games. Phase 1 ships
-with permissive first-draft regexes and placeholder fixtures — see `TODO`
-comments in `app/parsers.py`. Paste a real share-text sample and we'll
-tune + add a regression test.
+Real share-text samples for all 7 games (captured 2026-04) are pinned in
+`tests/test_parsers.py::TestRealSamples`. If LinkedIn ever tweaks the
+format, update both the regex in `app/parsers.py` and the fixture
+together — the class exists specifically as the regression net.

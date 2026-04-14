@@ -16,6 +16,8 @@ from app.parsers import (
     looks_like_score,
     parse_any,
     parse_crossclimb,
+    parse_mini_sudoku,
+    parse_patches,
     parse_pinpoint,
     parse_queens,
     parse_tango,
@@ -177,6 +179,58 @@ class TestParseZip:
 
 
 # ---------------------------------------------------------------------------
+# Patches
+# ---------------------------------------------------------------------------
+
+
+class TestParsePatches:
+    def test_basic_single_line(self):
+        text = "Patches #28 | 0:13 🧶"
+        r = parse_patches(text)
+        assert r is not None
+        assert r.game == "patches"
+        assert r.puzzle_no == 28
+        assert r.raw_score == 13
+
+    def test_multiline_format(self):
+        text = "Patches #28\n0:13 🧶\nlnkd.in/patches."
+        r = parse_patches(text)
+        assert r is not None
+        assert r.puzzle_no == 28
+        assert r.raw_score == 13
+
+    def test_wrong_game_returns_none(self):
+        assert parse_patches("Queens #1 | 0:30") is None
+
+
+# ---------------------------------------------------------------------------
+# Mini Sudoku
+# ---------------------------------------------------------------------------
+
+
+class TestParseMiniSudoku:
+    def test_basic(self):
+        text = "Mini Sudoku #246 | 1:16 ✏️"
+        r = parse_mini_sudoku(text)
+        assert r is not None
+        assert r.game == "mini_sudoku"
+        assert r.puzzle_no == 246
+        assert r.raw_score == 76  # 1*60 + 16
+
+    def test_case_insensitive_and_extra_whitespace_between_words(self):
+        r = parse_mini_sudoku("mini   sudoku #1 | 0:30")
+        assert r is not None
+        assert r.raw_score == 30
+
+    def test_plain_sudoku_without_mini_returns_none(self):
+        # We only track Mini Sudoku, not any stray "Sudoku" reference.
+        assert parse_mini_sudoku("Sudoku #1 | 1:00") is None
+
+    def test_wrong_game_returns_none(self):
+        assert parse_mini_sudoku("Queens #1 | 0:30") is None
+
+
+# ---------------------------------------------------------------------------
 # parse_any dispatcher
 # ---------------------------------------------------------------------------
 
@@ -190,6 +244,8 @@ class TestParseAny:
             ("Pinpoint #3 | 2 guesses", "pinpoint", 3, 2),
             ("Crossclimb #4 | 1:00", "crossclimb", 4, 60),
             ("Zip #5 | 0:42 🏁", "zip", 5, 42),
+            ("Patches #6 | 0:13 🧶", "patches", 6, 13),
+            ("Mini Sudoku #7 | 1:16 ✏️", "mini_sudoku", 7, 76),
         ],
     )
     def test_dispatches_to_correct_game(
@@ -232,8 +288,18 @@ class TestLooksLikeScore:
     def test_matches_lnkd_in_link(self):
         assert looks_like_score("check this out lnkd.in/queens")
 
+    def test_matches_patches(self):
+        assert looks_like_score("Patches #28 | 0:13")
+
+    def test_matches_mini_sudoku_with_space(self):
+        assert looks_like_score("Mini Sudoku #246 | 1:16")
+
     def test_rejects_unrelated(self):
         assert not looks_like_score("dinner at 7?")
+
+    def test_rejects_bare_sudoku_without_mini(self):
+        # "Sudoku" alone isn't a tracked game; only "Mini Sudoku" counts.
+        assert not looks_like_score("anyone playing sudoku tonight?")
 
     def test_rejects_empty(self):
         assert not looks_like_score("")
@@ -255,6 +321,13 @@ class TestRealSamples:
     REAL_TANGO = "Tango #554\n0:35 🌗\nlnkd.in/tango."
     REAL_ZIP = "Zip #393\n0:09 🏁\nlnkd.in/zip."
     REAL_CROSSCLIMB = "Crossclimb #714\n1:44 🪜\nlnkd.in/crossclimb."
+    REAL_PATCHES = "Patches #28 | 0:13 🧶\nWith no hints\nlnkd.in/patches."
+    REAL_MINI_SUDOKU = (
+        "Mini Sudoku #246 | 1:16 \u270f\ufe0f\n"
+        "The classic game, made mini. Handcrafted by the originators of "
+        "\u201cSudoku.\u201d\n"
+        "lnkd.in/minisudoku."
+    )
     REAL_PINPOINT = (
         "Pinpoint #714 | 4 guesses\n"
         "1\ufe0f\u20e3  | 2% match\n"
@@ -289,6 +362,16 @@ class TestRealSamples:
             "pinpoint", 714, 4, self.REAL_PINPOINT
         )
 
+    def test_real_patches(self):
+        assert parse_patches(self.REAL_PATCHES) == ParsedScore(
+            "patches", 28, 13, self.REAL_PATCHES
+        )
+
+    def test_real_mini_sudoku(self):
+        assert parse_mini_sudoku(self.REAL_MINI_SUDOKU) == ParsedScore(
+            "mini_sudoku", 246, 76, self.REAL_MINI_SUDOKU
+        )
+
     @pytest.mark.parametrize(
         "attr,expected_game,expected_no,expected_raw",
         [
@@ -297,6 +380,8 @@ class TestRealSamples:
             ("REAL_ZIP", "zip", 393, 9),
             ("REAL_CROSSCLIMB", "crossclimb", 714, 104),
             ("REAL_PINPOINT", "pinpoint", 714, 4),
+            ("REAL_PATCHES", "patches", 28, 13),
+            ("REAL_MINI_SUDOKU", "mini_sudoku", 246, 76),
         ],
     )
     def test_parse_any_dispatches_real_samples(

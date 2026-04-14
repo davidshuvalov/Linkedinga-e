@@ -15,13 +15,12 @@ create table if not exists players (
 
 -- ---------- scores ----------
 -- raw_score convention:
---   queens/tango/crossclimb/zip → seconds (lower is better)
---   pinpoint                    → guess count 1..5 (lower is better)
+--   queens/tango/crossclimb/zip/patches/mini_sudoku → seconds (lower is better)
+--   pinpoint                                        → guess count 1..5 (lower is better)
 create table if not exists scores (
     id          bigserial primary key,
     player_id   bigint      not null references players(id) on delete cascade,
-    game        text        not null
-        check (game in ('queens','tango','pinpoint','crossclimb','zip')),
+    game        text        not null,
     puzzle_no   integer     not null check (puzzle_no > 0),
     puzzle_date date        not null,
     raw_score   integer     not null check (raw_score >= 0),
@@ -29,6 +28,22 @@ create table if not exists scores (
     created_at  timestamptz not null default now(),
     unique (player_id, game, puzzle_no)
 );
+
+-- Allowed-games check, maintained separately so new games can be added
+-- simply by re-running this file (drops + recreates the constraint). The
+-- ``if exists`` guard lets this run cleanly against both fresh installs
+-- and existing databases that used an earlier subset of games.
+alter table scores drop constraint if exists scores_game_check;
+alter table scores add constraint scores_game_check
+    check (game in (
+        'queens',
+        'tango',
+        'pinpoint',
+        'crossclimb',
+        'zip',
+        'patches',
+        'mini_sudoku'
+    ));
 
 create index if not exists scores_puzzle_date_idx on scores (puzzle_date);
 create index if not exists scores_game_date_idx  on scores (game, puzzle_date);

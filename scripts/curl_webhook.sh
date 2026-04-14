@@ -39,6 +39,8 @@ post "Tango score"         "Tango #123 | 0:45"
 post "Pinpoint score"      "Pinpoint #200 | 3 guesses"
 post "Crossclimb score"    "Crossclimb #77 | 1:45"
 post "Zip score"           "Zip #88 | 0:42"
+post "Patches score"       "Patches #28 | 0:13"
+post "Mini Sudoku score"   "Mini Sudoku #246 | 1:16"
 post "Duplicate Queens (should be rejected)" "Queens #365 | 1:23"
 post "Game-ish but unparseable (logged to unparsed_messages)" \
      "Queens today was a nightmare lnkd.in/queens"

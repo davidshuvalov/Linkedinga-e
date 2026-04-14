@@ -5,8 +5,8 @@ dispatches across all known games and returns the first hit.
 
 ``raw_score`` convention:
 
-- ``queens``, ``tango``, ``crossclimb``, ``zip`` → duration in **seconds**
-  (lower is better).
+- ``queens``, ``tango``, ``crossclimb``, ``zip``, ``patches``,
+  ``mini_sudoku`` → duration in **seconds** (lower is better).
 - ``pinpoint`` → number of guesses used, 1–5 (lower is better).
 
 The regexes are tuned against real share-text samples captured 2026-04.
@@ -23,7 +23,28 @@ import re
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
-GAMES = ("queens", "tango", "pinpoint", "crossclimb", "zip")
+GAMES = (
+    "queens",
+    "tango",
+    "pinpoint",
+    "crossclimb",
+    "zip",
+    "patches",
+    "mini_sudoku",
+)
+
+# How to locate each game's name inside free-text. Single-word games use a
+# plain ``\b``-bounded match; ``mini_sudoku`` has a space in the display
+# name so we use ``\s+`` between the tokens.
+_GAME_NAME_PATTERNS: Dict[str, str] = {
+    "queens": r"\bqueens\b",
+    "tango": r"\btango\b",
+    "pinpoint": r"\bpinpoint\b",
+    "crossclimb": r"\bcrossclimb\b",
+    "zip": r"\bzip\b",
+    "patches": r"\bpatches\b",
+    "mini_sudoku": r"\bmini\s+sudoku\b",
+}
 
 
 @dataclass(frozen=True)
@@ -87,8 +108,9 @@ def _time_to_seconds(time_str: str) -> Optional[int]:
 
 
 def _match_time_based(game: str, text: str) -> Optional[ParsedScore]:
-    """Shared implementation for the four time-based games."""
-    pattern = rf"\b{game}\b{_NUM_PATTERN}{_TIME_GAME_FILLER}{_TIME_PATTERN}"
+    """Shared implementation for the six time-based games."""
+    name_pattern = _GAME_NAME_PATTERNS[game]
+    pattern = rf"{name_pattern}{_NUM_PATTERN}{_TIME_GAME_FILLER}{_TIME_PATTERN}"
     m = re.search(pattern, text, re.IGNORECASE)
     if not m:
         return None
@@ -156,6 +178,31 @@ def parse_zip(text: str) -> Optional[ParsedScore]:
     return _match_time_based("zip", text)
 
 
+def parse_patches(text: str) -> Optional[ParsedScore]:
+    """Parse a Patches share.
+
+    Real share-text shape (verified 2026-04)::
+
+        Patches #28 | 0:13 🧶
+        With no hints
+        lnkd.in/patches.
+    """
+    return _match_time_based("patches", text)
+
+
+def parse_mini_sudoku(text: str) -> Optional[ParsedScore]:
+    """Parse a Mini Sudoku share.
+
+    Real share-text shape (verified 2026-04)::
+
+        Mini Sudoku #246 | 1:16 ✏️
+        The classic game, made mini. Handcrafted by the originators of
+        "Sudoku."
+        lnkd.in/minisudoku.
+    """
+    return _match_time_based("mini_sudoku", text)
+
+
 def parse_pinpoint(text: str) -> Optional[ParsedScore]:
     """Parse a Pinpoint share.
 
@@ -168,7 +215,8 @@ def parse_pinpoint(text: str) -> Optional[ParsedScore]:
         4️⃣  | 100% match 📌
         lnkd.in/pinpoint.
     """
-    pattern = rf"\bpinpoint\b{_NUM_PATTERN}{_PINPOINT_FILLER}(\d+)\s*guess"
+    name_pattern = _GAME_NAME_PATTERNS["pinpoint"]
+    pattern = rf"{name_pattern}{_NUM_PATTERN}{_PINPOINT_FILLER}(\d+)\s*guess"
     m = re.search(pattern, text, re.IGNORECASE)
     if not m:
         return None
@@ -193,6 +241,8 @@ _PARSERS: Dict[str, Callable[[str], Optional[ParsedScore]]] = {
     "pinpoint": parse_pinpoint,
     "crossclimb": parse_crossclimb,
     "zip": parse_zip,
+    "patches": parse_patches,
+    "mini_sudoku": parse_mini_sudoku,
 }
 
 
@@ -205,7 +255,7 @@ def looks_like_score(text: str) -> bool:
     lower = text.lower()
     if "lnkd.in/" in lower:
         return True
-    return any(re.search(rf"\b{g}\b", lower) for g in GAMES)
+    return any(re.search(p, lower) for p in _GAME_NAME_PATTERNS.values())
 
 
 def parse_any(text: str) -> Optional[ParsedScore]:

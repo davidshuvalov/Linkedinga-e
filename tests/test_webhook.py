@@ -216,3 +216,54 @@ class TestHandleInbound:
         )
         assert "already" not in reply.lower()
         assert len(repo.scores) == 2
+
+    def test_patches_round_trip(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Patches #28 | 0:13 🧶",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert "Patches" in reply
+        assert "#28" in reply
+        assert "0:13" in reply
+        assert len(repo.scores) == 1
+        assert repo.scores[0]["game"] == "patches"
+        assert repo.scores[0]["puzzle_no"] == 28
+        assert repo.scores[0]["raw_score"] == 13
+
+    def test_mini_sudoku_reply_uses_display_name(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Mini Sudoku #246 | 1:16 ✏️",
+            profile_name="Alice",
+            now=NOW,
+        )
+        # Display name keeps the space
+        assert "Mini Sudoku" in reply
+        assert "#246" in reply
+        assert "1:16" in reply
+        assert len(repo.scores) == 1
+        assert repo.scores[0]["game"] == "mini_sudoku"
+        assert repo.scores[0]["raw_score"] == 76
+
+    def test_help_text_lists_all_seven_games(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="",
+            profile_name="Alice",
+            now=NOW,
+        )
+        for name in (
+            "Queens",
+            "Tango",
+            "Pinpoint",
+            "Crossclimb",
+            "Zip",
+            "Patches",
+            "Mini Sudoku",
+        ):
+            assert name in reply
