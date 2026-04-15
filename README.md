@@ -7,8 +7,8 @@ allocates weekly prizes.
 
 ## Status
 
-Phase 2 (Twilio webhook + player/score persistence) complete. See the
-"Build plan" section below for what's still pending.
+Phase 3 (scoring, recaps, preview CLI) complete. See the "Build plan"
+section below for what's still pending.
 
 ## Stack
 
@@ -66,6 +66,35 @@ curl -s -X POST http://127.0.0.1:8000/webhook \
     -d 'ProfileName=Alice' \
     --data-urlencode 'Body=Queens #365 | 1:23'
 ```
+
+### Previewing recaps and wraps from the CLI
+
+Phase 3 ships a CLI entrypoint so you can preview the daily recap or
+weekly wrap without waiting for the scheduled job (or even without a
+database — pass `--demo` to use a fresh in-memory repo seeded with
+sample data):
+
+```bash
+# Today's recap from Supabase (or empty if no data yet / no creds set)
+python -m app.cli recap
+
+# Today's recap against seeded demo data — no database required
+python -m app.cli recap --demo
+
+# A specific day's recap
+python -m app.cli recap --date 2026-04-14
+
+# This week's wrap (Mon–Sun, Sydney tz)
+python -m app.cli wrap
+
+# A specific week's wrap (any date inside the week works)
+python -m app.cli wrap --week-of 2026-04-15 --demo
+```
+
+Daily grouping in the scoring logic uses `(game, puzzle_no)` rather
+than the stored `puzzle_date`, so a shared daily round is scored as a
+single head-to-head even when two players' submissions straddle
+midnight and land on different `puzzle_date` values.
 
 ### Wiring up the real Twilio sandbox
 
@@ -130,7 +159,7 @@ Sunday** in `Australia/Sydney`.
 
 - [x] Phase 1 — Core: repo scaffold, schema, parsers + unit tests
 - [x] Phase 2 — Webhook: FastAPI `/webhook`, Twilio payload handling, dedup
-- [ ] Phase 3 — Scoring & recaps: `scoring.py`, `scheduler.py`, CLI
+- [x] Phase 3 — Scoring & recaps: `scoring.py`, `scheduler.py`, CLI
 - [ ] Phase 4 — Scheduling & deploy: APScheduler, Railway config
 - [ ] Phase 5 — Polish: `stats` and `unparsed` DM commands
 

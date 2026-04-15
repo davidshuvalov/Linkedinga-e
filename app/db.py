@@ -24,8 +24,25 @@ class Player:
     display_name: str
 
 
+@dataclass(frozen=True)
+class ScoreRow:
+    """A score row with the player's display name joined in.
+
+    This is the shape consumed by ``app.scoring`` / ``app.scheduler``. The
+    repository layer is responsible for the join so downstream code doesn't
+    need to know about player tables.
+    """
+
+    player_id: int
+    player_name: str
+    game: str
+    puzzle_no: int
+    puzzle_date: date
+    raw_score: int
+
+
 class Repository(Protocol):
-    """Interface used by the webhook handler."""
+    """Interface used by the webhook handler and the scoring CLI."""
 
     def get_or_create_player(
         self, whatsapp_id: str, display_name: str
@@ -49,6 +66,18 @@ class Repository(Protocol):
         ...
 
     def log_unparsed(self, whatsapp_id: str, body: str) -> None: ...
+
+    def list_scores(
+        self,
+        *,
+        date_from: date,
+        date_to: date,
+    ) -> List[ScoreRow]:
+        """Return all scores whose ``puzzle_date`` falls in
+        ``[date_from, date_to]`` inclusive, with each player's display name
+        joined in. Used to build daily recaps and weekly wraps.
+        """
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +137,28 @@ class InMemoryRepository:
 
     def log_unparsed(self, whatsapp_id: str, body: str) -> None:
         self.unparsed.append({"whatsapp_id": whatsapp_id, "body": body})
+
+    def list_scores(
+        self,
+        *,
+        date_from: date,
+        date_to: date,
+    ) -> List[ScoreRow]:
+        names_by_id = {p.id: p.display_name for p in self._players.values()}
+        rows: List[ScoreRow] = []
+        for s in self.scores:
+            if date_from <= s["puzzle_date"] <= date_to:
+                rows.append(
+                    ScoreRow(
+                        player_id=s["player_id"],
+                        player_name=names_by_id.get(s["player_id"], ""),
+                        game=s["game"],
+                        puzzle_no=s["puzzle_no"],
+                        puzzle_date=s["puzzle_date"],
+                        raw_score=s["raw_score"],
+                    )
+                )
+        return rows
 
 
 # ---------------------------------------------------------------------------
@@ -201,3 +252,36 @@ class SupabaseRepository:
             .insert({"whatsapp_id": whatsapp_id, "body": body})
             .execute()
         )
+
+    def list_scores(
+        self,
+        *,
+        date_from: date,
+        date_to: date,
+    ) -> List[ScoreRow]:
+        # PostgREST embedded join: ``players(display_name)`` inlines the
+        # parent row under a ``players`` key on each returned score row.
+        resp = (
+            self._client.table("scores")
+            .select(
+                "player_id, game, puzzle_no, puzzle_date, raw_score, "
+                "players(display_name)"
+            )
+            .gte("puzzle_date", date_from.isoformat())
+            .lte("puzzle_date", date_to.isoformat())
+            .execute()
+        )
+        rows: List[ScoreRow] = []
+        for row in resp.data or []:
+            player = row.get("players") or {}
+            rows.append(
+                ScoreRow(
+                    player_id=row["player_id"],
+                    player_name=player.get("display_name", ""),
+                    game=row["game"],
+                    puzzle_no=row["puzzle_no"],
+                    puzzle_date=date.fromisoformat(row["puzzle_date"]),
+                    raw_score=row["raw_score"],
+                )
+            )
+        return rows
