@@ -1,4 +1,4 @@
-"""FastAPI app — Twilio WhatsApp webhook entrypoint.
+"""FastAPI app — Twilio WhatsApp webhook + scheduled recap/wrap jobs.
 
 Routes:
 
@@ -7,16 +7,25 @@ Routes:
   payload, dispatches to :func:`app.webhook.handle_inbound`, and returns
   a TwiML response that Twilio relays back to the sender.
 
+Scheduled jobs (APScheduler, ``Australia/Sydney``):
+
+- **Daily recap** — every day at 21:00
+- **Weekly wrap** — every Sunday at 20:00
+
 Run locally::
 
     uvicorn app.main:app --reload
 
 With no Supabase credentials configured the app falls back to an
 in-memory repository so you can smoke-test the webhook end-to-end.
+Scheduled jobs still fire but print to stdout instead of calling Twilio
+when ``TWILIO_ACCOUNT_SID`` is not set.
 """
 
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from xml.sax.saxutils import escape as xml_escape
 
@@ -26,10 +35,13 @@ from .config import Settings, load_settings
 from .db import InMemoryRepository, Repository, SupabaseRepository
 from .webhook import handle_inbound
 
-app = FastAPI(title="LinkedIn Games WhatsApp Score Tracker")
+logger = logging.getLogger(__name__)
 
 
-# Lazy singleton so we don't construct the Supabase client at import time.
+# ---------------------------------------------------------------------------
+# Repository singleton
+# ---------------------------------------------------------------------------
+
 _repo_singleton: Repository | None = None
 
 
@@ -43,7 +55,6 @@ def get_repository() -> Repository:
         return _repo_singleton
     settings = load_settings()
     if settings.has_supabase:
-        # Imported lazily so tests don't need the supabase package.
         from supabase import create_client  # type: ignore
 
         client = create_client(settings.supabase_url, settings.supabase_key)
@@ -56,6 +67,81 @@ def get_repository() -> Repository:
 def get_settings() -> Settings:
     """FastAPI dependency returning the current :class:`Settings`."""
     return load_settings()
+
+
+# ---------------------------------------------------------------------------
+# APScheduler setup
+# ---------------------------------------------------------------------------
+
+
+def _setup_scheduler() -> None:
+    """Create and start a BackgroundScheduler with the daily recap and
+    weekly wrap cron triggers.
+
+    Runs inside the FastAPI lifespan so the scheduler starts after the
+    app boots and shuts down when the app stops. Imported lazily so that
+    tests that don't need the scheduler aren't slowed by the import.
+    """
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    from .jobs import run_daily_recap, run_weekly_wrap
+
+    settings = load_settings()
+    tz_name = settings.timezone_name
+
+    scheduler = BackgroundScheduler()
+
+    def _daily():
+        run_daily_recap(get_repository(), settings)
+
+    def _weekly():
+        run_weekly_wrap(get_repository(), settings)
+
+    scheduler.add_job(
+        _daily,
+        CronTrigger(hour=21, minute=0, timezone=tz_name),
+        id="daily_recap",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _weekly,
+        CronTrigger(day_of_week="sun", hour=20, minute=0, timezone=tz_name),
+        id="weekly_wrap",
+        replace_existing=True,
+    )
+
+    scheduler.start()
+    logger.info(
+        "Scheduler started: daily_recap at 21:00 %s, "
+        "weekly_wrap Sun 20:00 %s",
+        tz_name,
+        tz_name,
+    )
+    return scheduler
+
+
+# ---------------------------------------------------------------------------
+# FastAPI lifespan
+# ---------------------------------------------------------------------------
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = _setup_scheduler()
+    yield
+    scheduler.shutdown(wait=False)
+    logger.info("Scheduler shut down.")
+
+
+# ---------------------------------------------------------------------------
+# App + routes
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="LinkedIn Games WhatsApp Score Tracker",
+    lifespan=lifespan,
+)
 
 
 def _twiml(reply_text: str) -> str:

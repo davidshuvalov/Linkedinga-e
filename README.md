@@ -7,8 +7,8 @@ allocates weekly prizes.
 
 ## Status
 
-Phase 3 (scoring, recaps, preview CLI) complete. See the "Build plan"
-section below for what's still pending.
+Phase 4 (scheduling + deploy) complete. See the "Build plan" section
+below for what's still pending.
 
 ## Stack
 
@@ -160,8 +160,40 @@ Sunday** in `Australia/Sydney`.
 - [x] Phase 1 — Core: repo scaffold, schema, parsers + unit tests
 - [x] Phase 2 — Webhook: FastAPI `/webhook`, Twilio payload handling, dedup
 - [x] Phase 3 — Scoring & recaps: `scoring.py`, `scheduler.py`, CLI
-- [ ] Phase 4 — Scheduling & deploy: APScheduler, Railway config
+- [x] Phase 4 — Scheduling & deploy: APScheduler, Railway config
 - [ ] Phase 5 — Polish: `stats` and `unparsed` DM commands
+
+## Deploying to Railway
+
+1. Push this repo to a GitHub repository connected to Railway.
+2. In Railway's dashboard, set the following environment variables:
+   - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`
+   - `TWILIO_RECAP_TO` — the WhatsApp group JID or a single
+     `whatsapp:+<number>` for testing
+   - `SUPABASE_URL`, `SUPABASE_KEY`
+   - `APP_TIMEZONE` (default: `Australia/Sydney`)
+3. Railway auto-detects `Procfile` or `railway.toml`; it will run:
+   ```
+   uvicorn app.main:app --host 0.0.0.0 --port $PORT
+   ```
+4. Set your Twilio webhook URL to
+   `https://<your-railway-app>.up.railway.app/webhook` (method: POST).
+5. Health check is at `GET /health`.
+
+### Scheduled jobs
+
+APScheduler runs inside the same process as the web server:
+
+| Job          | Schedule                | Timezone          |
+| ------------ | ----------------------- | ----------------- |
+| Daily recap  | Every day at 21:00      | Australia/Sydney  |
+| Weekly wrap  | Every Sunday at 20:00   | Australia/Sydney  |
+
+If `TWILIO_RECAP_TO` is set, the recap/wrap is posted to that group. If
+the group post fails (a known Twilio WhatsApp limitation on some account
+tiers), the app falls back to DMing each player who submitted a score
+that period. If `TWILIO_ACCOUNT_SID` is not set at all (local dev), the
+recap is printed to stdout instead.
 
 ## Share-text format regression fixtures
 

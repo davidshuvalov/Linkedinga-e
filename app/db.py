@@ -79,6 +79,18 @@ class Repository(Protocol):
         """
         ...
 
+    def list_active_whatsapp_ids(
+        self,
+        *,
+        date_from: date,
+        date_to: date,
+    ) -> List[str]:
+        """Return ``whatsapp_id`` for every player who submitted at least
+        one score in ``[date_from, date_to]``. Used as the DM-fallback
+        audience when the Twilio group post fails.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # In-memory implementation (tests + local fallback)
@@ -159,6 +171,20 @@ class InMemoryRepository:
                     )
                 )
         return rows
+
+    def list_active_whatsapp_ids(
+        self,
+        *,
+        date_from: date,
+        date_to: date,
+    ) -> List[str]:
+        active_pids = {
+            s["player_id"]
+            for s in self.scores
+            if date_from <= s["puzzle_date"] <= date_to
+        }
+        id_by_pid = {p.id: p.whatsapp_id for p in self._players.values()}
+        return [id_by_pid[pid] for pid in sorted(active_pids) if pid in id_by_pid]
 
 
 # ---------------------------------------------------------------------------
@@ -285,3 +311,25 @@ class SupabaseRepository:
                 )
             )
         return rows
+
+    def list_active_whatsapp_ids(
+        self,
+        *,
+        date_from: date,
+        date_to: date,
+    ) -> List[str]:
+        resp = (
+            self._client.table("scores")
+            .select("player_id, players(whatsapp_id)")
+            .gte("puzzle_date", date_from.isoformat())
+            .lte("puzzle_date", date_to.isoformat())
+            .execute()
+        )
+        seen: set[str] = set()
+        result: List[str] = []
+        for row in resp.data or []:
+            wid = (row.get("players") or {}).get("whatsapp_id", "")
+            if wid and wid not in seen:
+                seen.add(wid)
+                result.append(wid)
+        return result
