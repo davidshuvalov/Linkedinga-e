@@ -112,20 +112,29 @@ class TestHandleInbound:
         assert len(repo._players) == 1
         assert len(repo.scores) == 2
 
-    def test_duplicate_submission_is_rejected(self, repo):
-        kwargs = dict(
+    def test_duplicate_submission_shows_existing_score(self, repo):
+        first = handle_inbound(
+            repo,
             from_="whatsapp:+61400000001",
             body="Queens #365 | 1:23",
             profile_name="Alice",
             now=NOW,
         )
-        first = handle_inbound(repo, **kwargs)
-        second = handle_inbound(repo, **kwargs)
-
+        second = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #365 | 1:30",
+            profile_name="Alice",
+            now=NOW,
+        )
         assert "Got it" in first
         assert "already" in second.lower()
         assert "Queens #365" in second
-        assert len(repo.scores) == 1  # no double-insert
+        # Shows the EXISTING score (1:23) and the new attempt (1:30)
+        assert "1:23" in second
+        assert "1:30" in second
+        assert "not recorded" in second.lower()
+        assert len(repo.scores) == 1
 
     def test_pinpoint_reply_uses_guess_phrasing(self, repo):
         reply = handle_inbound(
@@ -267,3 +276,113 @@ class TestHandleInbound:
             "Mini Sudoku",
         ):
             assert name in reply
+
+
+# ---------------------------------------------------------------------------
+# /stats command
+# ---------------------------------------------------------------------------
+
+
+class TestStatsCommand:
+    def test_stats_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="stats",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert "No scores recorded" in reply
+
+    def test_stats_with_scores(self, repo):
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #1 | 0:30",
+            profile_name="Alice",
+            now=NOW,
+        )
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #2 | 0:20",
+            profile_name="Alice",
+            now=NOW,
+        )
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Pinpoint #1 | 2 guesses",
+            profile_name="Alice",
+            now=NOW,
+        )
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="stats",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert "Alice" in reply
+        assert "Submissions: 3" in reply
+        assert "Games played: 2/7" in reply
+        assert "Personal bests:" in reply
+        # Best Queens is 0:20 not 0:30
+        assert "0:20" in reply
+        assert "2 guesses" in reply
+
+    def test_stats_case_insensitive(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="STATS",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert "No scores recorded" in reply
+
+
+# ---------------------------------------------------------------------------
+# /unparsed command
+# ---------------------------------------------------------------------------
+
+
+class TestUnparsedCommand:
+    def test_unparsed_with_nothing_logged(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="unparsed",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert "No unparsed messages" in reply
+
+    def test_unparsed_shows_logged_entries(self, repo):
+        # Trigger an unparsed log
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens today was a nightmare lnkd.in/queens",
+            profile_name="Alice",
+            now=NOW,
+        )
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="unparsed",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert "Recent unparsed" in reply
+        assert "Queens today was a nightmare" in reply
+
+    def test_unparsed_case_insensitive(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Unparsed",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert "No unparsed messages" in reply

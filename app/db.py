@@ -91,6 +91,24 @@ class Repository(Protocol):
         """
         ...
 
+    def get_existing_score(
+        self,
+        *,
+        player_id: int,
+        game: str,
+        puzzle_no: int,
+    ) -> Optional[int]:
+        """Return ``raw_score`` for an existing submission, or ``None``."""
+        ...
+
+    def list_player_scores(self, player_id: int) -> List[ScoreRow]:
+        """Return all scores for a specific player (all-time)."""
+        ...
+
+    def list_recent_unparsed(self, *, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return the most recent unparsed messages (newest first)."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # In-memory implementation (tests + local fallback)
@@ -185,6 +203,40 @@ class InMemoryRepository:
         }
         id_by_pid = {p.id: p.whatsapp_id for p in self._players.values()}
         return [id_by_pid[pid] for pid in sorted(active_pids) if pid in id_by_pid]
+
+    def get_existing_score(
+        self,
+        *,
+        player_id: int,
+        game: str,
+        puzzle_no: int,
+    ) -> Optional[int]:
+        for s in self.scores:
+            if (
+                s["player_id"] == player_id
+                and s["game"] == game
+                and s["puzzle_no"] == puzzle_no
+            ):
+                return s["raw_score"]
+        return None
+
+    def list_player_scores(self, player_id: int) -> List[ScoreRow]:
+        names_by_id = {p.id: p.display_name for p in self._players.values()}
+        return [
+            ScoreRow(
+                player_id=s["player_id"],
+                player_name=names_by_id.get(s["player_id"], ""),
+                game=s["game"],
+                puzzle_no=s["puzzle_no"],
+                puzzle_date=s["puzzle_date"],
+                raw_score=s["raw_score"],
+            )
+            for s in self.scores
+            if s["player_id"] == player_id
+        ]
+
+    def list_recent_unparsed(self, *, limit: int = 10) -> List[Dict[str, Any]]:
+        return list(reversed(self.unparsed[-limit:]))
 
 
 # ---------------------------------------------------------------------------
@@ -333,3 +385,59 @@ class SupabaseRepository:
                 seen.add(wid)
                 result.append(wid)
         return result
+
+    def get_existing_score(
+        self,
+        *,
+        player_id: int,
+        game: str,
+        puzzle_no: int,
+    ) -> Optional[int]:
+        resp = (
+            self._client.table("scores")
+            .select("raw_score")
+            .eq("player_id", player_id)
+            .eq("game", game)
+            .eq("puzzle_no", puzzle_no)
+            .limit(1)
+            .execute()
+        )
+        if resp.data:
+            return resp.data[0]["raw_score"]
+        return None
+
+    def list_player_scores(self, player_id: int) -> List[ScoreRow]:
+        resp = (
+            self._client.table("scores")
+            .select(
+                "player_id, game, puzzle_no, puzzle_date, raw_score, "
+                "players(display_name)"
+            )
+            .eq("player_id", player_id)
+            .order("puzzle_date", desc=True)
+            .execute()
+        )
+        rows: List[ScoreRow] = []
+        for row in resp.data or []:
+            player = row.get("players") or {}
+            rows.append(
+                ScoreRow(
+                    player_id=row["player_id"],
+                    player_name=player.get("display_name", ""),
+                    game=row["game"],
+                    puzzle_no=row["puzzle_no"],
+                    puzzle_date=date.fromisoformat(row["puzzle_date"]),
+                    raw_score=row["raw_score"],
+                )
+            )
+        return rows
+
+    def list_recent_unparsed(self, *, limit: int = 10) -> List[Dict[str, Any]]:
+        resp = (
+            self._client.table("unparsed_messages")
+            .select("whatsapp_id, body, created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return resp.data or []

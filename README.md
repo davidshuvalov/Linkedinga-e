@@ -7,8 +7,7 @@ allocates weekly prizes.
 
 ## Status
 
-Phase 4 (scheduling + deploy) complete. See the "Build plan" section
-below for what's still pending.
+All 5 phases complete. The bot is ready to deploy.
 
 ## Stack
 
@@ -161,7 +160,7 @@ Sunday** in `Australia/Sydney`.
 - [x] Phase 2 — Webhook: FastAPI `/webhook`, Twilio payload handling, dedup
 - [x] Phase 3 — Scoring & recaps: `scoring.py`, `scheduler.py`, CLI
 - [x] Phase 4 — Scheduling & deploy: APScheduler, Railway config
-- [ ] Phase 5 — Polish: `stats` and `unparsed` DM commands
+- [x] Phase 5 — Polish: `stats` and `unparsed` DM commands
 
 ## Deploying to Railway
 
@@ -194,6 +193,17 @@ the group post fails (a known Twilio WhatsApp limitation on some account
 tiers), the app falls back to DMing each player who submitted a score
 that period. If `TWILIO_ACCOUNT_SID` is not set at all (local dev), the
 recap is printed to stdout instead.
+
+## Bot commands
+
+Players can DM the bot (or send in the group) with these keywords:
+
+| Command      | Response                                          |
+| ------------ | ------------------------------------------------- |
+| `stats`      | Your all-time per-game stats and personal bests   |
+| `unparsed`   | Last 10 unparsed messages (admin debugging)       |
+
+Any other non-score message gets the help text explaining how to submit.
 
 ## Share-text format regression fixtures
 
