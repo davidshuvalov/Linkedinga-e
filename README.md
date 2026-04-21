@@ -137,15 +137,39 @@ Tables:
 Rank-based per game per day:
 
 - 1st: **5 points**
-- 2nd: **3 points**
-- 3rd: **1 point**
-- Others: **0 points**
+- 2nd: **4 points**
+- 3rd: **3 points**
+- 4th: **2 points**
+- 5th: **1 point**
+- 6th+: **0 points**
 
-Ties share the better rank (standard competition ranking — two players tied
-for 1st each get 5 points, and the next rank is 3rd).
+Ties: average the position points the tied players would fill, then round
+**up** (`math.ceil`). Examples:
 
-Weekly total = sum of daily points across all 7 games. Weeks run **Monday to
-Sunday** in `Australia/Sydney`.
+| Tie scenario       | Calculation            | Each gets |
+| ------------------ | ---------------------- | --------- |
+| Tied 1st/2nd       | ceil((5+4)/2) = 4.5    | **5**     |
+| Tied 2nd/3rd       | ceil((4+3)/2) = 3.5    | **4**     |
+| Tied 1st/2nd/3rd   | ceil((5+4+3)/3) = 4.0  | **4**     |
+| Tied 4th/5th       | ceil((2+1)/2) = 1.5    | **2**     |
+
+Weekly total = sum of daily points across **enabled** games only. Weeks
+run **Monday to Sunday** in `Australia/Sydney`.
+
+### Game toggle
+
+Not all 7 games need to be tracked. Set the `ENABLED_GAMES` env var to a
+comma-separated list. Default:
+
+```
+ENABLED_GAMES=queens,tango,zip,patches,mini_sudoku
+```
+
+Pinpoint and Crossclimb are **off by default**. Scores for disabled games
+are still parsed and stored (so historical data is preserved if you
+re-enable them later), but they don't appear in recaps, wraps, or the
+leaderboard. The webhook reply adds a note when a disabled game is
+submitted.
 
 ## Weekly prize categories
 
