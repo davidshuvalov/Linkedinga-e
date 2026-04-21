@@ -36,7 +36,7 @@ def run_daily_recap(
     logger.info("Running daily recap for %s", today)
 
     scores = repo.list_scores(date_from=today, date_to=today)
-    body = daily_recap(today, scores)
+    body = daily_recap(today, scores, enabled_games=settings.enabled_games)
 
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=today, date_to=today
@@ -62,7 +62,7 @@ def run_weekly_wrap(
     logger.info("Running weekly wrap for %s – %s", monday, sunday)
 
     scores = repo.list_scores(date_from=monday, date_to=sunday)
-    body = weekly_wrap(monday, sunday, scores)
+    body = weekly_wrap(monday, sunday, scores, enabled_games=settings.enabled_games)
 
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday

@@ -100,18 +100,20 @@ def _get_repo_maybe_seeded(args: argparse.Namespace) -> Repository:
 
 def cmd_recap(args: argparse.Namespace) -> int:
     repo = _get_repo_maybe_seeded(args)
+    settings = load_settings()
     target = date.fromisoformat(args.date) if args.date else date.today()
     scores = repo.list_scores(date_from=target, date_to=target)
-    sys.stdout.write(daily_recap(target, scores))
+    sys.stdout.write(daily_recap(target, scores, settings.enabled_games))
     return 0
 
 
 def cmd_wrap(args: argparse.Namespace) -> int:
     repo = _get_repo_maybe_seeded(args)
+    settings = load_settings()
     ref = date.fromisoformat(args.week_of) if args.week_of else date.today()
     start, end = week_bounds(ref)
     scores = repo.list_scores(date_from=start, date_to=end)
-    sys.stdout.write(weekly_wrap(start, end, scores))
+    sys.stdout.write(weekly_wrap(start, end, scores, settings.enabled_games))
     return 0
 
 

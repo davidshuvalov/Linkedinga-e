@@ -12,6 +12,8 @@ import pytest
 from app.config import Settings
 from app.sender import send_recap
 
+_EG = frozenset({"queens", "tango", "zip", "patches", "mini_sudoku"})
+
 BASE = Settings(
     twilio_account_sid="ACfake",
     twilio_auth_token="fake_token",
@@ -20,6 +22,7 @@ BASE = Settings(
     supabase_url="",
     supabase_key="",
     timezone_name="Australia/Sydney",
+    enabled_games=_EG,
 )
 
 NO_TWILIO = Settings(
@@ -30,6 +33,7 @@ NO_TWILIO = Settings(
     supabase_url="",
     supabase_key="",
     timezone_name="Australia/Sydney",
+    enabled_games=_EG,
 )
 
 
@@ -70,6 +74,7 @@ class TestSendRecap:
             supabase_url="",
             supabase_key="",
             timezone_name="Australia/Sydney",
+            enabled_games=_EG,
         )
         send_recap(no_group, "recap", dm_targets=["whatsapp:+1"])
         mock_send.assert_called_once_with(no_group, "whatsapp:+1", "recap")

@@ -29,6 +29,7 @@ class Settings:
     supabase_url: str
     supabase_key: str
     timezone_name: str
+    enabled_games: frozenset
 
     @property
     def tz(self) -> ZoneInfo:
@@ -39,7 +40,12 @@ class Settings:
         return bool(self.supabase_url and self.supabase_key)
 
 
+_DEFAULT_ENABLED = "queens,tango,zip,patches,mini_sudoku"
+
+
 def load_settings() -> Settings:
+    raw_games = os.environ.get("ENABLED_GAMES", _DEFAULT_ENABLED)
+    enabled = frozenset(g.strip() for g in raw_games.split(",") if g.strip())
     return Settings(
         twilio_account_sid=os.environ.get("TWILIO_ACCOUNT_SID", ""),
         twilio_auth_token=os.environ.get("TWILIO_AUTH_TOKEN", ""),
@@ -48,4 +54,5 @@ def load_settings() -> Settings:
         supabase_url=os.environ.get("SUPABASE_URL", ""),
         supabase_key=os.environ.get("SUPABASE_KEY", ""),
         timezone_name=os.environ.get("APP_TIMEZONE", "Australia/Sydney"),
+        enabled_games=enabled,
     )

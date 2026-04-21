@@ -171,5 +171,6 @@ async def webhook(
         body=body,
         profile_name=profile_name,
         now=datetime.now(settings.tz),
+        enabled_games=settings.enabled_games,
     )
     return Response(content=_twiml(reply), media_type="application/xml")

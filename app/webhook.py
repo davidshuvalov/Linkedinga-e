@@ -12,10 +12,10 @@ Commands (case-insensitive):
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, FrozenSet, List, Set
 
 from .db import Repository, ScoreRow
-from .parsers import looks_like_score, parse_any
+from .parsers import GAMES, looks_like_score, parse_any
 
 _GAME_DISPLAY = {
     "queens": "Queens",
@@ -130,6 +130,7 @@ def handle_inbound(
     body: str,
     profile_name: str,
     now: datetime,
+    enabled_games: FrozenSet[str] = frozenset(GAMES),
 ) -> str:
     """Process an inbound WhatsApp message. Returns the bot's reply text."""
     body_stripped = (body or "").strip()
@@ -189,7 +190,11 @@ def handle_inbound(
             f"This attempt ({pretty_new}) was not recorded."
         )
 
+    off_note = ""
+    if parsed.game not in enabled_games:
+        off_note = " (Not tracked for the leaderboard.)"
+
     return (
         f"Got it, {player.display_name}. "
-        f"{pretty_game} #{parsed.puzzle_no}: {pretty_new}."
+        f"{pretty_game} #{parsed.puzzle_no}: {pretty_new}.{off_note}"
     )

@@ -27,6 +27,9 @@ SETTINGS = Settings(
     supabase_url="",
     supabase_key="",
     timezone_name="Australia/Sydney",
+    enabled_games=frozenset(
+        {"queens", "tango", "zip", "patches", "mini_sudoku"}
+    ),
 )
 
 
