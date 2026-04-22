@@ -157,6 +157,12 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+_ERROR_REPLY = (
+    "Sorry, the bot hit an error processing your message. "
+    "The admins have been notified — please try again in a bit."
+)
+
+
 @app.post("/webhook")
 async def webhook(
     from_: str = Form(..., alias="From"),
@@ -165,12 +171,45 @@ async def webhook(
     repo: Repository = Depends(get_repository),
     settings: Settings = Depends(get_settings),
 ) -> Response:
-    reply = handle_inbound(
-        repo,
-        from_=from_,
-        body=body,
-        profile_name=profile_name,
-        now=datetime.now(settings.tz),
-        enabled_games=settings.enabled_games,
-    )
+    # Any exception from handle_inbound (Supabase outage, misconfigured
+    # tables, bad regex input, etc.) must NOT bubble up as a 500 — Twilio
+    # can't relay a reply from a 500, so the sender sees silence and the
+    # Twilio console shows a webhook error. Catch, log the full traceback
+    # (visible in Railway logs), and return a valid TwiML apology.
+    try:
+        reply = handle_inbound(
+            repo,
+            from_=from_,
+            body=body,
+            profile_name=profile_name,
+            now=datetime.now(settings.tz),
+            enabled_games=settings.enabled_games,
+        )
+    except Exception:
+        logger.exception(
+            "handle_inbound failed for from=%s body=%r",
+            from_,
+            (body or "")[:200],
+        )
+        reply = _ERROR_REPLY
     return Response(content=_twiml(reply), media_type="application/xml")
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request, exc):  # pragma: no cover
+    # Second line of defense: if an exception escapes the handler above
+    # (e.g. a Depends() dependency itself fails — bad Supabase client init,
+    # unresolvable timezone), still return TwiML for /webhook instead of
+    # a JSON 500 that Twilio can't display.
+    logger.exception("Unhandled exception on %s", request.url.path)
+    if request.url.path == "/webhook":
+        return Response(
+            content=_twiml(_ERROR_REPLY),
+            media_type="application/xml",
+            status_code=200,
+        )
+    return Response(
+        content='{"detail":"Internal Server Error"}',
+        media_type="application/json",
+        status_code=500,
+    )

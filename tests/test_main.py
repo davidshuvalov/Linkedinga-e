@@ -146,3 +146,88 @@ class TestWebhook:
         assert "2 guesses" in r.text
         assert repo.scores[0]["game"] == "pinpoint"
         assert repo.scores[0]["raw_score"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Error handling — webhook must always return TwiML so Twilio can relay a
+# reply to the sender. A 500 produces silence on WhatsApp + a red error in
+# the Twilio console, which is the exact symptom we're guarding against.
+# ---------------------------------------------------------------------------
+
+
+class _ExplodingRepo:
+    """Repository double whose every method raises."""
+
+    def get_or_create_player(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def insert_score(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def log_unparsed(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def list_scores(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def list_active_whatsapp_ids(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def get_existing_score(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def list_player_scores(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def list_recent_unparsed(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+
+class TestWebhookErrorHandling:
+    def test_repo_exception_returns_twiml_not_500(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app, get_repository
+
+        app.dependency_overrides[get_repository] = lambda: _ExplodingRepo()
+        try:
+            client = TestClient(app)
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "Queens #365 | 1:23",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            assert "application/xml" in r.headers["content-type"]
+            root = ET.fromstring(r.text)
+            assert root.tag == "Response"
+            msg = root.find("Message")
+            assert msg is not None and msg.text
+            assert "error" in msg.text.lower()
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_unparsed_command_exception_returns_twiml(self):
+        from fastapi.testclient import TestClient
+
+        from app.main import app, get_repository
+
+        app.dependency_overrides[get_repository] = lambda: _ExplodingRepo()
+        try:
+            client = TestClient(app)
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "unparsed",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            root = ET.fromstring(r.text)
+            assert root.tag == "Response"
+        finally:
+            app.dependency_overrides.clear()

@@ -43,16 +43,29 @@ class Settings:
 _DEFAULT_ENABLED = "queens,tango,zip,patches,mini_sudoku"
 
 
+def _env(name: str, default: str = "") -> str:
+    """Read an env var, treating empty strings as unset.
+
+    Railway / Docker setups often leave variables defined but empty, which
+    makes ``os.environ.get(name, default)`` return ``""`` instead of the
+    default. That's a latent crash for things like ``ZoneInfo("")``.
+    """
+    val = os.environ.get(name)
+    if val is None or val.strip() == "":
+        return default
+    return val
+
+
 def load_settings() -> Settings:
-    raw_games = os.environ.get("ENABLED_GAMES", _DEFAULT_ENABLED)
+    raw_games = _env("ENABLED_GAMES", _DEFAULT_ENABLED)
     enabled = frozenset(g.strip() for g in raw_games.split(",") if g.strip())
     return Settings(
-        twilio_account_sid=os.environ.get("TWILIO_ACCOUNT_SID", ""),
-        twilio_auth_token=os.environ.get("TWILIO_AUTH_TOKEN", ""),
-        twilio_whatsapp_from=os.environ.get("TWILIO_WHATSAPP_FROM", ""),
-        twilio_recap_to=os.environ.get("TWILIO_RECAP_TO", ""),
-        supabase_url=os.environ.get("SUPABASE_URL", ""),
-        supabase_key=os.environ.get("SUPABASE_KEY", ""),
-        timezone_name=os.environ.get("APP_TIMEZONE", "Australia/Sydney"),
+        twilio_account_sid=_env("TWILIO_ACCOUNT_SID"),
+        twilio_auth_token=_env("TWILIO_AUTH_TOKEN"),
+        twilio_whatsapp_from=_env("TWILIO_WHATSAPP_FROM"),
+        twilio_recap_to=_env("TWILIO_RECAP_TO"),
+        supabase_url=_env("SUPABASE_URL"),
+        supabase_key=_env("SUPABASE_KEY"),
+        timezone_name=_env("APP_TIMEZONE", "Australia/Sydney"),
         enabled_games=enabled,
     )
