@@ -5,12 +5,15 @@ Routes:
 - ``GET  /health`` — liveness probe for Railway / uptime checks.
 - ``POST /webhook`` — Twilio WhatsApp webhook. Accepts the form-encoded
   payload, dispatches to :func:`app.webhook.handle_inbound`, and returns
-  a TwiML response that Twilio relays back to the sender.
+  a TwiML response that Twilio relays back to the sender (or a bare
+  ``<Response/>`` when the handler chooses to stay silent).
 
-Scheduled jobs (APScheduler, ``Australia/Sydney``):
+Scheduled jobs (APScheduler, ``America/Los_Angeles``):
 
-- **Daily recap** — every day at 21:00
-- **Weekly wrap** — every Sunday at 20:00
+- **Daily recap** — every day at 00:00 LA (the LinkedIn puzzle flip).
+  Recaps the LA day that just closed.
+- **Weekly wrap** — every Monday at 00:01 LA. Wraps the LA Mon–Sun
+  week whose Sunday just ended.
 
 Run locally::
 
