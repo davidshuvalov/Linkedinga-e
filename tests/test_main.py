@@ -123,13 +123,28 @@ class TestWebhook:
         assert len(repo.scores) == 1
         assert "already" in second.text.lower()
 
-    def test_missing_body_field_is_allowed(self, client):
+    def test_missing_body_field_returns_silent_twiml(self, client):
+        # Empty body is plain chatter → bot stays silent → bare <Response/>.
         r = client.post(
             "/webhook",
             data={"From": "whatsapp:+61400000001", "ProfileName": "Alice"},
         )
         assert r.status_code == 200
-        assert "<Response>" in r.text
+        assert "<Response/>" in r.text
+        assert "<Message>" not in r.text
+
+    def test_random_chatter_returns_silent_twiml(self, client):
+        r = client.post(
+            "/webhook",
+            data={
+                "From": "whatsapp:+61400000001",
+                "Body": "hey what's for dinner",
+                "ProfileName": "Alice",
+            },
+        )
+        assert r.status_code == 200
+        assert "<Response/>" in r.text
+        assert "<Message>" not in r.text
 
     def test_missing_from_is_422(self, client):
         r = client.post(

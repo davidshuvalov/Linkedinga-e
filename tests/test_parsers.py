@@ -279,11 +279,14 @@ class TestParseAny:
 
 
 class TestLooksLikeScore:
-    def test_matches_game_name(self):
+    def test_matches_game_name_with_puzzle_hash(self):
         assert looks_like_score("Queens #1 | 0:30")
 
-    def test_matches_casual_mention(self):
-        assert looks_like_score("yo anyone doing tango today?")
+    def test_rejects_casual_mention_without_puzzle_hash(self):
+        # Tightened in the group-chat-silence pass: a bare mention isn't
+        # an attempted upload. Matching here would make the bot spam
+        # "couldn't parse" in a group every time someone said "tango".
+        assert not looks_like_score("yo anyone doing tango today?")
 
     def test_matches_lnkd_in_link(self):
         assert looks_like_score("check this out lnkd.in/queens")
@@ -296,6 +299,13 @@ class TestLooksLikeScore:
 
     def test_rejects_unrelated(self):
         assert not looks_like_score("dinner at 7?")
+
+    def test_rejects_bare_puzzle_hash_without_game_name(self):
+        assert not looks_like_score("someone remember to book #7 table?")
+
+    def test_matches_game_name_with_spaced_hash(self):
+        # Regex allows whitespace between # and the digits.
+        assert looks_like_score("Queens # 365 today was wild")
 
     def test_rejects_bare_sudoku_without_mini(self):
         # "Sudoku" alone isn't a tracked game; only "Mini Sudoku" counts.

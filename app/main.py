@@ -92,9 +92,20 @@ def _setup_scheduler() -> None:
     """Create and start a BackgroundScheduler with the daily recap and
     weekly wrap cron triggers.
 
+    Both jobs are scheduled in **LA time** so they fire exactly at the
+    LinkedIn puzzle rollover regardless of how US / Australian DST drift
+    changes the Sydney wall-clock time through the year. ``zoneinfo``
+    handles the transitions.
+
+    - Daily recap: **00:00 America/Los_Angeles, every day** — the moment
+      LinkedIn serves the next puzzle. Recaps the LA day that just
+      closed (yesterday LA).
+    - Weekly wrap: **00:01 America/Los_Angeles, Monday** — one minute
+      after the Monday daily so the posts land in the right order.
+      Wraps the Mon–Sun LA week that just ended.
+
     Runs inside the FastAPI lifespan so the scheduler starts after the
-    app boots and shuts down when the app stops. Imported lazily so that
-    tests that don't need the scheduler aren't slowed by the import.
+    app boots and shuts down when the app stops.
     """
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -102,7 +113,7 @@ def _setup_scheduler() -> None:
     from .jobs import run_daily_recap, run_weekly_wrap
 
     settings = load_settings()
-    tz_name = settings.timezone_name
+    scheduler_tz = "America/Los_Angeles"
 
     scheduler = BackgroundScheduler()
 
@@ -114,23 +125,23 @@ def _setup_scheduler() -> None:
 
     scheduler.add_job(
         _daily,
-        CronTrigger(hour=21, minute=0, timezone=tz_name),
+        CronTrigger(hour=0, minute=0, timezone=scheduler_tz),
         id="daily_recap",
         replace_existing=True,
     )
     scheduler.add_job(
         _weekly,
-        CronTrigger(day_of_week="sun", hour=20, minute=0, timezone=tz_name),
+        CronTrigger(day_of_week="mon", hour=0, minute=1, timezone=scheduler_tz),
         id="weekly_wrap",
         replace_existing=True,
     )
 
     scheduler.start()
     logger.info(
-        "Scheduler started: daily_recap at 21:00 %s, "
-        "weekly_wrap Sun 20:00 %s",
-        tz_name,
-        tz_name,
+        "Scheduler started: daily_recap at 00:00 %s (every day), "
+        "weekly_wrap at Mon 00:01 %s",
+        scheduler_tz,
+        scheduler_tz,
     )
     return scheduler
 
@@ -158,12 +169,17 @@ app = FastAPI(
 )
 
 
-def _twiml(reply_text: str) -> str:
-    """Wrap ``reply_text`` in a minimal TwiML ``<Response><Message>`` envelope."""
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        f"<Response><Message>{xml_escape(reply_text)}</Message></Response>"
-    )
+def _twiml(reply_text: Optional[str]) -> str:
+    """Wrap ``reply_text`` in a minimal TwiML envelope.
+
+    When ``reply_text`` is ``None`` we return a bare ``<Response/>`` —
+    Twilio reads that as "no reply" and silently accepts the message,
+    which is what we want for non-upload chatter in a group.
+    """
+    prolog = '<?xml version="1.0" encoding="UTF-8"?>'
+    if reply_text is None:
+        return f"{prolog}<Response/>"
+    return f"{prolog}<Response><Message>{xml_escape(reply_text)}</Message></Response>"
 
 
 @app.get("/health")
@@ -194,7 +210,7 @@ async def webhook(
     # Twilio console shows a webhook error. Catch, log the full traceback
     # (visible in Railway logs), and return a valid TwiML apology.
     try:
-        reply = handle_inbound(
+        reply: Optional[str] = handle_inbound(
             repo,
             from_=from_,
             body=body,

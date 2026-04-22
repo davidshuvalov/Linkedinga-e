@@ -162,7 +162,9 @@ class TestHandleInbound:
         assert repo.unparsed[0]["whatsapp_id"] == "whatsapp:+61400000001"
         assert len(repo.scores) == 0
 
-    def test_unrelated_chatter_gets_help_text(self, repo):
+    def test_unrelated_chatter_is_silent(self, repo):
+        # Group-chat hygiene: the bot must not reply with help text on
+        # normal chatter, otherwise every "hey" would spam the group.
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -170,11 +172,11 @@ class TestHandleInbound:
             profile_name="Alice",
             now=NOW,
         )
+        assert reply is None
         assert len(repo.scores) == 0
         assert len(repo.unparsed) == 0
-        assert "LinkedIn" in reply
 
-    def test_empty_body_gets_help_text(self, repo):
+    def test_empty_body_is_silent(self, repo):
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -182,10 +184,10 @@ class TestHandleInbound:
             profile_name="Alice",
             now=NOW,
         )
-        assert "LinkedIn" in reply
+        assert reply is None
         assert len(repo.scores) == 0
 
-    def test_whitespace_only_body_gets_help_text(self, repo):
+    def test_whitespace_only_body_is_silent(self, repo):
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -193,8 +195,21 @@ class TestHandleInbound:
             profile_name="Alice",
             now=NOW,
         )
-        assert "LinkedIn" in reply
+        assert reply is None
         assert len(repo.scores) == 0
+
+    def test_bare_game_name_mention_is_silent(self, repo):
+        # Tightened heuristic: without a #N puzzle number, it's chatter.
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens was brutal today",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is None
+        assert len(repo.scores) == 0
+        assert len(repo.unparsed) == 0
 
     def test_puzzle_date_comes_from_now(self, repo):
         custom_now = datetime(2026, 1, 1, 20, 0, tzinfo=SYDNEY)
@@ -258,24 +273,67 @@ class TestHandleInbound:
         assert repo.scores[0]["game"] == "mini_sudoku"
         assert repo.scores[0]["raw_score"] == 76
 
-    def test_help_text_lists_all_seven_games(self, repo):
+    def test_submission_stores_la_anchored_puzzle_date(self, repo):
+        # 4:45pm Sydney on 22 Apr 2026 AEST is still 21 Apr in LA — the
+        # puzzle_date should record 21 Apr, matching LinkedIn's day.
+        before_flip = datetime(2026, 4, 22, 16, 45, tzinfo=SYDNEY)
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #720\n1:05",
+            profile_name="Alice",
+            now=before_flip,
+        )
+        from datetime import date
+
+        assert repo.scores[0]["puzzle_date"] == date(2026, 4, 21)
+
+    def test_submission_after_la_flip_stores_new_la_day(self, repo):
+        # 5:15pm Sydney AEST on 22 Apr is past midnight LA PDT 22 Apr.
+        after_flip = datetime(2026, 4, 22, 17, 15, tzinfo=SYDNEY)
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #721\n1:05",
+            profile_name="Alice",
+            now=after_flip,
+        )
+        from datetime import date
+
+        assert repo.scores[0]["puzzle_date"] == date(2026, 4, 22)
+
+    def test_zip_407_today_rejected(self, repo):
+        # Belt-and-braces: the Zip #407 case David called out explicitly.
+        from app.puzzles import expected_puzzle_no
+
+        today = datetime(2026, 4, 22, 20, 0, tzinfo=SYDNEY)
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
-            body="",
+            body="Zip #407\n0:09",
+            profile_name="Alice",
+            now=today,
+            expected_puzzle_no=expected_puzzle_no,
+        )
+        assert reply is not None
+        assert "#407" in reply
+        assert "#400" in reply
+        assert len(repo.scores) == 0
+
+    def test_gameish_with_hash_but_unparseable_still_replies(self, repo):
+        # A message with both a game name AND a #N looks like a genuine
+        # upload attempt — we want the user to know it couldn't parse so
+        # they can fix their paste.
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #500 i think i got",
             profile_name="Alice",
             now=NOW,
         )
-        for name in (
-            "Queens",
-            "Tango",
-            "Pinpoint",
-            "Crossclimb",
-            "Zip",
-            "Patches",
-            "Mini Sudoku",
-        ):
-            assert name in reply
+        assert reply is not None
+        assert "couldn't parse" in reply.lower()
+        assert len(repo.unparsed) == 1
 
 
 # ---------------------------------------------------------------------------

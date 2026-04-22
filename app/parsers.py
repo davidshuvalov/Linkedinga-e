@@ -247,15 +247,28 @@ _PARSERS: Dict[str, Callable[[str], Optional[ParsedScore]]] = {
 
 
 def looks_like_score(text: str) -> bool:
-    """Rough heuristic: does this look like any LinkedIn game share?
+    """Rough heuristic: does this look like an attempted LinkedIn game share?
 
     Used by the webhook to distinguish score-ish messages that fail to parse
-    (which should be logged to ``unparsed_messages``) from unrelated chatter.
+    (which should be replied to + logged to ``unparsed_messages``) from
+    unrelated chatter (which should be silently ignored so the bot doesn't
+    spam a group chat).
+
+    We treat a message as score-like only when it carries something a
+    parser would genuinely try to match:
+
+    - a LinkedIn game share URL (``lnkd.in/``), **or**
+    - a game name *and* an ``#<number>`` puzzle marker.
+
+    A bare mention of a game name (e.g. "Queens is fun today") is **not**
+    enough — that's normal chat and should pass silently.
     """
     lower = text.lower()
     if "lnkd.in/" in lower:
         return True
-    return any(re.search(p, lower) for p in _GAME_NAME_PATTERNS.values())
+    has_game_name = any(re.search(p, lower) for p in _GAME_NAME_PATTERNS.values())
+    has_puzzle_hash = re.search(r"#\s*\d+", lower) is not None
+    return has_game_name and has_puzzle_hash
 
 
 def parse_any(text: str) -> Optional[ParsedScore]:
