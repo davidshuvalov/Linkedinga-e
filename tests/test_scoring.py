@@ -256,24 +256,105 @@ class TestGameLeaders:
 
 class TestPrizeAllocations:
     def test_empty(self):
-        assert prize_allocations([]) == Prizes(None, None, None, None)
+        assert prize_allocations([]) == Prizes(None, None, None, None, None)
 
     def test_distinct_winners(self):
         lb = [
-            PlayerWeeklyStats(1, "Alice", 25, 3, 2),
-            PlayerWeeklyStats(2, "Bob", 20, 5, 3),
-            PlayerWeeklyStats(3, "Charlie", 15, 2, 2),
-            PlayerWeeklyStats(4, "Dee", 3, 1, 1),
+            # (id, name, points, distinct_games, days_played, first_places, submissions)
+            PlayerWeeklyStats(1, "Alice", 25, 3, 2, first_places=2, submissions=6),
+            PlayerWeeklyStats(2, "Bob", 20, 5, 3, first_places=1, submissions=12),
+            PlayerWeeklyStats(3, "Charlie", 15, 2, 2, first_places=3, submissions=5),
+            PlayerWeeklyStats(4, "Dee", 3, 1, 1, first_places=0, submissions=2),
         ]
         p = prize_allocations(lb)
-        assert p.champion.player_name == "Alice"
-        assert p.all_rounder.player_name == "Bob"
-        assert p.streak_king.player_name == "Bob"
-        assert p.wooden_spoon.player_name == "Dee"
+        assert p.champion.player_name == "Alice"          # most points
+        assert p.all_rounder.player_name == "Bob"         # most distinct games
+        assert p.most_firsts.player_name == "Charlie"     # most 1st-place finishes
+        assert p.best_average.player_name == "Alice"      # 25/6 ≈ 4.17 > 20/12 ≈ 1.67 > 15/5 = 3.0
+        assert p.wooden_spoon.player_name == "Dee"        # fewest points
 
     def test_all_rounder_tiebreaks_on_points(self):
         lb = [
-            PlayerWeeklyStats(1, "Alice", 10, 3, 2),
-            PlayerWeeklyStats(2, "Bob", 15, 3, 2),
+            PlayerWeeklyStats(1, "Alice", 10, 3, 2, first_places=1, submissions=5),
+            PlayerWeeklyStats(2, "Bob", 15, 3, 2, first_places=1, submissions=5),
         ]
         assert prize_allocations(lb).all_rounder.player_name == "Bob"
+
+    def test_most_firsts_tiebreaks_on_points(self):
+        lb = [
+            PlayerWeeklyStats(1, "Alice", 10, 3, 2, first_places=4, submissions=5),
+            PlayerWeeklyStats(2, "Bob", 20, 3, 2, first_places=4, submissions=5),
+        ]
+        assert prize_allocations(lb).most_firsts.player_name == "Bob"
+
+    def test_best_average_requires_min_submissions(self):
+        # Alice has the highest average but only 4 submissions — under
+        # the MIN_SUBMISSIONS_FOR_AVERAGE_PRIZE=5 threshold she's
+        # ineligible. Bob (5 submissions, lower avg) wins instead.
+        lb = [
+            PlayerWeeklyStats(1, "Alice", 20, 2, 2, first_places=4, submissions=4),
+            PlayerWeeklyStats(2, "Bob", 15, 3, 3, first_places=2, submissions=5),
+        ]
+        p = prize_allocations(lb)
+        assert p.best_average.player_name == "Bob"
+        assert abs(p.best_average.average_points - 3.0) < 1e-9
+
+    def test_best_average_returns_none_when_nobody_eligible(self):
+        # Everyone played fewer than 5 rounds — no "Best average" winner
+        # makes sense; the formatter will just skip the line.
+        lb = [
+            PlayerWeeklyStats(1, "Alice", 10, 2, 2, first_places=2, submissions=3),
+            PlayerWeeklyStats(2, "Bob", 8, 2, 2, first_places=1, submissions=2),
+        ]
+        p = prize_allocations(lb)
+        assert p.best_average is None
+
+    def test_best_average_prefers_higher_avg_even_with_fewer_points(self):
+        # Alice: 30/6 = 5.0 avg (perfect). Bob: 40/10 = 4.0. Both eligible.
+        # Best average goes to Alice even though Bob has more points.
+        lb = [
+            PlayerWeeklyStats(1, "Alice", 30, 3, 3, first_places=6, submissions=6),
+            PlayerWeeklyStats(2, "Bob", 40, 5, 5, first_places=3, submissions=10),
+        ]
+        p = prize_allocations(lb)
+        assert p.best_average.player_name == "Alice"
+
+
+class TestWeeklyLeaderboardFirstPlacesAndSubmissions:
+    """``weekly_leaderboard`` now carries first_places + submissions.
+    Checks the counting rules against a small hand-crafted dataset.
+    """
+
+    def test_counts_submissions_per_player(self):
+        from datetime import date
+        from app.db import ScoreRow
+        from app.scoring import weekly_leaderboard
+
+        scores = [
+            ScoreRow(1, "Alice", "queens", 1, date(2026, 4, 13), 30),
+            ScoreRow(1, "Alice", "tango",  1, date(2026, 4, 13), 40),
+            ScoreRow(2, "Bob",   "queens", 1, date(2026, 4, 13), 35),
+        ]
+        lb = {p.player_id: p for p in weekly_leaderboard(scores)}
+        assert lb[1].submissions == 2
+        assert lb[2].submissions == 1
+
+    def test_counts_first_places_including_ties(self):
+        from datetime import date
+        from app.db import ScoreRow
+        from app.scoring import weekly_leaderboard
+
+        scores = [
+            # Alice wins Queens outright
+            ScoreRow(1, "Alice", "queens", 1, date(2026, 4, 13), 30),
+            ScoreRow(2, "Bob",   "queens", 1, date(2026, 4, 13), 45),
+            # Alice and Bob tie for 1st on Tango
+            ScoreRow(1, "Alice", "tango",  1, date(2026, 4, 13), 40),
+            ScoreRow(2, "Bob",   "tango",  1, date(2026, 4, 13), 40),
+            # Bob wins Zip outright
+            ScoreRow(2, "Bob",   "zip",    1, date(2026, 4, 13), 10),
+            ScoreRow(1, "Alice", "zip",    1, date(2026, 4, 13), 12),
+        ]
+        lb = {p.player_id: p for p in weekly_leaderboard(scores)}
+        assert lb[1].first_places == 2   # Queens + tied Tango
+        assert lb[2].first_places == 2   # tied Tango + Zip

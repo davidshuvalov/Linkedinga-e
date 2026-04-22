@@ -193,10 +193,17 @@ def weekly_wrap(
             f"  All-rounder: {prizes.all_rounder.player_name} "
             f"({_games_word(prizes.all_rounder.distinct_games)})"
         )
-    if prizes.streak_king is not None:
+    if prizes.most_firsts is not None:
+        firsts = prizes.most_firsts.first_places
+        firsts_word = "1 first" if firsts == 1 else f"{firsts} firsts"
         lines.append(
-            f"  Streak king: {prizes.streak_king.player_name} "
-            f"({_days_word(prizes.streak_king.days_played)})"
+            f"  Most firsts: {prizes.most_firsts.player_name} ({firsts_word})"
+        )
+    if prizes.best_average is not None:
+        ba = prizes.best_average
+        lines.append(
+            f"  Best average: {ba.player_name} "
+            f"(avg {ba.average_points:.1f} pts/game, {ba.submissions} submissions)"
         )
     if prizes.wooden_spoon is not None:
         lines.append(

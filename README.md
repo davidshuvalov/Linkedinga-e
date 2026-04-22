@@ -198,7 +198,13 @@ submitted.
 
 - **Champion** — most total points.
 - **All-rounder** — most distinct games played (tiebreak: points).
-- **Streak king** — most days played (tiebreak: points).
+- **Most firsts** — most 1st-place finishes across the week. A player
+  tied for 1st with someone else gets credit alongside them (same
+  convention as the 5-point tie points).
+- **Best average** — highest points-per-submission, subject to a
+  minimum-submissions floor (`MIN_SUBMISSIONS_FOR_AVERAGE_PRIZE` in
+  `app/scoring.py`, default 5). Prevents someone winning on one lucky
+  round. If nobody clears the floor, the line is suppressed.
 - **Wooden spoon** — fewest points among participants.
 
 ## Build plan

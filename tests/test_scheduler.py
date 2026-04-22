@@ -103,7 +103,27 @@ class TestWeeklyWrap:
         out = weekly_wrap(MON, SUN, scores, ENABLED)
         assert "Leaderboard:" in out
         assert "Champion" in out
+        assert "All-rounder" in out
+        assert "Most firsts" in out
         assert "Wooden spoon" in out
+        # 4 submissions total, under the 5-submission threshold, so
+        # nobody qualifies for Best average and the line is suppressed.
+        assert "Best average" not in out
+
+    def test_best_average_line_when_someone_qualifies(self):
+        # Give Alice 5 submissions so she clears the threshold.
+        scores = [
+            _row(1, "Alice", "queens", 714, 10, TUE),
+            _row(2, "Bob",   "queens", 714, 20, TUE),
+            _row(1, "Alice", "tango",  554, 20, TUE),
+            _row(1, "Alice", "zip",    393, 10, TUE),
+            _row(1, "Alice", "patches", 28, 15, TUE),
+            _row(1, "Alice", "mini_sudoku", 246, 60, TUE),
+        ]
+        out = weekly_wrap(MON, SUN, scores, ENABLED)
+        assert "Best average" in out
+        assert "Alice" in out
+        assert "5 submissions" in out
 
     def test_game_winners_section(self):
         scores = [
