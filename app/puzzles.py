@@ -28,15 +28,17 @@ LA = ZoneInfo("America/Los_Angeles")
 
 
 # (reference LA date, puzzle number live on that date).
-# Captured 2026-04-22 PT.
+# Captured 2026-04-22 PT. Bumped +1 across the board on confirmation
+# that the initial values were off by one day — LinkedIn's actual
+# rollover had already happened once by the time we pinned.
 PUZZLE_EPOCH: Dict[str, Tuple[date, int]] = {
-    "queens":      (date(2026, 4, 22), 721),
-    "tango":       (date(2026, 4, 22), 561),
-    "pinpoint":    (date(2026, 4, 22), 721),
-    "crossclimb":  (date(2026, 4, 22), 721),
-    "zip":         (date(2026, 4, 22), 400),
-    "patches":     (date(2026, 4, 22), 35),
-    "mini_sudoku": (date(2026, 4, 22), 253),
+    "queens":      (date(2026, 4, 22), 722),
+    "tango":       (date(2026, 4, 22), 562),
+    "pinpoint":    (date(2026, 4, 22), 722),
+    "crossclimb":  (date(2026, 4, 22), 722),
+    "zip":         (date(2026, 4, 22), 401),
+    "patches":     (date(2026, 4, 22), 36),
+    "mini_sudoku": (date(2026, 4, 22), 254),
 }
 
 
