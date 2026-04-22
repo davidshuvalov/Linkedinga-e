@@ -10,10 +10,10 @@ Routes:
 
 Scheduled jobs (APScheduler, ``America/Los_Angeles``):
 
-- **Daily recap** — every day at 00:00 LA (the LinkedIn puzzle flip).
-  Recaps the LA day that just closed.
-- **Weekly wrap** — every Monday at 00:01 LA. Wraps the LA Mon–Sun
-  week whose Sunday just ended.
+- **Daily recap / weekly wrap** — every day at 00:00 LA (the LinkedIn
+  puzzle flip). Recaps the LA day that just closed. When that day is
+  a Sunday, the emitted message is the full weekly wrap instead of a
+  plain daily recap — see :func:`app.jobs.run_daily_recap`.
 
 Run locally::
 
@@ -92,20 +92,13 @@ def get_puzzle_validator() -> Optional[Callable[[str, datetime], int]]:
 
 
 def _setup_scheduler() -> None:
-    """Create and start a BackgroundScheduler with the daily recap and
-    weekly wrap cron triggers.
+    """Create and start a BackgroundScheduler with the single daily job.
 
-    Both jobs are scheduled in **LA time** so they fire exactly at the
-    LinkedIn puzzle rollover regardless of how US / Australian DST drift
-    changes the Sydney wall-clock time through the year. ``zoneinfo``
-    handles the transitions.
-
-    - Daily recap: **00:00 America/Los_Angeles, every day** — the moment
-      LinkedIn serves the next puzzle. Recaps the LA day that just
-      closed (yesterday LA).
-    - Weekly wrap: **00:01 America/Los_Angeles, Monday** — one minute
-      after the Monday daily so the posts land in the right order.
-      Wraps the Mon–Sun LA week that just ended.
+    One cron, fires at **00:00 America/Los_Angeles every day** — the
+    LinkedIn puzzle rollover. :func:`app.jobs.run_daily_recap` decides
+    which format to emit: a regular daily recap on Mon–Sat (LA), or
+    the full weekly wrap when the closed day is a Sunday (which lands
+    Monday afternoon Sydney time, just before the new puzzle drops).
 
     Runs inside the FastAPI lifespan so the scheduler starts after the
     app boots and shuts down when the app stops.
@@ -113,7 +106,7 @@ def _setup_scheduler() -> None:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
 
-    from .jobs import run_daily_recap, run_weekly_wrap
+    from .jobs import run_daily_recap
 
     settings = load_settings()
     scheduler_tz = "America/Los_Angeles"
@@ -123,27 +116,17 @@ def _setup_scheduler() -> None:
     def _daily():
         run_daily_recap(get_repository(), settings)
 
-    def _weekly():
-        run_weekly_wrap(get_repository(), settings)
-
     scheduler.add_job(
         _daily,
         CronTrigger(hour=0, minute=0, timezone=scheduler_tz),
         id="daily_recap",
         replace_existing=True,
     )
-    scheduler.add_job(
-        _weekly,
-        CronTrigger(day_of_week="mon", hour=0, minute=1, timezone=scheduler_tz),
-        id="weekly_wrap",
-        replace_existing=True,
-    )
 
     scheduler.start()
     logger.info(
-        "Scheduler started: daily_recap at 00:00 %s (every day), "
-        "weekly_wrap at Mon 00:01 %s",
-        scheduler_tz,
+        "Scheduler started: daily_recap at 00:00 %s every day "
+        "(Sunday fires the weekly wrap format)",
         scheduler_tz,
     )
     return scheduler
@@ -221,6 +204,7 @@ async def webhook(
             now=datetime.now(settings.tz),
             enabled_games=settings.enabled_games,
             expected_puzzle_no=puzzle_validator,
+            settings=settings,
         )
     except Exception:
         logger.exception(

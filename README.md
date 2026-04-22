@@ -249,23 +249,25 @@ them; All-rounder is visible as the `(N games)` suffix on each row.
 
 ### Scheduled jobs
 
-APScheduler runs inside the same process as the web server. Both jobs
-are scheduled in **LA time** so they fire at the exact moment LinkedIn
-rolls the next puzzle, regardless of US / Australian DST drift:
+A single APScheduler cron runs inside the same process as the web
+server, fired at the **LinkedIn puzzle rollover** so the message
+always lands moments before the next day's puzzle drops:
 
-| Job          | Schedule                              | Timezone             |
-| ------------ | ------------------------------------- | -------------------- |
-| Daily recap  | Every day at 00:00                    | America/Los_Angeles  |
-| Weekly wrap  | Every Monday at 00:01                 | America/Los_Angeles  |
+| Job                  | Schedule                | Timezone             |
+| -------------------- | ----------------------- | -------------------- |
+| Daily recap / wrap   | Every day at 00:00      | America/Los_Angeles  |
 
-The daily job recaps the LA day that just closed (yesterday LA). The
-weekly job, firing one minute after the Monday daily, wraps the LA
-Mon–Sun week whose Sunday just ended.
+The job recaps the LA day that just closed. **On Mon–Sat (LA)** that's
+the regular daily recap (per-game rankings + running "Week so far"
+leaderboard). **On Sunday (LA)** — which lands Monday afternoon
+Sydney time — it instead emits the full **weekly wrap** (Sunday's
+per-game rankings + final week totals + per-game weekly winners +
+three prizes) so the entire end-of-week roundup arrives in one
+forwardable message.
 
 In Sydney that means:
 
-- Apr–Oct (AEST + PDT): ~**5pm Sydney** — daily fires at 5:00pm, weekly
-  at 5:01pm Monday.
+- Apr–Oct (AEST + PDT): ~**5pm Sydney every day**.
 - Oct–Nov (AEDT + PDT): ~**6pm Sydney**.
 - Nov–Apr (AEDT + PST): ~**7pm Sydney**.
 
@@ -331,14 +333,17 @@ drill:
 
 ## Bot commands
 
-Players can DM the bot (or send in the group) with these keywords:
+Players can DM the bot (case-insensitive) with these keywords:
 
-| Command      | Response                                          |
-| ------------ | ------------------------------------------------- |
-| `stats`      | Your all-time per-game stats and personal bests   |
-| `unparsed`   | Last 10 unparsed messages (admin debugging)       |
+| Command            | Response                                                                |
+| ------------------ | ----------------------------------------------------------------------- |
+| `stats`            | Your all-time per-game stats and personal bests                         |
+| `recap` / `today`  | Daily recap for the current in-progress LA day — per-game rankings and the running "Week so far" leaderboard. Lets you pull the "where are we up to" view from your phone, e.g. midday once everyone has played. |
+| `wrap` / `week`    | Weekly wrap for the current in-progress LA week — final-day per-game rankings, week totals, per-game weekly winners, and the three prizes (partial data shown if not yet end-of-week). |
+| `unparsed`         | Last 10 unparsed messages (admin debugging)                             |
 
-Any other non-score message gets the help text explaining how to submit.
+Any other non-score message is **silent** (no reply) so the bot doesn't
+spam the group with help text.
 
 ## Share-text format regression fixtures
 

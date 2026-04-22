@@ -102,7 +102,10 @@ def cmd_recap(args: argparse.Namespace) -> int:
     repo = _get_repo_maybe_seeded(args)
     settings = load_settings()
     target = date.fromisoformat(args.date) if args.date else date.today()
-    scores = repo.list_scores(date_from=target, date_to=target)
+    # daily_recap now takes the WHOLE week's scores so it can render the
+    # running "Week so far" leaderboard at the bottom.
+    monday, sunday = week_bounds(target)
+    scores = repo.list_scores(date_from=monday, date_to=sunday)
     sys.stdout.write(daily_recap(target, scores, settings.enabled_games))
     return 0
 

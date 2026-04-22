@@ -19,6 +19,11 @@ Reply / silence matrix:
 Commands (case-insensitive):
 - ``stats`` — reply with the sender's all-time per-game stats.
 - ``unparsed`` — reply with the last 10 unparsed messages (admin debug).
+- ``recap`` / ``today`` — render the daily recap for the current
+  in-progress LA day (partial if midday). Lets a user pull the
+  "where are we up to" view from their phone.
+- ``wrap`` / ``week`` — render the weekly wrap for the current
+  in-progress LA week.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Callable, Dict, FrozenSet, List, Optional, Set
 
+from .config import Settings
 from .db import Repository, ScoreRow
 from .parsers import GAMES, looks_like_score, parse_any
 from .puzzles import la_date
@@ -138,6 +144,39 @@ def _handle_unparsed(repo: Repository) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _handle_recap(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+) -> str:
+    """On-demand daily recap for the current in-progress LA day."""
+    if settings is None:
+        return "Recap isn't available in this context."
+    # Lazy import to avoid a circular dep (jobs imports scheduler which
+    # imports scoring which imports db — none of that touches webhook,
+    # but the webhook module is imported early by main.py).
+    from .jobs import render_daily
+
+    target_day = la_date(now)
+    body, _ = render_daily(repo, settings, target_day)
+    return body
+
+
+def _handle_wrap(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+) -> str:
+    """On-demand weekly wrap for the current in-progress LA week."""
+    if settings is None:
+        return "Wrap isn't available in this context."
+    from .jobs import render_wrap
+
+    reference_day = la_date(now)
+    body, _ = render_wrap(repo, settings, reference_day)
+    return body
+
+
 def handle_inbound(
     repo: Repository,
     *,
@@ -147,6 +186,7 @@ def handle_inbound(
     now: datetime,
     enabled_games: FrozenSet[str] = frozenset(GAMES),
     expected_puzzle_no: Optional[Callable[[str, datetime], int]] = None,
+    settings: Optional[Settings] = None,
 ) -> Optional[str]:
     """Process an inbound WhatsApp message.
 
@@ -161,6 +201,10 @@ def handle_inbound(
     a helpful message explaining the LA-midnight rollover. Passing
     ``None`` (the default) skips validation — used by unit tests so they
     can exercise the handler with arbitrary puzzle numbers.
+
+    ``settings`` is required for the ``recap`` / ``wrap`` commands
+    (they need the ``enabled_games`` frozenset + tz for rendering).
+    When ``None``, those commands reply with a short explanation.
     """
     body_stripped = (body or "").strip()
     if not body_stripped:
@@ -172,6 +216,10 @@ def handle_inbound(
         return _handle_stats(repo, from_, profile_name)
     if lower == "unparsed":
         return _handle_unparsed(repo)
+    if lower in ("recap", "today"):
+        return _handle_recap(repo, settings, now)
+    if lower in ("wrap", "week"):
+        return _handle_wrap(repo, settings, now)
 
     # Try to parse as a game share
     parsed = parse_any(body_stripped)

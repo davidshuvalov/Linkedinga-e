@@ -1,25 +1,33 @@
 """Scheduled-job orchestration.
 
-Each function is the top-level callable wired into APScheduler by
-:func:`app.main._setup_scheduler`. Pattern: fetch from repo → format via
-``app.scheduler`` → deliver via ``app.sender``.
+The single scheduled job is :func:`run_daily_recap`, wired to the
+00:00 America/Los_Angeles cron in :func:`app.main._setup_scheduler`.
+It fires at the LinkedIn puzzle rollover — the moment the previous
+day's puzzles expire — and:
 
-Timing: both jobs fire at LA midnight (the LinkedIn puzzle rollover),
-so "today" and "this week" are anchored in LA time. The daily job at
-00:00 LA recaps the LA day that just closed (yesterday LA); the weekly
-job at Mon 00:01 LA wraps the LA Mon–Sun week that just ended.
+- On Mon–Sat (LA), emits the daily recap: per-game rankings for the
+  day that just closed, plus a running "Week so far" leaderboard.
+- On Sun (LA) — which in Sydney is Monday afternoon — emits the
+  weekly wrap: Sunday's per-game rankings, final week totals, per-game
+  weekly winners, and the three prizes.
 
-Dependencies are injected explicitly so the functions can be tested
-without touching Twilio or Supabase.
+Both formats are produced by :mod:`app.scheduler` (pure formatters).
+This module just handles the I/O: figure out the date window, fetch
+scores from the repository, call the formatter, and send via Twilio.
+
+Same entrypoint also powers the on-demand ``recap`` and ``wrap``
+commands the webhook exposes — see :func:`render_daily` /
+:func:`render_wrap`.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from typing import List, Optional, Tuple
 
 from .config import Settings
-from .db import Repository
+from .db import Repository, ScoreRow
 from .puzzles import la_date
 from .scheduler import daily_recap, weekly_wrap
 from .sender import send_recap
@@ -27,60 +35,89 @@ from .sender import send_recap
 logger = logging.getLogger(__name__)
 
 
-def run_daily_recap(
+def _week_bounds_for(day: date) -> Tuple[date, date]:
+    """Return the Mon–Sun window that contains ``day`` (weekday 0 = Mon)."""
+    monday = day - timedelta(days=day.weekday())
+    sunday = monday + timedelta(days=6)
+    return monday, sunday
+
+
+def _is_sunday(day: date) -> bool:
+    return day.weekday() == 6
+
+
+def render_daily(
     repo: Repository,
     settings: Settings,
-    *,
-    now: datetime | None = None,
-) -> str:
-    """Fetch scores for the LA day that just closed, format, and send.
+    target_day: date,
+) -> Tuple[str, List[str]]:
+    """Build the daily-recap body + DM target list for ``target_day``.
 
-    Called by the cron at 00:00 LA. At that moment the new puzzle is
-    dropping; "today" in LA is the new day, so we recap **yesterday in
-    LA** — which is the day whose puzzles just expired.
-
-    Returns the formatted body (useful for testing / logging).
+    Returns ``(body, dm_targets)``. The body is either a daily recap
+    (Mon–Sat LA) or a weekly wrap (Sun LA) — the logic lives here so
+    both the scheduled job and the on-demand ``recap`` command pick up
+    the same shape automatically.
     """
-    now = now or datetime.now(settings.tz)
-    # Day that just closed = yesterday in LA time.
-    closed_day = la_date(now) - timedelta(days=1)
-    logger.info("Running daily recap for LA day %s", closed_day)
+    monday, sunday = _week_bounds_for(target_day)
+    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
 
-    scores = repo.list_scores(date_from=closed_day, date_to=closed_day)
-    body = daily_recap(closed_day, scores, enabled_games=settings.enabled_games)
-
-    dm_targets = repo.list_active_whatsapp_ids(
-        date_from=closed_day, date_to=closed_day
-    )
-    send_recap(settings, body, dm_targets=dm_targets)
-    return body
-
-
-def run_weekly_wrap(
-    repo: Repository,
-    settings: Settings,
-    *,
-    now: datetime | None = None,
-) -> str:
-    """Fetch scores for the LA Mon–Sun week that just ended, format, and send.
-
-    Called by the cron at Monday 00:01 LA. The week we're closing out
-    is the Mon–Sun whose Sunday just ended — i.e. the 7 LA days up to
-    (and including) yesterday LA.
-
-    Returns the formatted body (useful for testing / logging).
-    """
-    now = now or datetime.now(settings.tz)
-    # Sunday LA that just ended.
-    sunday = la_date(now) - timedelta(days=1)
-    monday = sunday - timedelta(days=sunday.weekday())
-    logger.info("Running weekly wrap for LA week %s – %s", monday, sunday)
-
-    scores = repo.list_scores(date_from=monday, date_to=sunday)
-    body = weekly_wrap(monday, sunday, scores, enabled_games=settings.enabled_games)
+    if _is_sunday(target_day):
+        body = weekly_wrap(monday, sunday, week_scores,
+                           enabled_games=settings.enabled_games)
+    else:
+        body = daily_recap(target_day, week_scores,
+                           enabled_games=settings.enabled_games)
 
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday
     )
+    return body, dm_targets
+
+
+def render_wrap(
+    repo: Repository,
+    settings: Settings,
+    reference_day: date,
+) -> Tuple[str, List[str]]:
+    """Build the weekly-wrap body regardless of which day ``reference_day`` is.
+
+    Used by the on-demand ``wrap`` command so a midweek user can pull
+    the full wrap format (including partial per-game winners + prize
+    snapshots) for the current in-progress week. The scheduled
+    Monday-morning-LA job goes through :func:`render_daily` instead;
+    that route auto-selects the weekly format when the closed day is
+    a Sunday.
+    """
+    monday, sunday = _week_bounds_for(reference_day)
+    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    body = weekly_wrap(monday, sunday, week_scores,
+                       enabled_games=settings.enabled_games)
+    dm_targets = repo.list_active_whatsapp_ids(
+        date_from=monday, date_to=sunday
+    )
+    return body, dm_targets
+
+
+def run_daily_recap(
+    repo: Repository,
+    settings: Settings,
+    *,
+    now: Optional[datetime] = None,
+) -> str:
+    """Cron entry point — fire the daily recap (or weekly wrap on Sun).
+
+    Called by the APScheduler job at 00:00 America/Los_Angeles. At that
+    instant the new puzzle is dropping; the "target day" to recap is
+    the LA day that just closed (``la_date(now) - 1``).
+    """
+    now = now or datetime.now(settings.tz)
+    target_day = la_date(now) - timedelta(days=1)
+    logger.info(
+        "Running daily recap for LA day %s (sunday=%s)",
+        target_day,
+        _is_sunday(target_day),
+    )
+
+    body, dm_targets = render_daily(repo, settings, target_day)
     send_recap(settings, body, dm_targets=dm_targets)
     return body

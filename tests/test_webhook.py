@@ -444,3 +444,118 @@ class TestUnparsedCommand:
             now=NOW,
         )
         assert "No unparsed messages" in reply
+
+
+# ---------------------------------------------------------------------------
+# /recap and /wrap on-demand commands
+# ---------------------------------------------------------------------------
+
+
+def _settings_with_default_games():
+    """Settings with a real enabled_games set (needed by recap/wrap)."""
+    from app.config import Settings
+    return Settings(
+        twilio_account_sid="",
+        twilio_auth_token="",
+        twilio_whatsapp_from="",
+        twilio_recap_to="",
+        supabase_url="",
+        supabase_key="",
+        timezone_name="Australia/Sydney",
+        enabled_games=frozenset(
+            {"queens", "tango", "zip", "patches", "mini_sudoku"}
+        ),
+    )
+
+
+class TestRecapCommand:
+    def test_recap_with_no_scores_yet(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="recap",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Daily recap" in reply
+        assert "No scores yet" in reply
+
+    def test_recap_includes_week_so_far(self, repo):
+        # Seed two scores on the LA day matching NOW.
+        from app.puzzles import la_date
+
+        today_la = la_date(NOW)
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=714,
+            puzzle_date=today_la, raw_score=10,
+            share_text="Queens #714 0:10",
+        )
+        repo.insert_score(
+            player_id=2, game="queens", puzzle_no=714,
+            puzzle_date=today_la, raw_score=20,
+            share_text="Queens #714 0:20",
+        )
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="recap",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Queens #714" in reply
+        assert "Week so far:" in reply
+        assert "1. Alice" in reply
+
+    def test_today_is_alias_for_recap(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="today",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Daily recap" in reply
+
+    def test_recap_case_insensitive(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="RECAP",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Daily recap" in reply
+
+
+class TestWrapCommand:
+    def test_wrap_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="wrap",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Weekly wrap" in reply
+        assert "No scores this week" in reply
+
+    def test_week_is_alias_for_wrap(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="week",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Weekly wrap" in reply

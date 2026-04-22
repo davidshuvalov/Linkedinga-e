@@ -47,7 +47,9 @@ class TestDailyRecap:
         assert "(5 pts)" in out
         assert "(4 pts)" in out
         assert "(3 pts)" in out
-        assert "Day totals:" in out
+        # "Day totals" was replaced by the cumulative "Week so far"
+        # leaderboard — same numbers but framed across the whole week.
+        assert "Week so far:" in out
 
     def test_day_totals_include_game_count(self):
         scores = [
@@ -81,6 +83,26 @@ class TestDailyRecap:
         out = daily_recap(TUE, scores, frozenset({"mini_sudoku"}))
         assert "Mini Sudoku #246" in out
         assert "1:16" in out
+
+    def test_week_so_far_aggregates_prior_days(self):
+        # daily_recap takes the WHOLE week's scores so the running
+        # total spans Monday-through-today, not just today. Tuesday
+        # recap should include Monday's points in "Week so far".
+        scores = [
+            _row(1, "Alice", "queens", 713, 10, MON),  # Mon win → 5 pts
+            _row(2, "Bob",   "queens", 713, 20, MON),  # Mon → 4 pts
+            _row(1, "Alice", "tango",  554, 20, TUE),  # Tue solo → no first/last
+            _row(2, "Bob",   "tango",  554, 30, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        # Tuesday's per-game shows (Tango).
+        assert "Tango #554" in out
+        # Cumulative leaderboard reflects Mon + Tue.
+        # Alice: 5 (Mon Queens) + 5 (Tue Tango win) = 10
+        # Bob:   4 (Mon Queens) + 4 (Tue Tango)     = 8
+        assert "Week so far:" in out
+        assert "1. Alice: 10 pts" in out
+        assert "2. Bob: 8 pts" in out
 
 
 # ---------------------------------------------------------------------------
@@ -166,3 +188,22 @@ class TestWeeklyWrap:
         out = weekly_wrap(MON, SUN, scores, ENABLED)
         assert "Bob" in out
         assert "Alice" not in out
+
+    def test_includes_sunday_per_game_section(self):
+        # The wrap is now a "super daily" — it shows the final day's
+        # per-game results in addition to the week totals + winners +
+        # prizes. Sunday Apr 19's Queens round should appear with
+        # ranked players.
+        scores = [
+            _row(1, "Alice", "queens", 713, 10, TUE),
+            _row(1, "Alice", "queens", 719, 30, SUN),
+            _row(2, "Bob",   "queens", 719, 35, SUN),
+        ]
+        out = weekly_wrap(MON, SUN, scores, ENABLED)
+        # Final-day per-game block should be present + dated.
+        assert "Sun 19 Apr" in out
+        assert "Queens #719" in out
+        # Week totals leaderboard also present.
+        assert "Week totals:" in out
+        # Per-game weekly winners section.
+        assert "Game winners:" in out
