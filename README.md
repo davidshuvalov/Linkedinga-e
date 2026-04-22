@@ -196,16 +196,23 @@ submitted.
 
 ## Weekly prize categories
 
-- **Champion** — most total points.
-- **All-rounder** — most distinct games played (tiebreak: points).
-- **Most firsts** — most 1st-place finishes across the week. A player
-  tied for 1st with someone else gets credit alongside them (same
-  convention as the 5-point tie points).
-- **Best average** — highest points-per-submission, subject to a
+The wrap shows a compact leaderboard (one line per player, sorted by
+total points) followed by three prizes. Champion / Wooden spoon were
+dropped because the top and bottom of the leaderboard already name
+them; All-rounder is visible as the `(N games)` suffix on each row.
+
+- **Most firsts** — most 1st-place finishes in **competitive rounds
+  (≥2 players)**. Tied-for-1st credits every tied player. Singleton
+  rounds (where only one person submitted a game) don't count — you
+  need someone to beat.
+- **Most lasts** — the flip side. Most last-place finishes in
+  competitive rounds. Ties at the bottom credit everyone tied.
+  Tiebreak goes to the player with *lower* total points, so being
+  weaker overall owns the title.
+- **Best average** — highest points-per-submission, with a
   minimum-submissions floor (`MIN_SUBMISSIONS_FOR_AVERAGE_PRIZE` in
   `app/scoring.py`, default 5). Prevents someone winning on one lucky
   round. If nobody clears the floor, the line is suppressed.
-- **Wooden spoon** — fewest points among participants.
 
 ## Build plan
 

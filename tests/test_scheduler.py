@@ -101,15 +101,16 @@ class TestWeeklyWrap:
             _row(2, "Bob", "tango", 554, 30, TUE),
         ]
         out = weekly_wrap(MON, SUN, scores, ENABLED)
-        # Weekly wrap is now just header + prize list — no detailed
-        # leaderboard or game-winners section (kept short so it forwards
-        # easily from the bot's DM into the group chat).
-        assert "Leaderboard:" not in out
-        assert "Game winners:" not in out
-        assert "Champion" in out
-        assert "All-rounder" in out
+        # Weekly wrap is: header + compact leaderboard + three prizes.
+        # Champion / Wooden spoon / All-rounder were removed — they're
+        # redundant with the leaderboard rows (top, bottom, "(N games)").
+        assert "1. Alice" in out                      # leaderboard top
+        assert "2. Bob" in out                        # leaderboard bottom
         assert "Most firsts" in out
-        assert "Wooden spoon" in out
+        assert "Most lasts" in out
+        assert "Champion" not in out
+        assert "Wooden spoon" not in out
+        assert "All-rounder" not in out
         # 4 submissions total, under the 5-submission threshold, so
         # nobody qualifies for Best average and the line is suppressed.
         assert "Best average" not in out
@@ -130,38 +131,31 @@ class TestWeeklyWrap:
         assert "5 submissions" in out
 
     def test_wrap_is_concise_enough_to_forward(self):
-        # The whole point of the trim: the wrap body stays short. 10
-        # lines is a loose upper bound (header + 5 prizes + blank line
-        # + trailing blank); keeps future drift honest.
-        scores = [
-            _row(1, "Alice", "queens", 714, 10, TUE),
-            _row(2, "Bob", "queens", 714, 20, TUE),
-            _row(1, "Alice", "tango", 554, 20, TUE),
-            _row(2, "Bob", "tango", 554, 30, TUE),
-        ]
+        # The whole point of keeping the format tight: the wrap stays
+        # short enough to forward from a 1:1 DM into the group as a
+        # single message. With 6 players and 3 prizes that's ~10
+        # non-empty lines. Cap at 15 to keep future drift honest.
+        scores = []
+        for i, name in enumerate(("Alice", "Bob", "Charlie", "Dee", "Evan", "Fiona"), start=1):
+            scores.append(_row(i, name, "queens", 714, 10 + i * 5, TUE))
         out = weekly_wrap(MON, SUN, scores, ENABLED)
-        # Count non-empty lines — should stay well under ~10.
         nonempty = [ln for ln in out.splitlines() if ln.strip()]
-        assert len(nonempty) <= 10, f"weekly wrap got long:\n{out}"
+        assert len(nonempty) <= 15, f"weekly wrap got long:\n{out}"
 
     def test_disabled_game_excluded_from_wrap(self):
-        # With only one enabled game and one player, Alice sweeps all
-        # the prizes (including Wooden spoon — she's the only one).
-        # The pinpoint row should be filtered out so it doesn't bleed
-        # into the prize totals.
+        # Pinpoint submission should be filtered out of the aggregation
+        # when pinpoint isn't in enabled_games. Alice's leaderboard
+        # line shows "(1 game)" — if pinpoint had leaked through it
+        # would say "(2 games)".
         scores = [
             _row(1, "Alice", "queens", 714, 10, TUE),
             _row(1, "Alice", "pinpoint", 714, 3, TUE),
         ]
         enabled_no_pinpoint = frozenset({"queens"})
         out = weekly_wrap(MON, SUN, scores, enabled_no_pinpoint)
-        # Pinpoint is filtered out of the aggregation. Even though
-        # "Queens" isn't rendered as a per-game winner any more (that
-        # section is gone), Alice's "1 game" in the All-rounder line
-        # proves pinpoint got excluded — two games enabled would have
-        # given "2 games".
         assert "Pinpoint" not in out
-        assert "All-rounder: Alice (1 game)" in out
+        assert "1. Alice" in out
+        assert "(1 game)" in out
 
     def test_scores_outside_week_filtered(self):
         prev_sun = date(2026, 4, 12)

@@ -134,11 +134,16 @@ def weekly_wrap(
 ) -> str:
     """Format a weekly wrap covering ``[week_start, week_end]`` inclusive.
 
-    The body is deliberately short — just a header and the five prizes —
-    so it fits on one phone screen and is easy to forward from the
-    bot's 1:1 DM into the friends' group chat. The full leaderboard
-    and per-game winners still exist on the :func:`weekly_leaderboard`
-    + :func:`game_leaders` API surface; they're just not rendered here.
+    Shape: compact leaderboard (one line per player, sorted by points)
+    followed by three prizes — Most firsts, Most lasts, Best average.
+    Champion and Wooden spoon are implicit in the leaderboard (top and
+    bottom rows), so we don't duplicate them as prizes. All-rounder
+    (most distinct games) is visible in the ``(N games)`` suffix on
+    each leaderboard line.
+
+    Kept intentionally short so the whole message fits on one phone
+    screen and is easy to forward from the bot's 1:1 DM into the
+    friends' group chat.
     """
     header = (
         f"Weekly wrap — "
@@ -159,32 +164,31 @@ def weekly_wrap(
 
     lines: List[str] = [header, ""]
 
-    if prizes.champion is not None:
+    for i, p in enumerate(lb, start=1):
         lines.append(
-            f"Champion: {prizes.champion.player_name} "
-            f"({_pts(prizes.champion.total_points)})"
+            f"{i}. {p.player_name}: {_pts(p.total_points)} "
+            f"({_games_word(p.distinct_games)})"
         )
-    if prizes.all_rounder is not None:
-        lines.append(
-            f"All-rounder: {prizes.all_rounder.player_name} "
-            f"({_games_word(prizes.all_rounder.distinct_games)})"
-        )
+
+    lines.append("")
+
     if prizes.most_firsts is not None:
         firsts = prizes.most_firsts.first_places
         firsts_word = "1 first" if firsts == 1 else f"{firsts} firsts"
         lines.append(
             f"Most firsts: {prizes.most_firsts.player_name} ({firsts_word})"
         )
+    if prizes.most_lasts is not None:
+        lasts = prizes.most_lasts.last_places
+        lasts_word = "1 last" if lasts == 1 else f"{lasts} lasts"
+        lines.append(
+            f"Most lasts: {prizes.most_lasts.player_name} ({lasts_word})"
+        )
     if prizes.best_average is not None:
         ba = prizes.best_average
         lines.append(
             f"Best average: {ba.player_name} "
             f"(avg {ba.average_points:.1f} pts/game, {ba.submissions} submissions)"
-        )
-    if prizes.wooden_spoon is not None:
-        lines.append(
-            f"Wooden spoon: {prizes.wooden_spoon.player_name} "
-            f"({_pts(prizes.wooden_spoon.total_points)})"
         )
 
     return "\n".join(lines).rstrip() + "\n"
