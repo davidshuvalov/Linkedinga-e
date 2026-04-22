@@ -57,3 +57,48 @@ class TestEmptyEnvVars:
         monkeypatch.setenv("APP_TIMEZONE", "America/New_York")
         settings = load_settings()
         assert settings.timezone_name == "America/New_York"
+
+
+class TestSupabaseUrlNormalization:
+    """Supabase PGRST125 ('Invalid path specified in request URL') is
+    overwhelmingly caused by a malformed SUPABASE_URL. Defensively normalize
+    so common copy-paste mistakes don't break every webhook call."""
+
+    def test_trailing_slash_is_stripped(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://xyz.supabase.co/")
+        monkeypatch.setenv("SUPABASE_KEY", "anon-key")
+        settings = load_settings()
+        assert settings.supabase_url == "https://xyz.supabase.co"
+
+    def test_rest_v1_suffix_is_stripped(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://xyz.supabase.co/rest/v1")
+        monkeypatch.setenv("SUPABASE_KEY", "anon-key")
+        settings = load_settings()
+        assert settings.supabase_url == "https://xyz.supabase.co"
+
+    def test_rest_v1_with_trailing_slash_is_stripped(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://xyz.supabase.co/rest/v1/")
+        monkeypatch.setenv("SUPABASE_KEY", "anon-key")
+        settings = load_settings()
+        assert settings.supabase_url == "https://xyz.supabase.co"
+
+    def test_whitespace_is_stripped(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "  https://xyz.supabase.co  \n")
+        monkeypatch.setenv("SUPABASE_KEY", "anon-key")
+        settings = load_settings()
+        assert settings.supabase_url == "https://xyz.supabase.co"
+
+    def test_clean_url_is_unchanged(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://xyz.supabase.co")
+        monkeypatch.setenv("SUPABASE_KEY", "anon-key")
+        settings = load_settings()
+        assert settings.supabase_url == "https://xyz.supabase.co"
+
+    def test_missing_scheme_logs_warning(self, monkeypatch, caplog):
+        monkeypatch.setenv("SUPABASE_URL", "xyz.supabase.co")
+        monkeypatch.setenv("SUPABASE_KEY", "anon-key")
+        with caplog.at_level("WARNING", logger="app.config"):
+            load_settings()
+        assert any(
+            "does not start with http" in record.message for record in caplog.records
+        )
