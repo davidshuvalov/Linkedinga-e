@@ -12,7 +12,7 @@ Commands (case-insensitive):
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, FrozenSet, List, Set
+from typing import Callable, Dict, FrozenSet, List, Optional, Set
 
 from .db import Repository, ScoreRow
 from .parsers import GAMES, looks_like_score, parse_any
@@ -131,8 +131,18 @@ def handle_inbound(
     profile_name: str,
     now: datetime,
     enabled_games: FrozenSet[str] = frozenset(GAMES),
+    expected_puzzle_no: Optional[Callable[[str, datetime], int]] = None,
 ) -> str:
-    """Process an inbound WhatsApp message. Returns the bot's reply text."""
+    """Process an inbound WhatsApp message. Returns the bot's reply text.
+
+    ``expected_puzzle_no``, if provided, is called as
+    ``expected_puzzle_no(game, now)`` and returns the puzzle number
+    LinkedIn is currently serving for that game. When the submitted
+    ``puzzle_no`` doesn't match, the handler rejects the submission with
+    a helpful message explaining the LA-midnight rollover. Passing
+    ``None`` (the default) skips validation — used by unit tests so they
+    can exercise the handler with arbitrary puzzle numbers.
+    """
     body_stripped = (body or "").strip()
     if not body_stripped:
         return _help_text()
@@ -156,6 +166,24 @@ def handle_inbound(
             )
         return _help_text()
 
+    pretty_game = _GAME_DISPLAY[parsed.game]
+
+    # Reject stale/future puzzle numbers. LinkedIn rolls puzzles at
+    # midnight US Pacific, so ``expected_puzzle_no`` uses LA time to pick
+    # today's live number regardless of where the submitter lives.
+    if expected_puzzle_no is not None:
+        expected = expected_puzzle_no(parsed.game, now)
+        if parsed.puzzle_no != expected:
+            if parsed.puzzle_no < expected:
+                when = "yesterday" if parsed.puzzle_no == expected - 1 else "an older day"
+            else:
+                when = "tomorrow" if parsed.puzzle_no == expected + 1 else "a future day"
+            return (
+                f"That's {pretty_game} #{parsed.puzzle_no} ({when}'s puzzle). "
+                f"Today's {pretty_game} is #{expected} — I can only record "
+                "today's scores. (LinkedIn resets at midnight US Pacific.)"
+            )
+
     display_name = (profile_name or "").strip() or from_
     player = repo.get_or_create_player(from_, display_name)
     puzzle_date = now.date()
@@ -169,7 +197,6 @@ def handle_inbound(
         share_text=parsed.share_text,
     )
 
-    pretty_game = _GAME_DISPLAY[parsed.game]
     pretty_new = _format_score(parsed.game, parsed.raw_score)
 
     if not inserted:

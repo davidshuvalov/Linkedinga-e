@@ -31,8 +31,11 @@ from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import Depends, FastAPI, Form, Response
 
+from typing import Callable, Optional
+
 from .config import Settings, load_settings
 from .db import InMemoryRepository, Repository, SupabaseRepository
+from .puzzles import expected_puzzle_no as _expected_puzzle_no
 from .webhook import handle_inbound
 
 logger = logging.getLogger(__name__)
@@ -67,6 +70,17 @@ def get_repository() -> Repository:
 def get_settings() -> Settings:
     """FastAPI dependency returning the current :class:`Settings`."""
     return load_settings()
+
+
+def get_puzzle_validator() -> Optional[Callable[[str, datetime], int]]:
+    """FastAPI dependency returning the puzzle-number validator.
+
+    Production wires in :func:`app.puzzles.expected_puzzle_no`, which
+    refuses any submission whose puzzle number isn't the one LinkedIn is
+    serving today. Tests that want arbitrary puzzle numbers override
+    this to return ``None`` via ``app.dependency_overrides``.
+    """
+    return _expected_puzzle_no
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +184,9 @@ async def webhook(
     profile_name: str = Form("", alias="ProfileName"),
     repo: Repository = Depends(get_repository),
     settings: Settings = Depends(get_settings),
+    puzzle_validator: Optional[Callable[[str, datetime], int]] = Depends(
+        get_puzzle_validator
+    ),
 ) -> Response:
     # Any exception from handle_inbound (Supabase outage, misconfigured
     # tables, bad regex input, etc.) must NOT bubble up as a 500 — Twilio
@@ -184,6 +201,7 @@ async def webhook(
             profile_name=profile_name,
             now=datetime.now(settings.tz),
             enabled_games=settings.enabled_games,
+            expected_puzzle_no=puzzle_validator,
         )
     except Exception:
         logger.exception(
