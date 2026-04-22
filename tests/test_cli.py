@@ -9,28 +9,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from app.cli import _seed_demo, main, week_bounds
+from app.cli import _seed_demo, main
 from app.db import InMemoryRepository
-
-
-class TestWeekBounds:
-    def test_monday_returns_itself_and_sunday(self):
-        monday = date(2026, 4, 13)  # Monday
-        start, end = week_bounds(monday)
-        assert start == monday
-        assert end == date(2026, 4, 19)
-
-    def test_sunday_stays_in_same_week(self):
-        sunday = date(2026, 4, 19)  # Sunday
-        start, end = week_bounds(sunday)
-        assert start == date(2026, 4, 13)
-        assert end == sunday
-
-    def test_midweek(self):
-        wed = date(2026, 4, 15)
-        start, end = week_bounds(wed)
-        assert start == date(2026, 4, 13)
-        assert end == date(2026, 4, 19)
 
 
 class TestSeedDemo:

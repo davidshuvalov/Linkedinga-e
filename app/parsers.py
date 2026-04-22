@@ -33,6 +33,50 @@ GAMES = (
     "mini_sudoku",
 )
 
+# Single source of truth for how each game name is rendered in user-facing
+# messages (recaps, stats, rejection replies). Keep here alongside
+# :data:`GAMES` so there's one canonical list of games + display names.
+GAME_DISPLAY = {
+    "queens": "Queens",
+    "tango": "Tango",
+    "pinpoint": "Pinpoint",
+    "crossclimb": "Crossclimb",
+    "zip": "Zip",
+    "patches": "Patches",
+    "mini_sudoku": "Mini Sudoku",
+}
+
+# Preferred order for rendering per-game sections in recaps and stats.
+# Intentionally different from :data:`GAMES` (which is the parser dispatch
+# order): puts the time-based games first, then pinpoint, then the newer
+# games at the end so the recap reads predictably.
+GAME_DISPLAY_ORDER = (
+    "queens",
+    "tango",
+    "crossclimb",
+    "zip",
+    "pinpoint",
+    "patches",
+    "mini_sudoku",
+)
+
+
+def format_raw_score(game: str, raw: int) -> str:
+    """Render a stored ``raw_score`` as the human string a user would see.
+
+    - Pinpoint scores are guess counts (1–5): "``N guess``" or
+      "``N guesses``".
+    - Every other game stores seconds: "``M:SS``".
+
+    Shared between the webhook reply builder and the recap/wrap
+    formatters so both surfaces emit identical strings.
+    """
+    if game == "pinpoint":
+        noun = "guess" if raw == 1 else "guesses"
+        return f"{raw} {noun}"
+    minutes, seconds = divmod(raw, 60)
+    return f"{minutes}:{seconds:02d}"
+
 # How to locate each game's name inside free-text. Single-word games use a
 # plain ``\b``-bounded match; ``mini_sudoku`` has a space in the display
 # name so we use ``\s+`` between the tokens.
@@ -247,15 +291,28 @@ _PARSERS: Dict[str, Callable[[str], Optional[ParsedScore]]] = {
 
 
 def looks_like_score(text: str) -> bool:
-    """Rough heuristic: does this look like any LinkedIn game share?
+    """Rough heuristic: does this look like an attempted LinkedIn game share?
 
     Used by the webhook to distinguish score-ish messages that fail to parse
-    (which should be logged to ``unparsed_messages``) from unrelated chatter.
+    (which should be replied to + logged to ``unparsed_messages``) from
+    unrelated chatter (which should be silently ignored so the bot doesn't
+    spam a group chat).
+
+    We treat a message as score-like only when it carries something a
+    parser would genuinely try to match:
+
+    - a LinkedIn game share URL (``lnkd.in/``), **or**
+    - a game name *and* an ``#<number>`` puzzle marker.
+
+    A bare mention of a game name (e.g. "Queens is fun today") is **not**
+    enough — that's normal chat and should pass silently.
     """
     lower = text.lower()
     if "lnkd.in/" in lower:
         return True
-    return any(re.search(p, lower) for p in _GAME_NAME_PATTERNS.values())
+    has_game_name = any(re.search(p, lower) for p in _GAME_NAME_PATTERNS.values())
+    has_puzzle_hash = re.search(r"#\s*\d+", lower) is not None
+    return has_game_name and has_puzzle_hash
 
 
 def parse_any(text: str) -> Optional[ParsedScore]:

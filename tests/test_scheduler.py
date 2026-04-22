@@ -47,7 +47,9 @@ class TestDailyRecap:
         assert "(5 pts)" in out
         assert "(4 pts)" in out
         assert "(3 pts)" in out
-        assert "Day totals:" in out
+        # "Day totals" was replaced by the cumulative "Week so far"
+        # leaderboard — same numbers but framed across the whole week.
+        assert "Week so far:" in out
 
     def test_day_totals_include_game_count(self):
         scores = [
@@ -82,6 +84,26 @@ class TestDailyRecap:
         assert "Mini Sudoku #246" in out
         assert "1:16" in out
 
+    def test_week_so_far_aggregates_prior_days(self):
+        # daily_recap takes the WHOLE week's scores so the running
+        # total spans Monday-through-today, not just today. Tuesday
+        # recap should include Monday's points in "Week so far".
+        scores = [
+            _row(1, "Alice", "queens", 713, 10, MON),  # Mon win → 5 pts
+            _row(2, "Bob",   "queens", 713, 20, MON),  # Mon → 4 pts
+            _row(1, "Alice", "tango",  554, 20, TUE),  # Tue solo → no first/last
+            _row(2, "Bob",   "tango",  554, 30, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        # Tuesday's per-game shows (Tango).
+        assert "Tango #554" in out
+        # Cumulative leaderboard reflects Mon + Tue.
+        # Alice: 5 (Mon Queens) + 5 (Tue Tango win) = 10
+        # Bob:   4 (Mon Queens) + 4 (Tue Tango)     = 8
+        assert "Week so far:" in out
+        assert "1. Alice: 10 pts" in out
+        assert "2. Bob: 8 pts" in out
+
 
 # ---------------------------------------------------------------------------
 # weekly_wrap
@@ -101,31 +123,61 @@ class TestWeeklyWrap:
             _row(2, "Bob", "tango", 554, 30, TUE),
         ]
         out = weekly_wrap(MON, SUN, scores, ENABLED)
-        assert "Leaderboard:" in out
-        assert "Champion" in out
-        assert "Wooden spoon" in out
+        # Weekly wrap is: header + compact leaderboard + three prizes.
+        # Champion / Wooden spoon / All-rounder were removed — they're
+        # redundant with the leaderboard rows (top, bottom, "(N games)").
+        assert "1. Alice" in out                      # leaderboard top
+        assert "2. Bob" in out                        # leaderboard bottom
+        assert "Most firsts" in out
+        assert "Most lasts" in out
+        assert "Champion" not in out
+        assert "Wooden spoon" not in out
+        assert "All-rounder" not in out
+        # 4 submissions total, under the 5-submission threshold, so
+        # nobody qualifies for Best average and the line is suppressed.
+        assert "Best average" not in out
 
-    def test_game_winners_section(self):
+    def test_best_average_line_when_someone_qualifies(self):
+        # Give Alice 5 submissions so she clears the threshold.
         scores = [
             _row(1, "Alice", "queens", 714, 10, TUE),
-            _row(2, "Bob", "queens", 714, 20, TUE),
-            _row(1, "Alice", "tango", 554, 30, TUE),
-            _row(2, "Bob", "tango", 554, 20, TUE),
+            _row(2, "Bob",   "queens", 714, 20, TUE),
+            _row(1, "Alice", "tango",  554, 20, TUE),
+            _row(1, "Alice", "zip",    393, 10, TUE),
+            _row(1, "Alice", "patches", 28, 15, TUE),
+            _row(1, "Alice", "mini_sudoku", 246, 60, TUE),
         ]
         out = weekly_wrap(MON, SUN, scores, ENABLED)
-        assert "Game winners:" in out
-        assert "Queens: Alice" in out
-        assert "Tango: Bob" in out
+        assert "Best average" in out
+        assert "Alice" in out
+        assert "5 submissions" in out
+
+    def test_wrap_is_concise_enough_to_forward(self):
+        # The whole point of keeping the format tight: the wrap stays
+        # short enough to forward from a 1:1 DM into the group as a
+        # single message. With 6 players and 3 prizes that's ~10
+        # non-empty lines. Cap at 15 to keep future drift honest.
+        scores = []
+        for i, name in enumerate(("Alice", "Bob", "Charlie", "Dee", "Evan", "Fiona"), start=1):
+            scores.append(_row(i, name, "queens", 714, 10 + i * 5, TUE))
+        out = weekly_wrap(MON, SUN, scores, ENABLED)
+        nonempty = [ln for ln in out.splitlines() if ln.strip()]
+        assert len(nonempty) <= 15, f"weekly wrap got long:\n{out}"
 
     def test_disabled_game_excluded_from_wrap(self):
+        # Pinpoint submission should be filtered out of the aggregation
+        # when pinpoint isn't in enabled_games. Alice's leaderboard
+        # line shows "(1 game)" — if pinpoint had leaked through it
+        # would say "(2 games)".
         scores = [
             _row(1, "Alice", "queens", 714, 10, TUE),
             _row(1, "Alice", "pinpoint", 714, 3, TUE),
         ]
         enabled_no_pinpoint = frozenset({"queens"})
         out = weekly_wrap(MON, SUN, scores, enabled_no_pinpoint)
-        assert "Queens" in out
         assert "Pinpoint" not in out
+        assert "1. Alice" in out
+        assert "(1 game)" in out
 
     def test_scores_outside_week_filtered(self):
         prev_sun = date(2026, 4, 12)
@@ -136,3 +188,22 @@ class TestWeeklyWrap:
         out = weekly_wrap(MON, SUN, scores, ENABLED)
         assert "Bob" in out
         assert "Alice" not in out
+
+    def test_includes_sunday_per_game_section(self):
+        # The wrap is now a "super daily" — it shows the final day's
+        # per-game results in addition to the week totals + winners +
+        # prizes. Sunday Apr 19's Queens round should appear with
+        # ranked players.
+        scores = [
+            _row(1, "Alice", "queens", 713, 10, TUE),
+            _row(1, "Alice", "queens", 719, 30, SUN),
+            _row(2, "Bob",   "queens", 719, 35, SUN),
+        ]
+        out = weekly_wrap(MON, SUN, scores, ENABLED)
+        # Final-day per-game block should be present + dated.
+        assert "Sun 19 Apr" in out
+        assert "Queens #719" in out
+        # Week totals leaderboard also present.
+        assert "Week totals:" in out
+        # Per-game weekly winners section.
+        assert "Game winners:" in out

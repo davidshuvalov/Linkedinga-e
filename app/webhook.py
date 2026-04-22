@@ -1,58 +1,47 @@
 """Webhook business logic — pure and fully testable without FastAPI.
 
 :func:`handle_inbound` accepts the three Twilio fields we care about plus
-an injected :class:`~app.db.Repository` and returns the bot's reply text.
-It performs no I/O of its own beyond whatever the repository does.
+an injected :class:`~app.db.Repository` and returns the bot's reply text,
+or ``None`` to stay silent (so the bot doesn't spam a group chat with
+help text every time someone says "hey").
+
+Reply / silence matrix:
+
+- empty / whitespace body ........................ **silent**
+- random chatter (no game name + no ``lnkd.in/``) . **silent**
+- score-like text that fails to parse ............ reply + log (we want
+  feedback when a real share gets mangled)
+- valid score, wrong puzzle number ............... reply (reject)
+- valid score, duplicate ......................... reply (reject)
+- valid score, fresh ............................. reply (confirm)
+- ``stats`` / ``unparsed`` commands .............. reply
 
 Commands (case-insensitive):
 - ``stats`` — reply with the sender's all-time per-game stats.
 - ``unparsed`` — reply with the last 10 unparsed messages (admin debug).
+- ``recap`` / ``today`` — render the daily recap for the current
+  in-progress LA day (partial if midday). Lets a user pull the
+  "where are we up to" view from their phone.
+- ``wrap`` / ``week`` — render the weekly wrap for the current
+  in-progress LA week.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, FrozenSet, List, Set
+from typing import Callable, Dict, FrozenSet, List, Optional
 
-from .db import Repository, ScoreRow
-from .parsers import GAMES, looks_like_score, parse_any
-
-_GAME_DISPLAY = {
-    "queens": "Queens",
-    "tango": "Tango",
-    "pinpoint": "Pinpoint",
-    "crossclimb": "Crossclimb",
-    "zip": "Zip",
-    "patches": "Patches",
-    "mini_sudoku": "Mini Sudoku",
-}
-
-_GAME_ORDER = (
-    "queens",
-    "tango",
-    "crossclimb",
-    "zip",
-    "pinpoint",
-    "patches",
-    "mini_sudoku",
+from .config import Settings
+from .db import Repository
+from .parsers import (
+    GAME_DISPLAY,
+    GAME_DISPLAY_ORDER,
+    GAMES,
+    format_raw_score,
+    looks_like_score,
+    parse_any,
 )
-
-
-def _format_score(game: str, raw_score: int) -> str:
-    if game == "pinpoint":
-        noun = "guess" if raw_score == 1 else "guesses"
-        return f"{raw_score} {noun}"
-    minutes, seconds = divmod(raw_score, 60)
-    return f"{minutes}:{seconds:02d}"
-
-
-def _help_text() -> str:
-    return (
-        "Hi! Send me your LinkedIn game share text (Queens, Tango, "
-        "Pinpoint, Crossclimb, Zip, Patches, or Mini Sudoku) and I'll "
-        "track it for the weekly leaderboard.\n\n"
-        "Commands: stats, unparsed"
-    )
+from .puzzles import la_date
 
 
 # ---------------------------------------------------------------------------
@@ -87,11 +76,11 @@ def _handle_stats(repo: Repository, from_: str, profile_name: str) -> str:
         "",
         "Personal bests:",
     ]
-    for game in _GAME_ORDER:
+    for game in GAME_DISPLAY_ORDER:
         if game in best:
             lines.append(
-                f"  {_GAME_DISPLAY[game]}: "
-                f"{_format_score(game, best[game])} "
+                f"  {GAME_DISPLAY[game]}: "
+                f"{format_raw_score(game, best[game])} "
                 f"({count[game]} submissions)"
             )
 
@@ -123,6 +112,39 @@ def _handle_unparsed(repo: Repository) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _handle_recap(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+) -> str:
+    """On-demand daily recap for the current in-progress LA day."""
+    if settings is None:
+        return "Recap isn't available in this context."
+    # Lazy import to avoid a circular dep (jobs imports scheduler which
+    # imports scoring which imports db — none of that touches webhook,
+    # but the webhook module is imported early by main.py).
+    from .jobs import render_daily
+
+    target_day = la_date(now)
+    body, _ = render_daily(repo, settings, target_day)
+    return body
+
+
+def _handle_wrap(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+) -> str:
+    """On-demand weekly wrap for the current in-progress LA week."""
+    if settings is None:
+        return "Wrap isn't available in this context."
+    from .jobs import render_wrap
+
+    reference_day = la_date(now)
+    body, _ = render_wrap(repo, settings, reference_day)
+    return body
+
+
 def handle_inbound(
     repo: Repository,
     *,
@@ -131,11 +153,30 @@ def handle_inbound(
     profile_name: str,
     now: datetime,
     enabled_games: FrozenSet[str] = frozenset(GAMES),
-) -> str:
-    """Process an inbound WhatsApp message. Returns the bot's reply text."""
+    expected_puzzle_no: Optional[Callable[[str, datetime], int]] = None,
+    settings: Optional[Settings] = None,
+) -> Optional[str]:
+    """Process an inbound WhatsApp message.
+
+    Returns the bot's reply text, or ``None`` to stay silent — used when
+    the message is plain chatter that shouldn't be acknowledged (so the
+    bot doesn't post help text into a group every time someone says hi).
+
+    ``expected_puzzle_no``, if provided, is called as
+    ``expected_puzzle_no(game, now)`` and returns the puzzle number
+    LinkedIn is currently serving for that game. When the submitted
+    ``puzzle_no`` doesn't match, the handler rejects the submission with
+    a helpful message explaining the LA-midnight rollover. Passing
+    ``None`` (the default) skips validation — used by unit tests so they
+    can exercise the handler with arbitrary puzzle numbers.
+
+    ``settings`` is required for the ``recap`` / ``wrap`` commands
+    (they need the ``enabled_games`` frozenset + tz for rendering).
+    When ``None``, those commands reply with a short explanation.
+    """
     body_stripped = (body or "").strip()
     if not body_stripped:
-        return _help_text()
+        return None
 
     # Check for commands before attempting score parsing
     lower = body_stripped.lower()
@@ -143,6 +184,10 @@ def handle_inbound(
         return _handle_stats(repo, from_, profile_name)
     if lower == "unparsed":
         return _handle_unparsed(repo)
+    if lower in ("recap", "today"):
+        return _handle_recap(repo, settings, now)
+    if lower in ("wrap", "week"):
+        return _handle_wrap(repo, settings, now)
 
     # Try to parse as a game share
     parsed = parse_any(body_stripped)
@@ -154,11 +199,35 @@ def handle_inbound(
                 "That looks like a LinkedIn game share but I couldn't parse "
                 "it. I've logged the message so we can tune the format."
             )
-        return _help_text()
+        # Plain chatter — stay silent. This is especially important in a
+        # group context where a chatty bot would spam on every message.
+        return None
+
+    pretty_game = GAME_DISPLAY[parsed.game]
+
+    # Reject stale/future puzzle numbers. LinkedIn rolls puzzles at
+    # midnight US Pacific, so ``expected_puzzle_no`` uses LA time to pick
+    # today's live number regardless of where the submitter lives.
+    if expected_puzzle_no is not None:
+        expected = expected_puzzle_no(parsed.game, now)
+        if parsed.puzzle_no != expected:
+            if parsed.puzzle_no < expected:
+                when = "yesterday" if parsed.puzzle_no == expected - 1 else "an older day"
+            else:
+                when = "tomorrow" if parsed.puzzle_no == expected + 1 else "a future day"
+            return (
+                f"That's {pretty_game} #{parsed.puzzle_no} ({when}'s puzzle). "
+                f"Today's {pretty_game} is #{expected} — I can only record "
+                "today's scores. (LinkedIn resets at midnight US Pacific.)"
+            )
 
     display_name = (profile_name or "").strip() or from_
     player = repo.get_or_create_player(from_, display_name)
-    puzzle_date = now.date()
+    # Anchor the puzzle day in LA time — that's when LinkedIn rolls, so a
+    # 4:45pm Sydney submission (still yesterday in LA) files under
+    # yesterday's LA date and a 5:15pm one lands under today's. Keeps
+    # daily/weekly windows consistent with LinkedIn's own puzzle days.
+    puzzle_date = la_date(now)
 
     inserted = repo.insert_score(
         player_id=player.id,
@@ -169,8 +238,7 @@ def handle_inbound(
         share_text=parsed.share_text,
     )
 
-    pretty_game = _GAME_DISPLAY[parsed.game]
-    pretty_new = _format_score(parsed.game, parsed.raw_score)
+    pretty_new = format_raw_score(parsed.game, parsed.raw_score)
 
     if not inserted:
         existing_raw = repo.get_existing_score(
@@ -179,7 +247,7 @@ def handle_inbound(
             puzzle_no=parsed.puzzle_no,
         )
         if existing_raw is not None:
-            pretty_existing = _format_score(parsed.game, existing_raw)
+            pretty_existing = format_raw_score(parsed.game, existing_raw)
             return (
                 f"You already submitted {pretty_game} #{parsed.puzzle_no} "
                 f"with {pretty_existing}. "

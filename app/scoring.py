@@ -11,12 +11,17 @@ Rules:
 - Weekly total = sum of daily points across all **enabled** games.
 - Per-game leader = player with the most total points in that game over
   the period.
-- Prizes:
+- Prizes (three; Champion / All-rounder / Wooden spoon were dropped
+  because the overall leaderboard already shows #1 and last, and
+  distinct-games is already visible as "(N games)" on each line):
 
-  * Champion — most total points
-  * All-rounder — most distinct games played (tiebreak: points)
-  * Streak king — most days played (tiebreak: points)
-  * Wooden spoon — fewest total points among participants
+  * Most firsts — most 1st-place finishes in *competitive* rounds
+    (≥2 players). Tied-for-1st counts once for **each** tied player.
+  * Most lasts — the flip side: most last-place finishes in competitive
+    rounds. Singletons don't count (being alone isn't "losing").
+  * Best average — highest points-per-submission. Requires at least
+    ``MIN_SUBMISSIONS_FOR_AVERAGE_PRIZE`` submissions so someone can't
+    win by playing one lucky round.
 
 All 7 games are "lower is better" (seconds or guess count). Daily
 grouping uses ``(game, puzzle_no)`` rather than ``puzzle_date``.
@@ -32,6 +37,12 @@ from .db import ScoreRow
 
 # Position → base points. Positions beyond 5 get 0.
 _POSITION_POINTS: Dict[int, int] = {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}
+
+# Minimum number of submissions a player needs to be eligible for the
+# "Best average" prize. Set low enough (5) that a player picking up one
+# game-type a day across a work week qualifies, but high enough that one
+# lucky round can't steal the prize.
+MIN_SUBMISSIONS_FOR_AVERAGE_PRIZE = 5
 
 
 def _tied_points(rank: int, count: int) -> int:
@@ -55,6 +66,21 @@ class PlayerWeeklyStats:
     total_points: int
     distinct_games: int
     days_played: int
+    # Added alongside the Most firsts / Most lasts / Best average prizes.
+    # Defaults let older tests that constructed PlayerWeeklyStats with
+    # just 5 positional fields keep working. first_places and
+    # last_places are *competitive* counts: singleton rounds (where only
+    # one player submitted that game) don't contribute to either.
+    first_places: int = 0
+    last_places: int = 0
+    submissions: int = 0
+
+    @property
+    def average_points(self) -> float:
+        """Mean points per submission. Zero if the player submitted nothing."""
+        if self.submissions == 0:
+            return 0.0
+        return self.total_points / self.submissions
 
 
 @dataclass(frozen=True)
@@ -67,10 +93,9 @@ class GameLeader:
 
 @dataclass(frozen=True)
 class Prizes:
-    champion: Optional[PlayerWeeklyStats]
-    all_rounder: Optional[PlayerWeeklyStats]
-    streak_king: Optional[PlayerWeeklyStats]
-    wooden_spoon: Optional[PlayerWeeklyStats]
+    most_firsts: Optional[PlayerWeeklyStats]
+    most_lasts: Optional[PlayerWeeklyStats]
+    best_average: Optional[PlayerWeeklyStats]
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +139,12 @@ def weekly_leaderboard(
 ) -> List[PlayerWeeklyStats]:
     """Aggregate a batch of scores (one week's worth) into per-player stats.
 
-    Groups by ``(game, puzzle_no)``, applies :func:`assign_daily_points` to
-    each group, and accumulates ``total_points`` + ``distinct_games`` +
-    ``days_played`` per player. Returns sorted by ``total_points`` desc.
+    Groups by ``(game, puzzle_no)``, applies :func:`assign_daily_points`
+    to each group, and accumulates per-player ``total_points``,
+    ``distinct_games``, ``days_played``, ``submissions``, and
+    ``first_places``. A player tied for 1st with someone else counts as
+    1st for both — same convention as the 5-pt tie points. Returns
+    sorted by ``total_points`` desc.
     """
     if not scores:
         return []
@@ -129,16 +157,33 @@ def weekly_leaderboard(
     totals: Dict[int, int] = {}
     games_by_player: Dict[int, set] = {}
     days_by_player: Dict[int, set] = {}
+    submissions: Dict[int, int] = {}
+    first_places: Dict[int, int] = {}
 
     for s in scores:
         player_names[s.player_id] = s.player_name
         games_by_player.setdefault(s.player_id, set()).add(s.game)
         days_by_player.setdefault(s.player_id, set()).add(s.puzzle_date)
         totals.setdefault(s.player_id, 0)
+        submissions[s.player_id] = submissions.get(s.player_id, 0) + 1
+        first_places.setdefault(s.player_id, 0)
+
+    last_places: Dict[int, int] = {pid: 0 for pid in first_places}
 
     for group_scores in groups.values():
         for pid, pts in assign_daily_points(group_scores).items():
             totals[pid] += pts
+        # First / last only count when there's real competition — a lone
+        # submitter would otherwise sweep both metrics absurdly.
+        if len(group_scores) < 2:
+            continue
+        best_raw = min(s.raw_score for s in group_scores)
+        worst_raw = max(s.raw_score for s in group_scores)
+        for s in group_scores:
+            if s.raw_score == best_raw:
+                first_places[s.player_id] += 1
+            if s.raw_score == worst_raw:
+                last_places[s.player_id] += 1
 
     leaderboard = [
         PlayerWeeklyStats(
@@ -147,6 +192,9 @@ def weekly_leaderboard(
             total_points=totals[pid],
             distinct_games=len(games_by_player[pid]),
             days_played=len(days_by_player[pid]),
+            first_places=first_places[pid],
+            last_places=last_places[pid],
+            submissions=submissions[pid],
         )
         for pid in player_names
     ]
@@ -163,8 +211,9 @@ def game_leaders(scores: Sequence[ScoreRow]) -> List[GameLeader]:
     """For each game present in ``scores``, find the player with the most
     total points in that game over the period.
 
-    Returns one :class:`GameLeader` per game, sorted by
-    ``_GAME_ORDER``-ish (actually by first appearance in scores).
+    Returns one :class:`GameLeader` per game, ordered by first
+    appearance in ``scores``. Callers that want a canonical display
+    order should reorder against :data:`app.parsers.GAME_DISPLAY_ORDER`.
     """
     groups: Dict[Tuple[str, int], List[ScoreRow]] = {}
     for s in scores:
@@ -206,33 +255,50 @@ def game_leaders(scores: Sequence[ScoreRow]) -> List[GameLeader]:
 
 
 def prize_allocations(leaderboard: Sequence[PlayerWeeklyStats]) -> Prizes:
-    """Allocate the four weekly prizes from a precomputed leaderboard.
+    """Allocate the three weekly prizes from a precomputed leaderboard.
 
     Tiebreaks documented inline; all resolve to smallest ``player_id``.
-    Returns all ``None`` if the leaderboard is empty.
+    ``most_firsts`` / ``most_lasts`` return ``None`` when nobody played
+    any competitive rounds (≥2 players) that week. ``best_average``
+    returns ``None`` when nobody meets the submissions threshold. All
+    three return ``None`` if the leaderboard is empty.
     """
     if not leaderboard:
-        return Prizes(None, None, None, None)
+        return Prizes(None, None, None)
 
-    champion = max(
-        leaderboard,
-        key=lambda p: (p.total_points, -p.player_id),
-    )
-    all_rounder = max(
-        leaderboard,
-        key=lambda p: (p.distinct_games, p.total_points, -p.player_id),
-    )
-    streak_king = max(
-        leaderboard,
-        key=lambda p: (p.days_played, p.total_points, -p.player_id),
-    )
-    wooden_spoon = min(
-        leaderboard,
-        key=lambda p: (p.total_points, p.player_id),
-    )
+    most_firsts: Optional[PlayerWeeklyStats] = None
+    has_any_first = any(p.first_places > 0 for p in leaderboard)
+    if has_any_first:
+        most_firsts = max(
+            leaderboard,
+            key=lambda p: (p.first_places, p.total_points, -p.player_id),
+        )
+
+    most_lasts: Optional[PlayerWeeklyStats] = None
+    has_any_last = any(p.last_places > 0 for p in leaderboard)
+    if has_any_last:
+        most_lasts = max(
+            leaderboard,
+            key=lambda p: (p.last_places, -p.total_points, -p.player_id),
+        )
+
+    # Best average: filter to players with enough submissions to judge
+    # consistency, then pick the highest mean points per submission.
+    # Tiebreak on total_points so a player with the same avg but more
+    # games played wins over a coaster.
+    eligible = [
+        p for p in leaderboard
+        if p.submissions >= MIN_SUBMISSIONS_FOR_AVERAGE_PRIZE
+    ]
+    best_average: Optional[PlayerWeeklyStats] = None
+    if eligible:
+        best_average = max(
+            eligible,
+            key=lambda p: (p.average_points, p.total_points, -p.player_id),
+        )
+
     return Prizes(
-        champion=champion,
-        all_rounder=all_rounder,
-        streak_king=streak_king,
-        wooden_spoon=wooden_spoon,
+        most_firsts=most_firsts,
+        most_lasts=most_lasts,
+        best_average=best_average,
     )

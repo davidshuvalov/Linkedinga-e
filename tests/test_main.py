@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import InMemoryRepository
-from app.main import app, get_repository
+from app.main import app, get_puzzle_validator, get_repository
 
 
 @pytest.fixture
@@ -23,7 +23,12 @@ def repo() -> InMemoryRepository:
 
 @pytest.fixture
 def client(repo: InMemoryRepository):
+    # Disable puzzle-number validation for the default fixture — existing
+    # tests submit arbitrary puzzle numbers (#1, #365 etc.) that would
+    # otherwise be rejected because they don't match today's LinkedIn number.
+    # The dedicated TestPuzzleValidation class re-enables validation.
     app.dependency_overrides[get_repository] = lambda: repo
+    app.dependency_overrides[get_puzzle_validator] = lambda: None
     try:
         yield TestClient(app)
     finally:
@@ -118,13 +123,28 @@ class TestWebhook:
         assert len(repo.scores) == 1
         assert "already" in second.text.lower()
 
-    def test_missing_body_field_is_allowed(self, client):
+    def test_missing_body_field_returns_silent_twiml(self, client):
+        # Empty body is plain chatter → bot stays silent → bare <Response/>.
         r = client.post(
             "/webhook",
             data={"From": "whatsapp:+61400000001", "ProfileName": "Alice"},
         )
         assert r.status_code == 200
-        assert "<Response>" in r.text
+        assert "<Response/>" in r.text
+        assert "<Message>" not in r.text
+
+    def test_random_chatter_returns_silent_twiml(self, client):
+        r = client.post(
+            "/webhook",
+            data={
+                "From": "whatsapp:+61400000001",
+                "Body": "hey what's for dinner",
+                "ProfileName": "Alice",
+            },
+        )
+        assert r.status_code == 200
+        assert "<Response/>" in r.text
+        assert "<Message>" not in r.text
 
     def test_missing_from_is_422(self, client):
         r = client.post(
@@ -146,3 +166,149 @@ class TestWebhook:
         assert "2 guesses" in r.text
         assert repo.scores[0]["game"] == "pinpoint"
         assert repo.scores[0]["raw_score"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Error handling — webhook must always return TwiML so Twilio can relay a
+# reply to the sender. A 500 produces silence on WhatsApp + a red error in
+# the Twilio console, which is the exact symptom we're guarding against.
+# ---------------------------------------------------------------------------
+
+
+class _ExplodingRepo:
+    """Repository double whose every method raises."""
+
+    def get_or_create_player(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def insert_score(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def log_unparsed(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def list_scores(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def list_active_whatsapp_ids(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def get_existing_score(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def list_player_scores(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+    def list_recent_unparsed(self, *args, **kwargs):
+        raise RuntimeError("supabase blew up")
+
+
+class TestWebhookErrorHandling:
+    def test_repo_exception_returns_twiml_not_500(self):
+        app.dependency_overrides[get_repository] = lambda: _ExplodingRepo()
+        # Disable puzzle validation so the test exercises the repo path.
+        app.dependency_overrides[get_puzzle_validator] = lambda: None
+        try:
+            client = TestClient(app)
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "Queens #365 | 1:23",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            assert "application/xml" in r.headers["content-type"]
+            root = ET.fromstring(r.text)
+            assert root.tag == "Response"
+            msg = root.find("Message")
+            assert msg is not None and msg.text
+            assert "error" in msg.text.lower()
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_unparsed_command_exception_returns_twiml(self):
+        app.dependency_overrides[get_repository] = lambda: _ExplodingRepo()
+        app.dependency_overrides[get_puzzle_validator] = lambda: None
+        try:
+            client = TestClient(app)
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "unparsed",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            root = ET.fromstring(r.text)
+            assert root.tag == "Response"
+        finally:
+            app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Puzzle-number validation — webhook must reject yesterday's or tomorrow's
+# puzzles so the leaderboard only contains LinkedIn's currently-live round.
+# ---------------------------------------------------------------------------
+
+
+class TestPuzzleValidation:
+    def _client_with_validator(self, repo, validator):
+        app.dependency_overrides[get_repository] = lambda: repo
+        app.dependency_overrides[get_puzzle_validator] = lambda: validator
+        return TestClient(app)
+
+    def test_matching_puzzle_is_accepted(self, repo):
+        client = self._client_with_validator(repo, lambda game, now: 721)
+        try:
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "Queens #721\n1:05",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            assert "Got it" in r.text
+            assert len(repo.scores) == 1
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_stale_puzzle_is_rejected_and_not_stored(self, repo):
+        client = self._client_with_validator(repo, lambda game, now: 721)
+        try:
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "Queens #720\n1:05",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            assert "#720" in r.text
+            assert "#721" in r.text
+            assert "yesterday" in r.text.lower()
+            assert len(repo.scores) == 0
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_future_puzzle_is_rejected(self, repo):
+        client = self._client_with_validator(repo, lambda game, now: 721)
+        try:
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "Queens #722\n1:05",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            assert "tomorrow" in r.text.lower()
+            assert len(repo.scores) == 0
+        finally:
+            app.dependency_overrides.clear()

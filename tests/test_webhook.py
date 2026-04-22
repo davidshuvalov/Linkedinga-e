@@ -12,7 +12,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.db import InMemoryRepository
-from app.webhook import _format_score, handle_inbound
+from app.parsers import format_raw_score
+from app.webhook import handle_inbound
 
 SYDNEY = ZoneInfo("Australia/Sydney")
 NOW = datetime(2026, 4, 14, 19, 0, tzinfo=SYDNEY)
@@ -24,25 +25,25 @@ def repo() -> InMemoryRepository:
 
 
 # ---------------------------------------------------------------------------
-# _format_score
+# format_raw_score
 # ---------------------------------------------------------------------------
 
 
 class TestFormatScore:
     def test_pinpoint_single_guess_singular(self):
-        assert _format_score("pinpoint", 1) == "1 guess"
+        assert format_raw_score("pinpoint", 1) == "1 guess"
 
     def test_pinpoint_multi_guess_plural(self):
-        assert _format_score("pinpoint", 3) == "3 guesses"
+        assert format_raw_score("pinpoint", 3) == "3 guesses"
 
     def test_time_under_minute(self):
-        assert _format_score("queens", 45) == "0:45"
+        assert format_raw_score("queens", 45) == "0:45"
 
     def test_time_over_minute_pads_seconds(self):
-        assert _format_score("tango", 83) == "1:23"
+        assert format_raw_score("tango", 83) == "1:23"
 
     def test_time_exact_minute(self):
-        assert _format_score("zip", 60) == "1:00"
+        assert format_raw_score("zip", 60) == "1:00"
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +163,9 @@ class TestHandleInbound:
         assert repo.unparsed[0]["whatsapp_id"] == "whatsapp:+61400000001"
         assert len(repo.scores) == 0
 
-    def test_unrelated_chatter_gets_help_text(self, repo):
+    def test_unrelated_chatter_is_silent(self, repo):
+        # Group-chat hygiene: the bot must not reply with help text on
+        # normal chatter, otherwise every "hey" would spam the group.
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -170,11 +173,11 @@ class TestHandleInbound:
             profile_name="Alice",
             now=NOW,
         )
+        assert reply is None
         assert len(repo.scores) == 0
         assert len(repo.unparsed) == 0
-        assert "LinkedIn" in reply
 
-    def test_empty_body_gets_help_text(self, repo):
+    def test_empty_body_is_silent(self, repo):
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -182,10 +185,10 @@ class TestHandleInbound:
             profile_name="Alice",
             now=NOW,
         )
-        assert "LinkedIn" in reply
+        assert reply is None
         assert len(repo.scores) == 0
 
-    def test_whitespace_only_body_gets_help_text(self, repo):
+    def test_whitespace_only_body_is_silent(self, repo):
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -193,8 +196,21 @@ class TestHandleInbound:
             profile_name="Alice",
             now=NOW,
         )
-        assert "LinkedIn" in reply
+        assert reply is None
         assert len(repo.scores) == 0
+
+    def test_bare_game_name_mention_is_silent(self, repo):
+        # Tightened heuristic: without a #N puzzle number, it's chatter.
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens was brutal today",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is None
+        assert len(repo.scores) == 0
+        assert len(repo.unparsed) == 0
 
     def test_puzzle_date_comes_from_now(self, repo):
         custom_now = datetime(2026, 1, 1, 20, 0, tzinfo=SYDNEY)
@@ -258,24 +274,67 @@ class TestHandleInbound:
         assert repo.scores[0]["game"] == "mini_sudoku"
         assert repo.scores[0]["raw_score"] == 76
 
-    def test_help_text_lists_all_seven_games(self, repo):
+    def test_submission_stores_la_anchored_puzzle_date(self, repo):
+        # 4:45pm Sydney on 22 Apr 2026 AEST is still 21 Apr in LA — the
+        # puzzle_date should record 21 Apr, matching LinkedIn's day.
+        before_flip = datetime(2026, 4, 22, 16, 45, tzinfo=SYDNEY)
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #720\n1:05",
+            profile_name="Alice",
+            now=before_flip,
+        )
+        from datetime import date
+
+        assert repo.scores[0]["puzzle_date"] == date(2026, 4, 21)
+
+    def test_submission_after_la_flip_stores_new_la_day(self, repo):
+        # 5:15pm Sydney AEST on 22 Apr is past midnight LA PDT 22 Apr.
+        after_flip = datetime(2026, 4, 22, 17, 15, tzinfo=SYDNEY)
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #721\n1:05",
+            profile_name="Alice",
+            now=after_flip,
+        )
+        from datetime import date
+
+        assert repo.scores[0]["puzzle_date"] == date(2026, 4, 22)
+
+    def test_zip_407_today_rejected(self, repo):
+        # Belt-and-braces: the Zip #407 case David called out explicitly.
+        from app.puzzles import expected_puzzle_no
+
+        today = datetime(2026, 4, 22, 20, 0, tzinfo=SYDNEY)
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
-            body="",
+            body="Zip #407\n0:09",
+            profile_name="Alice",
+            now=today,
+            expected_puzzle_no=expected_puzzle_no,
+        )
+        assert reply is not None
+        assert "#407" in reply
+        assert "#400" in reply
+        assert len(repo.scores) == 0
+
+    def test_gameish_with_hash_but_unparseable_still_replies(self, repo):
+        # A message with both a game name AND a #N looks like a genuine
+        # upload attempt — we want the user to know it couldn't parse so
+        # they can fix their paste.
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #500 i think i got",
             profile_name="Alice",
             now=NOW,
         )
-        for name in (
-            "Queens",
-            "Tango",
-            "Pinpoint",
-            "Crossclimb",
-            "Zip",
-            "Patches",
-            "Mini Sudoku",
-        ):
-            assert name in reply
+        assert reply is not None
+        assert "couldn't parse" in reply.lower()
+        assert len(repo.unparsed) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -386,3 +445,118 @@ class TestUnparsedCommand:
             now=NOW,
         )
         assert "No unparsed messages" in reply
+
+
+# ---------------------------------------------------------------------------
+# /recap and /wrap on-demand commands
+# ---------------------------------------------------------------------------
+
+
+def _settings_with_default_games():
+    """Settings with a real enabled_games set (needed by recap/wrap)."""
+    from app.config import Settings
+    return Settings(
+        twilio_account_sid="",
+        twilio_auth_token="",
+        twilio_whatsapp_from="",
+        twilio_recap_to="",
+        supabase_url="",
+        supabase_key="",
+        timezone_name="Australia/Sydney",
+        enabled_games=frozenset(
+            {"queens", "tango", "zip", "patches", "mini_sudoku"}
+        ),
+    )
+
+
+class TestRecapCommand:
+    def test_recap_with_no_scores_yet(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="recap",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Daily recap" in reply
+        assert "No scores yet" in reply
+
+    def test_recap_includes_week_so_far(self, repo):
+        # Seed two scores on the LA day matching NOW.
+        from app.puzzles import la_date
+
+        today_la = la_date(NOW)
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=714,
+            puzzle_date=today_la, raw_score=10,
+            share_text="Queens #714 0:10",
+        )
+        repo.insert_score(
+            player_id=2, game="queens", puzzle_no=714,
+            puzzle_date=today_la, raw_score=20,
+            share_text="Queens #714 0:20",
+        )
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="recap",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Queens #714" in reply
+        assert "Week so far:" in reply
+        assert "1. Alice" in reply
+
+    def test_today_is_alias_for_recap(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="today",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Daily recap" in reply
+
+    def test_recap_case_insensitive(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="RECAP",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Daily recap" in reply
+
+
+class TestWrapCommand:
+    def test_wrap_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="wrap",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Weekly wrap" in reply
+        assert "No scores this week" in reply
+
+    def test_week_is_alias_for_wrap(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="week",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Weekly wrap" in reply

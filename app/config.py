@@ -8,6 +8,7 @@ so the app can still boot for local smoke testing.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from zoneinfo import ZoneInfo
@@ -18,6 +19,8 @@ try:
     load_dotenv()
 except ImportError:  # pragma: no cover — optional in CI / test envs
     pass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -43,16 +46,64 @@ class Settings:
 _DEFAULT_ENABLED = "queens,tango,zip,patches,mini_sudoku"
 
 
+def _env(name: str, default: str = "") -> str:
+    """Read an env var, treating empty/whitespace values as unset.
+
+    Railway / Docker setups often leave variables defined but empty, which
+    makes ``os.environ.get(name, default)`` return ``""`` instead of the
+    default. That's a latent crash for things like ``ZoneInfo("")``. Also
+    strips surrounding whitespace — copy-pasted values routinely pick up
+    trailing newlines that break URL construction.
+    """
+    val = os.environ.get(name)
+    if val is None or val.strip() == "":
+        return default
+    return val.strip()
+
+
+def _normalize_supabase_url(url: str) -> str:
+    """Clean up common ``SUPABASE_URL`` copy-paste mistakes.
+
+    The supabase-py client appends ``/rest/v1/<table>`` itself, so the
+    URL must be the bare project origin (e.g. ``https://xxx.supabase.co``).
+    Anything else produces ``PGRST125: Invalid path specified in request
+    URL`` on every query. We defensively fix the most common errors:
+
+    - trailing slashes (``https://xxx.supabase.co/``)
+    - pasted-in REST suffix (``.../rest/v1`` or ``.../rest/v1/``)
+    - stray whitespace (handled by :func:`_env` before this)
+    """
+    if not url:
+        return url
+    url = url.rstrip("/")
+    # Strip either ``/rest/v1`` or ``/rest`` if pasted in.
+    for suffix in ("/rest/v1", "/rest"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+            break
+    return url
+
+
 def load_settings() -> Settings:
-    raw_games = os.environ.get("ENABLED_GAMES", _DEFAULT_ENABLED)
+    raw_games = _env("ENABLED_GAMES", _DEFAULT_ENABLED)
     enabled = frozenset(g.strip() for g in raw_games.split(",") if g.strip())
+
+    supabase_url = _normalize_supabase_url(_env("SUPABASE_URL"))
+    if supabase_url and not supabase_url.startswith(("http://", "https://")):
+        # Warn loudly — a bare hostname produces PGRST125 on every call.
+        logger.warning(
+            "SUPABASE_URL does not start with http(s)://; this will fail. "
+            "Set it to the full project URL, e.g. https://<ref>.supabase.co"
+        )
+
     return Settings(
-        twilio_account_sid=os.environ.get("TWILIO_ACCOUNT_SID", ""),
-        twilio_auth_token=os.environ.get("TWILIO_AUTH_TOKEN", ""),
-        twilio_whatsapp_from=os.environ.get("TWILIO_WHATSAPP_FROM", ""),
-        twilio_recap_to=os.environ.get("TWILIO_RECAP_TO", ""),
-        supabase_url=os.environ.get("SUPABASE_URL", ""),
-        supabase_key=os.environ.get("SUPABASE_KEY", ""),
-        timezone_name=os.environ.get("APP_TIMEZONE", "Australia/Sydney"),
+        twilio_account_sid=_env("TWILIO_ACCOUNT_SID"),
+        twilio_auth_token=_env("TWILIO_AUTH_TOKEN"),
+        twilio_whatsapp_from=_env("TWILIO_WHATSAPP_FROM"),
+        twilio_recap_to=_env("TWILIO_RECAP_TO"),
+        supabase_url=supabase_url,
+        supabase_key=_env("SUPABASE_KEY"),
+        timezone_name=_env("APP_TIMEZONE", "Australia/Sydney"),
         enabled_games=enabled,
     )
+
