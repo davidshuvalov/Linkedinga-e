@@ -20,7 +20,7 @@ for that game — no other code change required.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, Tuple
 from zoneinfo import ZoneInfo
 
@@ -58,3 +58,16 @@ def expected_puzzle_no(game: str, now: datetime) -> int:
     """
     ref_date, ref_no = PUZZLE_EPOCH[game]
     return ref_no + (la_date(now) - ref_date).days
+
+
+def week_bounds(day: date) -> Tuple[date, date]:
+    """Return ``(Monday, Sunday)`` for the week containing ``day``.
+
+    Weeks anchor on Monday in LinkedIn's LA calendar to match the
+    puzzle day; callers should pass an LA-anchored ``day`` (usually
+    from :func:`la_date`). The function itself is pure calendar math
+    — no timezone awareness — so it works for any ``date`` input.
+    """
+    monday = day - timedelta(days=day.weekday())
+    sunday = monday + timedelta(days=6)
+    return monday, sunday

@@ -211,8 +211,9 @@ def game_leaders(scores: Sequence[ScoreRow]) -> List[GameLeader]:
     """For each game present in ``scores``, find the player with the most
     total points in that game over the period.
 
-    Returns one :class:`GameLeader` per game, sorted by
-    ``_GAME_ORDER``-ish (actually by first appearance in scores).
+    Returns one :class:`GameLeader` per game, ordered by first
+    appearance in ``scores``. Callers that want a canonical display
+    order should reorder against :data:`app.parsers.GAME_DISPLAY_ORDER`.
     """
     groups: Dict[Tuple[str, int], List[ScoreRow]] = {}
     for s in scores:

@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.parsers import GAMES
-from app.puzzles import PUZZLE_EPOCH, expected_puzzle_no, la_date
+from app.puzzles import PUZZLE_EPOCH, expected_puzzle_no, la_date, week_bounds
 
 SYDNEY = ZoneInfo("Australia/Sydney")
 LA = ZoneInfo("America/Los_Angeles")
@@ -109,3 +109,27 @@ class TestDstBoundary:
         ts = datetime(2027, 3, 14, 18, 0, tzinfo=LA)
         days = (date(2027, 3, 14) - date(2026, 4, 22)).days
         assert expected_puzzle_no("queens", ts) == 721 + days
+
+
+class TestWeekBounds:
+    """``week_bounds`` is pure calendar math — no timezone awareness —
+    but callers pass LA-anchored dates so the week aligns with
+    LinkedIn's Mon–Sun puzzle week."""
+
+    def test_monday_returns_itself_and_sunday(self):
+        monday = date(2026, 4, 13)
+        start, end = week_bounds(monday)
+        assert start == monday
+        assert end == date(2026, 4, 19)
+
+    def test_sunday_stays_in_same_week(self):
+        sunday = date(2026, 4, 19)
+        start, end = week_bounds(sunday)
+        assert start == date(2026, 4, 13)
+        assert end == sunday
+
+    def test_midweek(self):
+        wed = date(2026, 4, 15)
+        start, end = week_bounds(wed)
+        assert start == date(2026, 4, 13)
+        assert end == date(2026, 4, 19)

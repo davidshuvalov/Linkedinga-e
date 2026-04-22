@@ -19,10 +19,11 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import date, timedelta
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 from .config import load_settings
 from .db import InMemoryRepository, Repository, SupabaseRepository
+from .puzzles import week_bounds
 from .scheduler import daily_recap, weekly_wrap
 
 
@@ -34,13 +35,6 @@ def _build_repository() -> Repository:
         client = create_client(settings.supabase_url, settings.supabase_key)
         return SupabaseRepository(client)
     return InMemoryRepository()
-
-
-def week_bounds(d: date) -> tuple[date, date]:
-    """Return Monday–Sunday (inclusive) for the week containing ``d``."""
-    monday = d - timedelta(days=d.weekday())
-    sunday = monday + timedelta(days=6)
-    return monday, sunday
 
 
 def _seed_demo(repo: InMemoryRepository, *, today: Optional[date] = None) -> None:

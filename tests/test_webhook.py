@@ -12,7 +12,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.db import InMemoryRepository
-from app.webhook import _format_score, handle_inbound
+from app.parsers import format_raw_score
+from app.webhook import handle_inbound
 
 SYDNEY = ZoneInfo("Australia/Sydney")
 NOW = datetime(2026, 4, 14, 19, 0, tzinfo=SYDNEY)
@@ -24,25 +25,25 @@ def repo() -> InMemoryRepository:
 
 
 # ---------------------------------------------------------------------------
-# _format_score
+# format_raw_score
 # ---------------------------------------------------------------------------
 
 
 class TestFormatScore:
     def test_pinpoint_single_guess_singular(self):
-        assert _format_score("pinpoint", 1) == "1 guess"
+        assert format_raw_score("pinpoint", 1) == "1 guess"
 
     def test_pinpoint_multi_guess_plural(self):
-        assert _format_score("pinpoint", 3) == "3 guesses"
+        assert format_raw_score("pinpoint", 3) == "3 guesses"
 
     def test_time_under_minute(self):
-        assert _format_score("queens", 45) == "0:45"
+        assert format_raw_score("queens", 45) == "0:45"
 
     def test_time_over_minute_pads_seconds(self):
-        assert _format_score("tango", 83) == "1:23"
+        assert format_raw_score("tango", 83) == "1:23"
 
     def test_time_exact_minute(self):
-        assert _format_score("zip", 60) == "1:00"
+        assert format_raw_score("zip", 60) == "1:00"
 
 
 # ---------------------------------------------------------------------------

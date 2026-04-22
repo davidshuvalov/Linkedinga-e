@@ -27,19 +27,12 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional, Tuple
 
 from .config import Settings
-from .db import Repository, ScoreRow
-from .puzzles import la_date
+from .db import Repository
+from .puzzles import la_date, week_bounds
 from .scheduler import daily_recap, weekly_wrap
 from .sender import send_recap
 
 logger = logging.getLogger(__name__)
-
-
-def _week_bounds_for(day: date) -> Tuple[date, date]:
-    """Return the Mon–Sun window that contains ``day`` (weekday 0 = Mon)."""
-    monday = day - timedelta(days=day.weekday())
-    sunday = monday + timedelta(days=6)
-    return monday, sunday
 
 
 def _is_sunday(day: date) -> bool:
@@ -58,7 +51,7 @@ def render_daily(
     both the scheduled job and the on-demand ``recap`` command pick up
     the same shape automatically.
     """
-    monday, sunday = _week_bounds_for(target_day)
+    monday, sunday = week_bounds(target_day)
     week_scores = repo.list_scores(date_from=monday, date_to=sunday)
 
     if _is_sunday(target_day):
@@ -88,7 +81,7 @@ def render_wrap(
     that route auto-selects the weekly format when the closed day is
     a Sunday.
     """
-    monday, sunday = _week_bounds_for(reference_day)
+    monday, sunday = week_bounds(reference_day)
     week_scores = repo.list_scores(date_from=monday, date_to=sunday)
     body = weekly_wrap(monday, sunday, week_scores,
                        enabled_games=settings.enabled_games)

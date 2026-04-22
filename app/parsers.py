@@ -33,6 +33,50 @@ GAMES = (
     "mini_sudoku",
 )
 
+# Single source of truth for how each game name is rendered in user-facing
+# messages (recaps, stats, rejection replies). Keep here alongside
+# :data:`GAMES` so there's one canonical list of games + display names.
+GAME_DISPLAY = {
+    "queens": "Queens",
+    "tango": "Tango",
+    "pinpoint": "Pinpoint",
+    "crossclimb": "Crossclimb",
+    "zip": "Zip",
+    "patches": "Patches",
+    "mini_sudoku": "Mini Sudoku",
+}
+
+# Preferred order for rendering per-game sections in recaps and stats.
+# Intentionally different from :data:`GAMES` (which is the parser dispatch
+# order): puts the time-based games first, then pinpoint, then the newer
+# games at the end so the recap reads predictably.
+GAME_DISPLAY_ORDER = (
+    "queens",
+    "tango",
+    "crossclimb",
+    "zip",
+    "pinpoint",
+    "patches",
+    "mini_sudoku",
+)
+
+
+def format_raw_score(game: str, raw: int) -> str:
+    """Render a stored ``raw_score`` as the human string a user would see.
+
+    - Pinpoint scores are guess counts (1–5): "``N guess``" or
+      "``N guesses``".
+    - Every other game stores seconds: "``M:SS``".
+
+    Shared between the webhook reply builder and the recap/wrap
+    formatters so both surfaces emit identical strings.
+    """
+    if game == "pinpoint":
+        noun = "guess" if raw == 1 else "guesses"
+        return f"{raw} {noun}"
+    minutes, seconds = divmod(raw, 60)
+    return f"{minutes}:{seconds:02d}"
+
 # How to locate each game's name inside free-text. Single-word games use a
 # plain ``\b``-bounded match; ``mini_sudoku`` has a space in the display
 # name so we use ``\s+`` between the tokens.

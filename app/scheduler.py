@@ -16,9 +16,10 @@ weekly wrap can reconcile the final standings.
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict, FrozenSet, List, Sequence, Set, Tuple
+from typing import Dict, FrozenSet, List, Sequence, Tuple
 
 from .db import ScoreRow
+from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER, format_raw_score
 from .scoring import (
     assign_daily_points,
     game_leaders,
@@ -26,39 +27,11 @@ from .scoring import (
     weekly_leaderboard,
 )
 
-_GAME_DISPLAY = {
-    "queens": "Queens",
-    "tango": "Tango",
-    "pinpoint": "Pinpoint",
-    "crossclimb": "Crossclimb",
-    "zip": "Zip",
-    "patches": "Patches",
-    "mini_sudoku": "Mini Sudoku",
-}
-
-_GAME_ORDER: Tuple[str, ...] = (
-    "queens",
-    "tango",
-    "crossclimb",
-    "zip",
-    "pinpoint",
-    "patches",
-    "mini_sudoku",
-)
-
-_ALL_GAMES = frozenset(_GAME_DISPLAY)
+_ALL_GAMES = frozenset(GAME_DISPLAY)
 
 
 def _pts(points: int) -> str:
     return "1 pt" if points == 1 else f"{points} pts"
-
-
-def _format_raw_score(game: str, raw: int) -> str:
-    if game == "pinpoint":
-        noun = "guess" if raw == 1 else "guesses"
-        return f"{raw} {noun}"
-    minutes, seconds = divmod(raw, 60)
-    return f"{minutes}:{seconds:02d}"
 
 
 def _games_word(n: int) -> str:
@@ -78,7 +51,7 @@ def _per_game_sections(
 
     Returns a list of lines; caller decides how to join with surrounding
     content. Games with no submissions for the day are silently skipped.
-    Groups are ordered by ``_GAME_ORDER`` and then by puzzle number
+    Groups are ordered by ``GAME_DISPLAY_ORDER`` and then by puzzle number
     (usually one puzzle per game per day, but this is future-proof).
     """
     groups: Dict[Tuple[str, int], List[ScoreRow]] = {}
@@ -86,7 +59,7 @@ def _per_game_sections(
         groups.setdefault((s.game, s.puzzle_no), []).append(s)
 
     lines: List[str] = []
-    for game in _GAME_ORDER:
+    for game in GAME_DISPLAY_ORDER:
         matching = sorted(
             (key for key in groups if key[0] == game),
             key=lambda k: k[1],
@@ -94,12 +67,12 @@ def _per_game_sections(
         for key in matching:
             group_scores = sorted(groups[key], key=lambda s: s.raw_score)
             points_map = assign_daily_points(group_scores)
-            lines.append(f"{_GAME_DISPLAY[game]} #{key[1]}")
+            lines.append(f"{GAME_DISPLAY[game]} #{key[1]}")
             for s in group_scores:
                 pts = points_map[s.player_id]
                 lines.append(
                     f"  {s.player_name} — "
-                    f"{_format_raw_score(game, s.raw_score)} ({_pts(pts)})"
+                    f"{format_raw_score(game, s.raw_score)} ({_pts(pts)})"
                 )
             lines.append("")
     # Drop the trailing blank so the caller controls spacing.
@@ -228,11 +201,11 @@ def weekly_wrap(
     if leaders:
         lines.append("")
         lines.append("Game winners:")
-        for game in _GAME_ORDER:
+        for game in GAME_DISPLAY_ORDER:
             gl = next((g for g in leaders if g.game == game), None)
             if gl is not None:
                 lines.append(
-                    f"  {_GAME_DISPLAY[game]}: "
+                    f"  {GAME_DISPLAY[game]}: "
                     f"{gl.player_name} ({_pts(gl.total_points)})"
                 )
 

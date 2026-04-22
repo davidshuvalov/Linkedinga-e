@@ -29,51 +29,19 @@ Commands (case-insensitive):
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Callable, Dict, FrozenSet, List, Optional, Set
+from typing import Callable, Dict, FrozenSet, List, Optional
 
 from .config import Settings
-from .db import Repository, ScoreRow
-from .parsers import GAMES, looks_like_score, parse_any
-from .puzzles import la_date
-
-_GAME_DISPLAY = {
-    "queens": "Queens",
-    "tango": "Tango",
-    "pinpoint": "Pinpoint",
-    "crossclimb": "Crossclimb",
-    "zip": "Zip",
-    "patches": "Patches",
-    "mini_sudoku": "Mini Sudoku",
-}
-
-_GAME_ORDER = (
-    "queens",
-    "tango",
-    "crossclimb",
-    "zip",
-    "pinpoint",
-    "patches",
-    "mini_sudoku",
+from .db import Repository
+from .parsers import (
+    GAME_DISPLAY,
+    GAME_DISPLAY_ORDER,
+    GAMES,
+    format_raw_score,
+    looks_like_score,
+    parse_any,
 )
-
-
-def _format_score(game: str, raw_score: int) -> str:
-    if game == "pinpoint":
-        noun = "guess" if raw_score == 1 else "guesses"
-        return f"{raw_score} {noun}"
-    minutes, seconds = divmod(raw_score, 60)
-    return f"{minutes}:{seconds:02d}"
-
-
-def _help_text() -> str:
-    """Kept for the rare case we want to surface help (not used on the
-    silent path)."""
-    return (
-        "Hi! Send me your LinkedIn game share text (Queens, Tango, "
-        "Pinpoint, Crossclimb, Zip, Patches, or Mini Sudoku) and I'll "
-        "track it for the weekly leaderboard.\n\n"
-        "Commands: stats, unparsed"
-    )
+from .puzzles import la_date
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +76,11 @@ def _handle_stats(repo: Repository, from_: str, profile_name: str) -> str:
         "",
         "Personal bests:",
     ]
-    for game in _GAME_ORDER:
+    for game in GAME_DISPLAY_ORDER:
         if game in best:
             lines.append(
-                f"  {_GAME_DISPLAY[game]}: "
-                f"{_format_score(game, best[game])} "
+                f"  {GAME_DISPLAY[game]}: "
+                f"{format_raw_score(game, best[game])} "
                 f"({count[game]} submissions)"
             )
 
@@ -235,7 +203,7 @@ def handle_inbound(
         # group context where a chatty bot would spam on every message.
         return None
 
-    pretty_game = _GAME_DISPLAY[parsed.game]
+    pretty_game = GAME_DISPLAY[parsed.game]
 
     # Reject stale/future puzzle numbers. LinkedIn rolls puzzles at
     # midnight US Pacific, so ``expected_puzzle_no`` uses LA time to pick
@@ -270,7 +238,7 @@ def handle_inbound(
         share_text=parsed.share_text,
     )
 
-    pretty_new = _format_score(parsed.game, parsed.raw_score)
+    pretty_new = format_raw_score(parsed.game, parsed.raw_score)
 
     if not inserted:
         existing_raw = repo.get_existing_score(
@@ -279,7 +247,7 @@ def handle_inbound(
             puzzle_no=parsed.puzzle_no,
         )
         if existing_raw is not None:
-            pretty_existing = _format_score(parsed.game, existing_raw)
+            pretty_existing = format_raw_score(parsed.game, existing_raw)
             return (
                 f"You already submitted {pretty_game} #{parsed.puzzle_no} "
                 f"with {pretty_existing}. "
