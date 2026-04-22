@@ -173,7 +173,7 @@ expected number by adding the LA-day delta. `zoneinfo` handles DST.
 
 Example rejection:
 
-> That's Zip #407 (a future day's puzzle). Today's Zip is #400 — I can
+> That's Zip #407 (a future day's puzzle). Today's Zip is #401 — I can
 > only record today's scores. (LinkedIn resets at midnight US Pacific.)
 
 To advance the epoch (e.g. if LinkedIn skips a number): update the
@@ -298,7 +298,7 @@ business-verification hassle for a friend bot.)
 4. From now on they DM their LinkedIn share text to that number —
    **not** into the friends' group chat. Example share:
    ```
-   Queens #721
+   Queens #722
    1:05
    ```
 5. Sandbox connections expire after 72 hours of silence. If a friend

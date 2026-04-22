@@ -65,14 +65,17 @@ class TestExpectedPuzzleNo:
             assert expected_puzzle_no(game, ts) == ref_no - 1
 
     def test_sydney_4pm_is_still_yesterdays_puzzle(self):
-        # 4pm Sydney on 23 Apr 2026 = 11pm LA on 22 Apr (still today in LA)
+        # 4pm Sydney on 23 Apr 2026 = 11pm LA on 22 Apr (still today in LA).
+        # Queens epoch pins 22 Apr LA → #722, so this Sydney time also
+        # resolves to #722.
         ts = datetime(2026, 4, 23, 16, 0, tzinfo=SYDNEY)
-        assert expected_puzzle_no("queens", ts) == 721
+        assert expected_puzzle_no("queens", ts) == 722
 
     def test_sydney_6pm_is_next_days_puzzle(self):
-        # 6pm Sydney on 23 Apr = 1am LA on 23 Apr (past midnight rollover)
+        # 6pm Sydney on 23 Apr = 1am LA on 23 Apr (past midnight rollover),
+        # so the next LA day → one more than the 22 Apr epoch.
         ts = datetime(2026, 4, 23, 18, 0, tzinfo=SYDNEY)
-        assert expected_puzzle_no("queens", ts) == 722
+        assert expected_puzzle_no("queens", ts) == 723
 
     def test_unknown_game_raises(self):
         ts = datetime(2026, 4, 22, 12, 0, tzinfo=LA)
@@ -101,14 +104,14 @@ class TestDstBoundary:
         assert la_date(ts) == date(2026, 11, 1)
         # Puzzle number is ref + 193 (2026-11-01 is 193 days after 2026-04-22).
         days = (date(2026, 11, 1) - date(2026, 4, 22)).days
-        assert expected_puzzle_no("queens", ts) == 721 + days
+        assert expected_puzzle_no("queens", ts) == 722 + days
 
     def test_across_dst_start_2027(self):
         # DST starts 2027-03-14. 7pm Sydney on that day = midnight LA
         # region — test a safe 6pm LA value instead to avoid ambiguity.
         ts = datetime(2027, 3, 14, 18, 0, tzinfo=LA)
         days = (date(2027, 3, 14) - date(2026, 4, 22)).days
-        assert expected_puzzle_no("queens", ts) == 721 + days
+        assert expected_puzzle_no("queens", ts) == 722 + days
 
 
 class TestWeekBounds:

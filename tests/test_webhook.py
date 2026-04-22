@@ -305,6 +305,8 @@ class TestHandleInbound:
 
     def test_zip_407_today_rejected(self, repo):
         # Belt-and-braces: the Zip #407 case David called out explicitly.
+        # With the Zip epoch at 401 for 22 Apr LA, #407 is still a future
+        # puzzle and should be rejected.
         from app.puzzles import expected_puzzle_no
 
         today = datetime(2026, 4, 22, 20, 0, tzinfo=SYDNEY)
@@ -318,7 +320,7 @@ class TestHandleInbound:
         )
         assert reply is not None
         assert "#407" in reply
-        assert "#400" in reply
+        assert "#401" in reply  # today's Zip per the current epoch
         assert len(repo.scores) == 0
 
     def test_gameish_with_hash_but_unparseable_still_replies(self, repo):
