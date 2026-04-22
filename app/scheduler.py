@@ -13,9 +13,7 @@ from typing import Dict, FrozenSet, List, Sequence, Set, Tuple
 
 from .db import ScoreRow
 from .scoring import (
-    PlayerWeeklyStats,
     assign_daily_points,
-    game_leaders,
     prize_allocations,
     weekly_leaderboard,
 )
@@ -57,10 +55,6 @@ def _format_raw_score(game: str, raw: int) -> str:
 
 def _games_word(n: int) -> str:
     return "1 game" if n == 1 else f"{n} games"
-
-
-def _days_word(n: int) -> str:
-    return "1 day" if n == 1 else f"{n} days"
 
 
 # ---------------------------------------------------------------------------
@@ -132,20 +126,20 @@ def daily_recap(
 # ---------------------------------------------------------------------------
 
 
-def _format_stats_line(rank: int, p: PlayerWeeklyStats) -> str:
-    return (
-        f"  {rank}. {p.player_name}: {_pts(p.total_points)} "
-        f"({_games_word(p.distinct_games)}, {_days_word(p.days_played)})"
-    )
-
-
 def weekly_wrap(
     week_start: date,
     week_end: date,
     scores: Sequence[ScoreRow],
     enabled_games: FrozenSet[str] = _ALL_GAMES,
 ) -> str:
-    """Format a weekly wrap covering ``[week_start, week_end]`` inclusive."""
+    """Format a weekly wrap covering ``[week_start, week_end]`` inclusive.
+
+    The body is deliberately short — just a header and the five prizes —
+    so it fits on one phone screen and is easy to forward from the
+    bot's 1:1 DM into the friends' group chat. The full leaderboard
+    and per-game winners still exist on the :func:`weekly_leaderboard`
+    + :func:`game_leaders` API surface; they're just not rendered here.
+    """
     header = (
         f"Weekly wrap — "
         f"{week_start.strftime('%a %d %b')} to "
@@ -162,52 +156,34 @@ def weekly_wrap(
 
     lb = weekly_leaderboard(week_scores)
     prizes = prize_allocations(lb)
-    leaders = game_leaders(week_scores)
 
-    lines: List[str] = [header, "", "Leaderboard:"]
-    for i, p in enumerate(lb, start=1):
-        lines.append(_format_stats_line(i, p))
-
-    # Per-game winners
-    if leaders:
-        lines.append("")
-        lines.append("Game winners:")
-        for game in _GAME_ORDER:
-            gl = next((g for g in leaders if g.game == game), None)
-            if gl is not None:
-                lines.append(
-                    f"  {_GAME_DISPLAY[game]}: "
-                    f"{gl.player_name} ({_pts(gl.total_points)})"
-                )
-
-    lines.append("")
-    lines.append("Prizes:")
+    lines: List[str] = [header, ""]
 
     if prizes.champion is not None:
         lines.append(
-            f"  Champion: {prizes.champion.player_name} "
+            f"Champion: {prizes.champion.player_name} "
             f"({_pts(prizes.champion.total_points)})"
         )
     if prizes.all_rounder is not None:
         lines.append(
-            f"  All-rounder: {prizes.all_rounder.player_name} "
+            f"All-rounder: {prizes.all_rounder.player_name} "
             f"({_games_word(prizes.all_rounder.distinct_games)})"
         )
     if prizes.most_firsts is not None:
         firsts = prizes.most_firsts.first_places
         firsts_word = "1 first" if firsts == 1 else f"{firsts} firsts"
         lines.append(
-            f"  Most firsts: {prizes.most_firsts.player_name} ({firsts_word})"
+            f"Most firsts: {prizes.most_firsts.player_name} ({firsts_word})"
         )
     if prizes.best_average is not None:
         ba = prizes.best_average
         lines.append(
-            f"  Best average: {ba.player_name} "
+            f"Best average: {ba.player_name} "
             f"(avg {ba.average_points:.1f} pts/game, {ba.submissions} submissions)"
         )
     if prizes.wooden_spoon is not None:
         lines.append(
-            f"  Wooden spoon: {prizes.wooden_spoon.player_name} "
+            f"Wooden spoon: {prizes.wooden_spoon.player_name} "
             f"({_pts(prizes.wooden_spoon.total_points)})"
         )
 

@@ -95,10 +95,9 @@ class TestRunWeeklyWrap:
         assert "Weekly wrap" in body
         assert "Mon 13 Apr" in body
         assert "Sun 19 Apr" in body
-        assert "Leaderboard" in body
-        assert "Prizes" in body
-        assert "Champion" in body
-        assert "Alice" in body
+        # Wrap is now a concise prize list (no Leaderboard or Game
+        # winners sections). Champion line should name Alice.
+        assert "Champion: Alice" in body
         mock_send.assert_called_once()
         call_args = mock_send.call_args
         assert call_args[0][1] == body

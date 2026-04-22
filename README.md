@@ -303,8 +303,11 @@ business-verification hassle for a friend bot.)
   stale / future puzzle numbers.
 - Daily recap (~5pm Sydney, drifting to 7pm Sydney through the year)
   lands in each friend's 1:1 chat with the bot, listing the day's
-  rankings. They can screenshot and paste into the group if they want.
-- Weekly wrap lands the same way on Monday evenings Sydney time.
+  rankings per game. They can screenshot and paste into the group if
+  they want.
+- Weekly wrap lands the same way on Monday evenings Sydney time —
+  deliberately short (header + the five prizes, ~6 lines total) so
+  it's easy to forward into the group chat as a single message.
 
 ### Pinned message template for your group
 
