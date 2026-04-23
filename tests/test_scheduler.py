@@ -104,6 +104,39 @@ class TestDailyRecap:
         assert "1. Alice: 10 pts" in out
         assert "2. Bob: 8 pts" in out
 
+    def test_per_game_running_totals_section(self):
+        # Per-game running point totals for the week — one line per
+        # game with each player's cumulative points in that game. Lets
+        # players see who's ahead in Queens specifically, not just on
+        # aggregate.
+        scores = [
+            # Queens Mon: Alice 5, Bob 4
+            _row(1, "Alice", "queens", 713, 10, MON),
+            _row(2, "Bob",   "queens", 713, 20, MON),
+            # Queens Tue: Bob 5, Alice 4 → weekly Queens = Alice 9, Bob 9
+            _row(1, "Alice", "queens", 714, 30, TUE),
+            _row(2, "Bob",   "queens", 714, 20, TUE),
+            # Tango Tue: Alice 5, Bob 4
+            _row(1, "Alice", "tango",  554, 10, TUE),
+            _row(2, "Bob",   "tango",  554, 20, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        assert "Game standings (week):" in out
+        # Tie at the top sorts lower player_id first (Alice before Bob).
+        assert "Queens: Alice 9, Bob 9" in out
+        assert "Tango: Alice 5, Bob 4" in out
+
+    def test_per_game_running_totals_excludes_disabled(self):
+        scores = [
+            _row(1, "Alice", "queens",   713, 10, MON),
+            _row(1, "Alice", "pinpoint", 713, 3,  MON),
+        ]
+        enabled_no_pinpoint = frozenset({"queens"})
+        out = daily_recap(MON, scores, enabled_no_pinpoint)
+        assert "Game standings (week):" in out
+        assert "Queens:" in out
+        assert "Pinpoint" not in out
+
 
 # ---------------------------------------------------------------------------
 # weekly_wrap
@@ -151,6 +184,34 @@ class TestWeeklyWrap:
         assert "Best average" in out
         assert "Alice" in out
         assert "5 submissions" in out
+
+    def test_fastest_total_time_prize_line(self):
+        # Alice plays 5 time-based rounds totalling 115s; Bob has a
+        # single sub-second run. Alice qualifies (≥5 rounds) and has
+        # the lowest total among eligible players, so she wins.
+        scores = [
+            _row(1, "Alice", "queens", 714, 10, TUE),
+            _row(2, "Bob",   "queens", 714, 5,  TUE),
+            _row(1, "Alice", "tango",  554, 20, TUE),
+            _row(1, "Alice", "zip",    393, 10, TUE),
+            _row(1, "Alice", "patches", 28, 15, TUE),
+            _row(1, "Alice", "mini_sudoku", 246, 60, TUE),
+        ]
+        out = weekly_wrap(MON, SUN, scores, ENABLED)
+        assert "Fastest total time" in out
+        assert "Alice" in out
+        # 10+20+10+15+60 = 115s → formatted as 1:55.
+        assert "1:55" in out
+        assert "5 rounds" in out
+
+    def test_fastest_total_time_suppressed_when_nobody_qualifies(self):
+        # Neither player clears the 5-round floor → line suppressed.
+        scores = [
+            _row(1, "Alice", "queens", 714, 10, TUE),
+            _row(2, "Bob",   "queens", 714, 20, TUE),
+        ]
+        out = weekly_wrap(MON, SUN, scores, ENABLED)
+        assert "Fastest total time" not in out
 
     def test_wrap_is_concise_enough_to_forward(self):
         # The whole point of keeping the format tight: the wrap stays
