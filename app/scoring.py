@@ -426,7 +426,10 @@ _CLUSTER_DROP_RATIO = 1.6            # Case B: r34 (or late-drop) > this
 _CLEAR_WINNER_RATIO = 1.5            # Case C: r12 > this
 _CLUSTER_BONUS_POOL = 1.5            # points redistributed in Case B
 _CLEAR_WINNER_MAX_BONUS = 2.0        # hard cap in Case C
-_MIN_SCORE = 0.5                     # floor for any player
+_MIN_SCORE = 0.0                     # floor for any player — only
+                                     # prevents negatives from debits;
+                                     # positions 6+ naturally stay at 0
+                                     # unless they tie with 5th place
 
 
 def _base_points_for_size(n: int) -> List[int]:
@@ -536,14 +539,18 @@ def _apply_clear_winner_bonus(
 def _floor_and_rebalance(
     scores: List[float], total_base: int, n: int
 ) -> List[float]:
-    """Enforce the 0.5 floor then rebalance the sum back to ``total_base``.
+    """Enforce the 0 floor then rebalance the sum back to ``total_base``.
 
-    Flooring can push the total above ``total_base`` (we raised some
-    scores without debiting others). A single scale_factor multiply
-    across every score restores the invariant without changing
-    rankings. Scaling can nudge a floored score back below 0.5, so we
-    re-apply the floor once more as a belt-and-braces step — the
-    rounding pass afterwards will pin the total exactly.
+    Only the cluster debit (Case B) can push a base-0 position below
+    zero; the floor exists purely to preserve the "no negative
+    scores" hard constraint, not to bump every low-ranked player up
+    to a participation minimum. Positions 6+ naturally stay at 0
+    unless they tie with 5th place (in which case base-points
+    averaging gives the tied pair 0.5 each via ``(1+0)/2``).
+
+    Flooring a negative score to 0 adds that deficit back to the
+    total; a single ``scale_factor`` multiply restores the invariant
+    without reordering rankings.
     """
     for i in range(n):
         if scores[i] < _MIN_SCORE:
@@ -568,8 +575,10 @@ def _round_and_reconcile(
 
     Rounding independently drifts the sum off ``total_base`` by up to
     ``n * 0.05``; the spec resolves that by dumping the difference on
-    the slowest player. We clamp that back to the 0.5 floor if needed —
-    the hard-constraint summary says min = 0.5 *after* all adjustments.
+    the slowest player. We clamp that back to the 0 floor if the
+    residue would drive them negative — accepts a ~0.1-pt total
+    mismatch in that rare case rather than violate the
+    "no negative scores" hard constraint.
     """
     rounded = [round(s, 1) for s in scores]
     diff = total_base - sum(rounded)
@@ -633,8 +642,11 @@ def competitive_score(
          * **Clear winner** (``r12 > 1.5``) — award 1st a ``min(2,
            2*(r12-1))`` bonus, debit the rest proportional to base.
          * Otherwise — no adjustment.
-    5. Enforce a 0.5 floor, scale back to the base-points total,
-       round to 1 d.p. with the residue absorbed by the last player.
+    5. Clamp any cluster-debit-induced negative to 0, scale back to
+       the base-points total, round to 1 d.p. with the residue
+       absorbed by the last player. Positions 6+ naturally stay at
+       0 unless they tie with 5th (only top 5 score; a tied 5th/6th
+       shares 0.5 each).
 
     Rankings never change (sorted input is preserved), scores are
     never negative, and the total is held constant (barring rounding).
