@@ -179,13 +179,18 @@ def _missing_today_line(
     return template.format(names=", ".join(missing))
 
 
+_GAME_STANDINGS_TOP_N = 3
+
+
 def _per_game_running_totals(
     week_scores: Sequence[ScoreRow],
 ) -> List[str]:
     """Per-game running point totals for the week so far.
 
-    Renders one line per game with each player's cumulative points in
-    that game, sorted descending so the current game leader is first.
+    Renders one line per game with the top 3 players' cumulative
+    points in that game, sorted descending so the current game
+    leader is first. Capping at 3 keeps the block skimmable — the
+    full leaderboard is already in the ``Week so far`` block below.
     Only games with any submissions this week appear; games are
     ordered by :data:`GAME_DISPLAY_ORDER` so the block is stable.
     Returns empty list if nothing's been played this week.
@@ -220,11 +225,13 @@ def _per_game_running_totals(
         totals = per_game_totals.get(game)
         if not totals:
             continue
-        # Sort players by (points desc, player_id asc) for stable order
+        # Sort players by (points desc, player_id asc) for stable
+        # order, then take only the top 3 — full leaderboard is in
+        # the ``Week so far`` block.
         ranked = sorted(
             totals.items(),
             key=lambda kv: (-kv[1], kv[0]),
-        )
+        )[:_GAME_STANDINGS_TOP_N]
         parts = [
             f"{player_names.get(pid, '')} {_compact(round(pts, 1))}"
             for pid, pts in ranked

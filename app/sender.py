@@ -84,3 +84,19 @@ def send_recap(
 
     for target in dm_targets:
         _send_one(settings, target, body)
+
+
+def send_dm(settings: Settings, to: str, body: str) -> bool:
+    """Send a single direct WhatsApp message.
+
+    Used by the morning-nudge job for per-player notifications. When
+    Twilio credentials aren't configured (local / test), prints the
+    message to stdout instead of calling the API so dev still works.
+    """
+    if not settings.twilio_account_sid:
+        logger.warning(
+            "TWILIO_ACCOUNT_SID not set — printing DM to stdout instead."
+        )
+        print(f"[DM to {to}]\n{body}\n")
+        return True
+    return _send_one(settings, to, body)

@@ -143,6 +143,31 @@ class Repository(Protocol):
         players with the flag set to ``False``."""
         ...
 
+    def list_players_active_since(self, since: date) -> List[Player]:
+        """Return :class:`Player` rows for everyone who submitted at
+        least one score on or after ``since``. Used by the morning
+        nudge job to identify "regulars" (players who'd typically
+        be playing this week) and by the early-recap-fire check to
+        decide who counts toward "everyone's done"."""
+        ...
+
+    def has_recap_been_sent(
+        self, recap_date: date, recap_type: str
+    ) -> bool:
+        """Has a recap of ``recap_type`` (``"daily"`` or ``"weekly"``)
+        been sent for ``recap_date`` already? Used by the scheduled
+        cron to skip a day that's already had its early-fire recap,
+        and by the early-fire path to avoid double-sending."""
+        ...
+
+    def mark_recap_sent(
+        self, recap_date: date, recap_type: str
+    ) -> None:
+        """Record that a recap of ``recap_type`` has been sent for
+        ``recap_date``. Idempotent — calling twice for the same
+        (date, type) pair is a no-op."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # In-memory implementation (tests + local fallback)
@@ -158,6 +183,9 @@ class InMemoryRepository:
     _score_keys: set = field(default_factory=set)
     scores: List[Dict[str, Any]] = field(default_factory=list)
     unparsed: List[Dict[str, Any]] = field(default_factory=list)
+    # (date, type) → sent. Stores a set since the only thing we ever
+    # ask is "has this pair been recorded?".
+    _recap_sent: set = field(default_factory=set)
 
     def get_or_create_player(
         self, whatsapp_id: str, display_name: str
@@ -334,6 +362,27 @@ class InMemoryRepository:
     def list_recent_unparsed(self, *, limit: int = 10) -> List[Dict[str, Any]]:
         return list(reversed(self.unparsed[-limit:]))
 
+    def list_players_active_since(self, since: date) -> List[Player]:
+        active_ids = {
+            s["player_id"]
+            for s in self.scores
+            if s["puzzle_date"] >= since
+        }
+        # Preserve player_id order so the morning-nudge sequence is
+        # deterministic in tests and predictable in logs.
+        by_id = {p.id: p for p in self._players.values()}
+        return [by_id[pid] for pid in sorted(active_ids) if pid in by_id]
+
+    def has_recap_been_sent(
+        self, recap_date: date, recap_type: str
+    ) -> bool:
+        return (recap_date, recap_type) in self._recap_sent
+
+    def mark_recap_sent(
+        self, recap_date: date, recap_type: str
+    ) -> None:
+        self._recap_sent.add((recap_date, recap_type))
+
 
 # ---------------------------------------------------------------------------
 # Supabase implementation
@@ -349,6 +398,48 @@ class SupabaseRepository:
 
     def __init__(self, client: Any) -> None:
         self._client = client
+        # ``notifications_enabled`` was added to ``players`` after the
+        # initial schema. Detect once on construction so every
+        # subsequent query picks the right SELECT columns — avoids
+        # hitting a "column does not exist" error on every inbound
+        # message if the migration hasn't been applied yet.
+        self._has_notifications_column = self._detect_notifications_column()
+
+    def _detect_notifications_column(self) -> bool:
+        """Probe whether ``players.notifications_enabled`` exists.
+
+        Returns ``False`` (and logs a warning) if the canary query
+        fails — we assume that's the migration not being applied
+        rather than a transient network error, because old-schema
+        installs should still work gracefully.
+        """
+        try:
+            (
+                self._client.table("players")
+                .select("notifications_enabled")
+                .limit(1)
+                .execute()
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — intentionally broad
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "players.notifications_enabled column missing (%s). "
+                "Run `db/schema.sql` to enable notify on/off. Until "
+                "then, all players receive recap DMs by default.",
+                exc,
+            )
+            return False
+
+    def _player_select_cols(self) -> str:
+        """SELECT column list for reads against ``players`` — omits
+        ``notifications_enabled`` on old schemas so the query doesn't
+        fail with a column-does-not-exist error."""
+        base = "id, whatsapp_id, display_name"
+        if self._has_notifications_column:
+            base += ", notifications_enabled"
+        return base
 
     def _row_to_player(self, row: Dict[str, Any]) -> Player:
         # ``notifications_enabled`` is a recent column; fall back to
@@ -365,7 +456,7 @@ class SupabaseRepository:
     ) -> Player:
         resp = (
             self._client.table("players")
-            .select("id, whatsapp_id, display_name, notifications_enabled")
+            .select(self._player_select_cols())
             .eq("whatsapp_id", whatsapp_id)
             .limit(1)
             .execute()
@@ -394,6 +485,11 @@ class SupabaseRepository:
     def set_notifications_enabled(
         self, player_id: int, enabled: bool
     ) -> None:
+        if not self._has_notifications_column:
+            raise RuntimeError(
+                "players.notifications_enabled column missing — run "
+                "db/schema.sql migration before using notify on/off"
+            )
         (
             self._client.table("players")
             .update({"notifications_enabled": enabled})
@@ -517,11 +613,15 @@ class SupabaseRepository:
         date_from: date,
         date_to: date,
     ) -> List[str]:
+        # Embed the notifications_enabled column only if it exists —
+        # otherwise this SELECT would fail with "column does not
+        # exist" and take every recap command down with it.
+        embed_cols = "whatsapp_id"
+        if self._has_notifications_column:
+            embed_cols += ", notifications_enabled"
         resp = (
             self._client.table("scores")
-            .select(
-                "player_id, players(whatsapp_id, notifications_enabled)"
-            )
+            .select(f"player_id, players({embed_cols})")
             .gte("puzzle_date", date_from.isoformat())
             .lte("puzzle_date", date_to.isoformat())
             .execute()
@@ -594,3 +694,57 @@ class SupabaseRepository:
             .execute()
         )
         return resp.data or []
+
+    def list_players_active_since(self, since: date) -> List[Player]:
+        # Two queries on purpose: first the distinct active player_ids
+        # for the date window, then the players themselves. PostgREST
+        # doesn't support DISTINCT in the embed selector, so doing it
+        # in Python avoids a giant deduped JSON payload.
+        scores_resp = (
+            self._client.table("scores")
+            .select("player_id")
+            .gte("puzzle_date", since.isoformat())
+            .execute()
+        )
+        active_ids = sorted({row["player_id"] for row in scores_resp.data or []})
+        if not active_ids:
+            return []
+        players_resp = (
+            self._client.table("players")
+            .select(self._player_select_cols())
+            .in_("id", active_ids)
+            .execute()
+        )
+        return [self._row_to_player(r) for r in players_resp.data or []]
+
+    def has_recap_been_sent(
+        self, recap_date: date, recap_type: str
+    ) -> bool:
+        resp = (
+            self._client.table("recap_log")
+            .select("id")
+            .eq("recap_date", recap_date.isoformat())
+            .eq("recap_type", recap_type)
+            .limit(1)
+            .execute()
+        )
+        return bool(resp.data)
+
+    def mark_recap_sent(
+        self, recap_date: date, recap_type: str
+    ) -> None:
+        # Pre-check rather than relying on the unique constraint —
+        # supabase-py surfaces conflict errors as raised exceptions
+        # and we want this method to be quietly idempotent.
+        if self.has_recap_been_sent(recap_date, recap_type):
+            return
+        (
+            self._client.table("recap_log")
+            .insert(
+                {
+                    "recap_date": recap_date.isoformat(),
+                    "recap_type": recap_type,
+                }
+            )
+            .execute()
+        )

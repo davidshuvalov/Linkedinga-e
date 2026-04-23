@@ -772,7 +772,12 @@ def _handle_notify(
     scheduled recap."""
     display_name = (profile_name or "").strip() or from_
     player = repo.get_or_create_player(from_, display_name)
-    repo.set_notifications_enabled(player.id, enabled)
+    try:
+        repo.set_notifications_enabled(player.id, enabled)
+    except RuntimeError as exc:
+        # Surface the migration-missing message so the admin sees
+        # why it's not sticking instead of a generic bot error.
+        return f"Can't toggle notifications yet: {exc}"
     if enabled:
         return "Notifications on — you'll receive the daily recap."
     return "Notifications off — you won't get the daily recap. Submit scores anytime."
@@ -947,6 +952,24 @@ def handle_inbound(
     off_note = ""
     if parsed.game not in enabled_games:
         off_note = " (Not tracked for the leaderboard.)"
+
+    # Event-driven early recap: if this submission completes the day
+    # (everyone's played all enabled games), fire the recap right
+    # away rather than waiting for the LA-midnight cron. Wrapped in
+    # try/except so a failure in the recap path can't sink the
+    # acknowledgment of a perfectly valid submission.
+    if settings is not None:
+        try:
+            from .jobs import maybe_fire_early_recap
+
+            maybe_fire_early_recap(repo, settings, now=now)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "maybe_fire_early_recap failed after insert by player %s",
+                player.id,
+            )
 
     return (
         f"Got it, {player.display_name}. "
