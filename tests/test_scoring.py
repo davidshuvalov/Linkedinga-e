@@ -143,18 +143,35 @@ class TestAssignDailyPoints:
         # Round total preserved.
         assert abs(sum(pts.values()) - 14.0) < 0.05
 
-    def test_legacy_fallback_for_large_round(self):
-        # Competitive scoring supports 3–5 players; 6+ routes to legacy.
+    def test_six_player_round_through_competitive_clear_winner(self):
+        # 6 players with r12 = 2.0 (P1 = 10s, P2 = 20s) — Case C
+        # fires for the 1st-place clear winner. P1 gets a bonus,
+        # the rest absorb proportional debit, P6 floors at 0.5.
+        # Round total still lands at 15 (5+4+3+2+1+0).
         scores = [_row(i, f"P{i}", "queens", 714, i * 10) for i in range(1, 7)]
         pts = assign_daily_points(scores)
-        # Legacy points are 5, 4, 3, 2, 1, 0.
-        assert pts == {1: 5.0, 2: 4.0, 3: 3.0, 4: 2.0, 5: 1.0, 6: 0.0}
+        # Bonus on 1st: cap is +2, so >= 5.
+        assert pts[1] >= 5.0
+        assert pts[1] > pts[2] > pts[3] > pts[4] > pts[5]
+        # Rounding sometimes puts 6th equal to 5th rather than below;
+        # what matters is that 6th never overtakes 5th.
+        assert pts[5] >= pts[6]
+        # 6th floored to 0.5 (from a base of 0).
+        assert pts[6] >= 0.5
+        # Round total preserved within rounding noise.
+        assert abs(sum(pts.values()) - 15.0) < 0.2
 
-    def test_sixth_and_beyond_get_zero(self):
+    def test_seventh_and_beyond_floor_to_minimum(self):
+        # 7-player round; positions 6+ have base 0 and end up at the
+        # 0.5 floor. Top 5 still rank in descending order.
         scores = [_row(i, f"P{i}", "queens", 714, i * 10) for i in range(1, 8)]
-        r = assign_daily_points(scores)
-        assert r[6] == 0
-        assert r[7] == 0
+        pts = assign_daily_points(scores)
+        assert pts[1] > pts[2] > pts[3] > pts[4] > pts[5]
+        # 6th and 7th both at the floor (or close to it after rebalancing).
+        assert pts[6] >= 0.5
+        assert pts[7] >= 0.5
+        # Total still ~15.
+        assert abs(sum(pts.values()) - 15.0) < 0.5
 
     def test_tied_2nd_3rd_through_competitive(self):
         # 4-player round with tied 2nd/3rd. r12 = 2.0 triggers the
@@ -743,11 +760,33 @@ class TestCompetitiveScore:
         with pytest.raises(ValueError):
             competitive_score([{"name": "A", "time": 10}])
 
-    def test_rejects_more_than_five_players(self):
-        with pytest.raises(ValueError):
-            competitive_score([
-                {"name": str(i), "time": i * 10} for i in range(1, 7)
-            ])
+    def test_supports_six_players_clear_winner(self):
+        # 6-player round, P1 way ahead → Case C clear-winner bonus
+        # fires. Round total stays at 15 (5+4+3+2+1+0). 6th place
+        # ends up at the 0.5 floor since base[5] = 0.
+        out = competitive_score([
+            {"name": "Simon", "time": 6},
+            {"name": "Ben",   "time": 15},
+            {"name": "adamk", "time": 20},
+            {"name": "David", "time": 25},
+            {"name": "Doron", "time": 30},
+            {"name": "Darren","time": 35},
+        ])
+        scores = self._scores(out)
+        assert scores[0] > 5.0          # bonus on the runaway leader
+        assert scores == sorted(scores, reverse=True)
+        assert min(scores) >= 0.5
+        assert abs(sum(scores) - 15.0) < 0.2
+
+    def test_supports_arbitrary_size(self):
+        # 8-player round still totals ~15; 6th–8th sit at the 0.5 floor.
+        out = competitive_score([
+            {"name": str(i), "time": i * 5} for i in range(1, 9)
+        ])
+        scores = self._scores(out)
+        assert scores == sorted(scores, reverse=True)
+        assert min(scores) >= 0.5
+        assert abs(sum(scores) - 15.0) < 0.5
 
     def test_rejects_non_positive_time(self):
         with pytest.raises(ValueError):

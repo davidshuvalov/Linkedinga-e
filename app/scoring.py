@@ -169,13 +169,16 @@ def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, float]:
     Dispatches between two systems based on the round shape:
 
     - **competitive_score** (rank + time-performance blended; the
-      CASE A/B/C algorithm) for 3–5 player time-based rounds.
-      Handles ties inline by averaging base points and sharing any
-      awarded bonus. Emits floats rounded to 1 d.p.
-    - **legacy rank-based** shares of positional points for pinpoint
-      (guess count, not seconds) and rounds outside 3–5 players.
-      Tied players split the sum of the positions they'd fill; no
-      ceiling applied so the round total stays invariant.
+      CASE A/B/C algorithm) for any round of 3+ players in a
+      time-based game. Handles ties inline by averaging base
+      points and sharing any awarded bonus. Emits floats rounded
+      to 1 d.p. Round total stays invariant per round size
+      (12 for 3p, 14 for 4p, 15 for 5+).
+    - **legacy rank-based** shares of positional points for
+      pinpoint (guess count, not seconds) and 1–2 player rounds
+      where the ratio model has nothing to bite on. Tied players
+      split the sum of the positions they'd fill; no ceiling
+      applied so the round total stays invariant.
 
     ``scores`` should all be for a single ``(game, puzzle_no)``.
     """
@@ -189,9 +192,9 @@ def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, float]:
     # "time" difference which is nonsense. Route all pinpoint rounds
     # through the legacy rank system.
     pinpoint_free = all(s.game not in _NON_TIME_GAMES for s in sorted_scores)
-    within_size = 3 <= n <= 5
+    big_enough = n >= 3
 
-    if pinpoint_free and within_size:
+    if pinpoint_free and big_enough:
         players = [
             {"name": s.player_name, "time": s.raw_score}
             for s in sorted_scores
@@ -416,15 +419,6 @@ def prize_allocations(leaderboard: Sequence[PlayerWeeklyStats]) -> Prizes:
 # competitive_score: rank + time-performance blended scoring
 # ---------------------------------------------------------------------------
 
-# Supported round sizes → base points. Kept in sync with the spec; total
-# points are preserved through adjustments so the sum is invariant at 15
-# (5-player), 14 (4-player), or 12 (3-player).
-_BASE_POINTS_BY_SIZE: Dict[int, List[int]] = {
-    3: [5, 4, 3],
-    4: [5, 4, 3, 2],
-    5: [5, 4, 3, 2, 1],
-}
-
 # Spec thresholds. Named constants so the classification reads like the spec.
 _TIGHT_SPREAD_THRESHOLD = 0.5        # Case A: spread < this
 _CLUSTER_TOP_RATIO = 1.4             # Case B: r12 and r23 both < this
@@ -433,6 +427,20 @@ _CLEAR_WINNER_RATIO = 1.5            # Case C: r12 > this
 _CLUSTER_BONUS_POOL = 1.5            # points redistributed in Case B
 _CLEAR_WINNER_MAX_BONUS = 2.0        # hard cap in Case C
 _MIN_SCORE = 0.5                     # floor for any player
+
+
+def _base_points_for_size(n: int) -> List[int]:
+    """Base points by rank for an ``n``-player round.
+
+    Reuses :data:`_POSITION_POINTS` (1st=5, 2nd=4, … 5th=1, 6th+=0)
+    so a 5-player round gets ``[5,4,3,2,1]`` (total 15) and a
+    6-player round gets ``[5,4,3,2,1,0]`` (total still 15). The
+    spec only enumerates 3/4/5 explicitly, but the natural
+    extension keeps the round total invariant at 15 for any
+    ``n >= 5`` and at 12/14 for 3/4-player rounds — matching the
+    legacy convention the bot already uses for 6+ player rounds.
+    """
+    return [_POSITION_POINTS.get(rank, 0) for rank in range(1, n + 1)]
 
 
 def _classify_round(
@@ -631,9 +639,9 @@ def competitive_score(
     Rankings never change (sorted input is preserved), scores are
     never negative, and the total is held constant (barring rounding).
     """
-    if not 3 <= len(players) <= 5:
+    if len(players) < 3:
         raise ValueError(
-            f"competitive_score expects 3–5 players, got {len(players)}"
+            f"competitive_score expects at least 3 players, got {len(players)}"
         )
     for p in players:
         if "name" not in p or "time" not in p:
@@ -644,7 +652,7 @@ def competitive_score(
     # Step 1 — sort fastest-first.
     sorted_players = sorted(players, key=lambda p: p["time"])
     n = len(sorted_players)
-    raw_base = _BASE_POINTS_BY_SIZE[n]
+    raw_base = _base_points_for_size(n)
     total_base = sum(raw_base)
     times = [float(p["time"]) for p in sorted_players]
 
