@@ -47,11 +47,9 @@ _MISSING_TODAY_TEMPLATES = (
 
 
 def _format_seconds(total: int) -> str:
-    """Render a seconds count as ``M:SS`` (or ``H:MM:SS`` past an hour)."""
-    if total >= 3600:
-        hours, rem = divmod(total, 3600)
-        minutes, seconds = divmod(rem, 60)
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    """Render a seconds count as ``M:SS``. Minutes can exceed 60 —
+    weekly time totals sometimes cross an hour and we keep one
+    consistent format so rows line up."""
     minutes, seconds = divmod(total, 60)
     return f"{minutes}:{seconds:02d}"
 
@@ -141,24 +139,56 @@ def _per_game_sections(
     return lines
 
 
+def _rank_delta_suffix(
+    prior_ranks: Dict[int, int], player_id: int, current_rank: int
+) -> str:
+    """Render ``↑N`` / ``↓N`` / ``=`` / ``NEW`` based on how the player's
+    rank moved since ``prior_ranks``. Empty string when there's nothing
+    to compare against (callers skip the whole block in that case)."""
+    prev = prior_ranks.get(player_id)
+    if prev is None:
+        return " NEW"
+    if prev == current_rank:
+        return " ="
+    if prev > current_rank:
+        return f" ↑{prev - current_rank}"
+    return f" ↓{current_rank - prev}"
+
+
 def _weekly_leaderboard_lines(
     week_scores: Sequence[ScoreRow],
     title: str = "Week so far",
+    prior_scores: Optional[Sequence[ScoreRow]] = None,
 ) -> List[str]:
     """Render the cumulative weekly leaderboard as a compact list.
 
     Used by both the daily recap (midweek: "Week so far") and the
     weekly wrap (final: "Week totals"). Returns empty list if nobody
     has submitted anything this week.
+
+    When ``prior_scores`` is non-empty (typically the week's scores
+    before ``day``), each row gets a position-change suffix comparing
+    today's rank to the prior standings. On Monday there's no prior
+    standings so arrows are omitted entirely.
     """
     lb = weekly_leaderboard(week_scores)
     if not lb:
         return []
+
+    prior_lb = weekly_leaderboard(list(prior_scores)) if prior_scores else []
+    prior_ranks = {p.player_id: i for i, p in enumerate(prior_lb, start=1)}
+    show_arrows = bool(prior_lb)
+
     lines: List[str] = [f"{title}:"]
     for i, p in enumerate(lb, start=1):
+        suffix = (
+            _rank_delta_suffix(prior_ranks, p.player_id, i)
+            if show_arrows
+            else ""
+        )
         lines.append(
             f"  {i}. {p.player_name}: {_pts(p.total_points)} "
-            f"(G:{p.submissions}, T: {_format_seconds(p.total_time)})"
+            f"(G:{p.submissions}, T: {_format_seconds(p.total_time)}){suffix}"
         )
     return lines
 
@@ -305,7 +335,14 @@ def daily_recap(
         lines.append("")
         lines.extend(game_totals_lines)
 
-    lb_lines = _weekly_leaderboard_lines(week_filtered, title="Week so far")
+    # Prior standings = the week up to but not including today, so
+    # the position-change arrows compare today's board to yesterday's.
+    prior_scores = [s for s in week_filtered if s.puzzle_date < day]
+    lb_lines = _weekly_leaderboard_lines(
+        week_filtered,
+        title="Week so far",
+        prior_scores=prior_scores,
+    )
     if lb_lines:
         lines.append("")
         lines.extend(lb_lines)
@@ -384,10 +421,15 @@ def weekly_wrap(
                 g_subs, g_time = _player_game_totals(
                     week_filtered, gl.player_id, game
                 )
+                # Pinpoint tracks guess counts, not seconds — the
+                # total would always render as 0:00, so drop T:.
+                if game in _NON_TIME_GAMES:
+                    stats = f"G:{g_subs}"
+                else:
+                    stats = f"G:{g_subs}, T: {_format_seconds(g_time)}"
                 lines.append(
                     f"  {GAME_DISPLAY[game]}: "
-                    f"{gl.player_name} ({_pts(gl.total_points)}, "
-                    f"G:{g_subs}, T: {_format_seconds(g_time)})"
+                    f"{gl.player_name} ({_pts(gl.total_points)}, {stats})"
                 )
 
     # Prizes

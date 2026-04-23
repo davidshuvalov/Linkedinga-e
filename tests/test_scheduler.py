@@ -127,6 +127,63 @@ class TestDailyRecap:
         assert "1. Alice: 10 pts" in out
         assert "2. Bob: 8 pts" in out
 
+    def test_week_so_far_position_change_arrows(self):
+        # Mon: Alice wins Queens (5), Bob second (4) → Alice 1st, Bob 2nd.
+        # Tue: Bob wins Tango (5), Alice second (4) → Alice 9, Bob 9
+        #      (tie, broken by player_id so Alice still 1st). Position
+        #      didn't change → both show "=".
+        scores = [
+            _row(1, "Alice", "queens", 713, 10, MON),
+            _row(2, "Bob",   "queens", 713, 20, MON),
+            _row(1, "Alice", "tango",  554, 20, TUE),
+            _row(2, "Bob",   "tango",  554, 10, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        assert "1. Alice" in out
+        assert "=" in out  # position unchanged for at least one row
+
+    def test_week_so_far_position_change_swap(self):
+        # Mon: Bob wins (5), Alice second (4) → Bob 1st, Alice 2nd.
+        # Tue: Alice crushes a solo Tango round; she overtakes.
+        scores = [
+            _row(1, "Alice", "queens", 713, 20, MON),
+            _row(2, "Bob",   "queens", 713, 10, MON),
+            _row(1, "Alice", "tango",  554, 10, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        # Alice moved from 2nd to 1st: ↑1. Bob moved from 1st to 2nd: ↓1.
+        assert "↑1" in out
+        assert "↓1" in out
+
+    def test_week_so_far_no_arrows_on_monday(self):
+        # First day of the week — nothing to compare against, arrows
+        # should be suppressed entirely.
+        scores = [
+            _row(1, "Alice", "queens", 713, 10, MON),
+            _row(2, "Bob",   "queens", 713, 20, MON),
+        ]
+        out = daily_recap(MON, scores, ENABLED)
+        for marker in ("↑", "↓", " =", " NEW"):
+            assert marker not in out
+
+    def test_week_so_far_new_player_tagged(self):
+        # Alice played Mon; Charlie shows up for the first time Tue.
+        # Alice keeps her rank; Charlie gets "NEW".
+        scores = [
+            _row(1, "Alice",   "queens", 713, 10, MON),
+            _row(1, "Alice",   "tango",  554, 30, TUE),
+            _row(3, "Charlie", "tango",  554, 20, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        assert "Charlie" in out
+        # Target the leaderboard row specifically — it begins with the
+        # "<rank>. <name>:" prefix, distinguishing it from the per-game
+        # row which uses "<name> —".
+        charlie_line = next(
+            ln for ln in out.splitlines() if "Charlie:" in ln
+        )
+        assert "NEW" in charlie_line
+
     def test_per_game_running_totals_section(self):
         # Per-game running point totals for the week — one line per
         # game with each player's cumulative points in that game. Lets
