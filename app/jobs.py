@@ -36,6 +36,7 @@ from .db import Repository
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER
 from .puzzles import la_date, week_bounds
 from .scheduler import daily_recap, weekly_wrap
+from .scoring import PlayerWeeklyStats, weekly_leaderboard
 from .sender import send_dm, send_recap
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,101 @@ def run_daily_recap(
     body, dm_targets = render_daily(repo, settings, target_day)
     send_recap(settings, body, dm_targets=dm_targets)
     repo.mark_recap_sent(target_day, recap_type)
+    send_champion_loser_dms(repo, settings, target_day)
     return body
+
+
+# ---------------------------------------------------------------------------
+# Champion / wooden-spoon personal DMs (Sunday LA only)
+# ---------------------------------------------------------------------------
+
+
+def _fmt_weekly_points(val: float) -> str:
+    """Cheap local copy of the points formatter — avoids pulling
+    ``_pts`` across module boundaries."""
+    if abs(val - round(val)) < 1e-9:
+        p = int(round(val))
+        return "1 pt" if p == 1 else f"{p} pts"
+    return f"{val:.1f} pts"
+
+
+_CHAMPION_TEMPLATES = (
+    "MASSIVE congrats {name} — you are THIS WEEK'S CHAMPION with {points}. "
+    "No time for losers, for you are THE champion. Flex responsibly.",
+    "{name}. Week {iso}. CHAMPION. {points}. "
+    "Somewhere, a loser is weeping. That loser is not you.",
+    "Put the trophy on the mantelpiece, {name}. "
+    "Week's over, you won it. {points}. King/queen behaviour.",
+)
+_LOSER_TEMPLATES = (
+    "{name} — wooden spoon this week with {points}. "
+    "Someone has to be the floor the champion dances on. "
+    "New week, new chance. Probably.",
+    "{name}, bad news: you finished last ({points}). "
+    "Good news: only way is up. Medium news: we're all laughing.",
+    "Congratulations {name}, you are this week's official {points} "
+    "person of the week — aka last. Get your revenge Monday.",
+)
+
+
+def _pick_template(templates: tuple, key: int) -> str:
+    return templates[key % len(templates)]
+
+
+def send_champion_loser_dms(
+    repo: Repository,
+    settings: Settings,
+    target_day: date,
+) -> List[str]:
+    """On Sunday LA only: DM the top and bottom of the week's final
+    leaderboard with personalised congrats / roast copy.
+
+    Silent on non-Sundays so callers can invoke it unconditionally
+    after ``mark_recap_sent`` without branching on the day. Returns
+    the ``whatsapp_id`` list that received a DM — exposed for tests
+    and logging.
+    """
+    if not _is_sunday(target_day):
+        return []
+    if not settings.enabled_games:
+        return []
+
+    monday, sunday = week_bounds(target_day)
+    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    filtered = [s for s in week_scores if s.game in settings.enabled_games]
+    lb = weekly_leaderboard(filtered)
+    # Need at least two players for champion vs. wooden-spoon to
+    # mean anything — a solo player is neither a champion nor a loser.
+    if len(lb) < 2:
+        return []
+
+    champion: PlayerWeeklyStats = lb[0]
+    loser: PlayerWeeklyStats = lb[-1]
+
+    players = repo.list_players_active_since(monday)
+    by_id = {p.id: p for p in players}
+    iso_week = target_day.isocalendar()[1]
+
+    sent: List[str] = []
+    pairs = (
+        (champion, _CHAMPION_TEMPLATES),
+        (loser, _LOSER_TEMPLATES),
+    )
+    for stats, templates in pairs:
+        player = by_id.get(stats.player_id)
+        if player is None or not player.notifications_enabled:
+            continue
+        # Key template choice on iso_week so the copy rotates
+        # week-to-week but stays the same for both recipients in
+        # one week (cleaner if they ever compare notes).
+        body = _pick_template(templates, iso_week).format(
+            name=player.display_name,
+            points=_fmt_weekly_points(stats.total_points),
+            iso=iso_week,
+        )
+        if send_dm(settings, player.whatsapp_id, body):
+            sent.append(player.whatsapp_id)
+    return sent
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +305,7 @@ def maybe_fire_early_recap(
     body, dm_targets = render_daily(repo, settings, today)
     send_recap(settings, body, dm_targets=dm_targets)
     repo.mark_recap_sent(today, recap_type)
+    send_champion_loser_dms(repo, settings, today)
     return body
 
 
