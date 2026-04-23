@@ -59,6 +59,34 @@ _RECAP_DATE_RE = re.compile(
 )
 
 
+# Compact help message. Used by the ``help`` / ``?`` command and as
+# the fallback reply when the bot can't classify a message. Kept
+# short enough to fit a single WhatsApp bubble without scrolling.
+_HELP_TEXT = (
+    "Commands:\n"
+    "  stats — your all-time stats & personal bests\n"
+    "  recap / today — today's recap\n"
+    "  yesterday — yesterday's recap\n"
+    "  \"3 days ago\" — any day this week (1–6)\n"
+    "  recap YYYY-MM-DD — a specific day\n"
+    "  week / wrap — this week's wrap\n"
+    "  all / history — every round this week\n"
+    "  help / ? — show this list\n"
+    "\n"
+    "Submit a score by pasting the LinkedIn share text, e.g.:\n"
+    "  Queens #714\n"
+    "  0:10"
+)
+
+# Format hint when a message looks score-ish but didn't parse. Doesn't
+# dump the full command list — the user clearly meant to submit a score.
+_SCORE_FORMAT_HINT = (
+    "Expected a LinkedIn share like:\n"
+    "  Queens #714\n"
+    "  0:10"
+)
+
+
 def _resolve_recap_target(
     lower: str, today: date
 ) -> Optional[tuple[date, Optional[str]]]:
@@ -293,6 +321,8 @@ def handle_inbound(
 
     # Check for commands before attempting score parsing
     lower = body_stripped.lower()
+    if lower in ("help", "?", "commands"):
+        return _HELP_TEXT
     if lower == "stats":
         return _handle_stats(repo, from_, profile_name)
     if lower == "unparsed":
@@ -319,12 +349,13 @@ def handle_inbound(
         if looks_like_score(body_stripped):
             repo.log_unparsed(from_, body_stripped)
             return (
-                "That looks like a LinkedIn game share but I couldn't parse "
-                "it. I've logged the message so we can tune the format."
+                "That looks like a LinkedIn game share but I couldn't read "
+                f"it — logged for a parser fix.\n\n{_SCORE_FORMAT_HINT}"
             )
-        # Plain chatter — stay silent. This is especially important in a
-        # group context where a chatty bot would spam on every message.
-        return None
+        # Doesn't look like a score and doesn't match a command — reply
+        # with a help blurb so users aren't left guessing. (The bot
+        # operates in 1:1 DMs, so this won't spam a group chat.)
+        return f"I didn't understand that.\n\n{_HELP_TEXT}"
 
     pretty_game = GAME_DISPLAY[parsed.game]
 

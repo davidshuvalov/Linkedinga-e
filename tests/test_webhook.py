@@ -158,14 +158,18 @@ class TestHandleInbound:
             profile_name="Alice",
             now=NOW,
         )
-        assert "couldn't parse" in reply.lower()
+        assert "couldn't read" in reply.lower()
+        # Format hint should be included so the sender knows how to retry.
+        assert "Queens #" in reply
+        assert "0:10" in reply
         assert len(repo.unparsed) == 1
         assert repo.unparsed[0]["whatsapp_id"] == "whatsapp:+61400000001"
         assert len(repo.scores) == 0
 
-    def test_unrelated_chatter_is_silent(self, repo):
-        # Group-chat hygiene: the bot must not reply with help text on
-        # normal chatter, otherwise every "hey" would spam the group.
+    def test_unrelated_chatter_gets_help(self, repo):
+        # Bot operates in 1:1 DMs — silence left users guessing. Now
+        # replies with a "didn't understand" blurb + command list so
+        # they can see their options.
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -173,11 +177,17 @@ class TestHandleInbound:
             profile_name="Alice",
             now=NOW,
         )
-        assert reply is None
+        assert reply is not None
+        assert "didn't understand" in reply.lower()
+        assert "stats" in reply
+        assert "recap" in reply
         assert len(repo.scores) == 0
         assert len(repo.unparsed) == 0
 
     def test_empty_body_is_silent(self, repo):
+        # Empty / whitespace sends are accidental (typing indicators,
+        # attachment-only messages, etc) — still silent to avoid
+        # annoying ping-backs.
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -199,8 +209,10 @@ class TestHandleInbound:
         assert reply is None
         assert len(repo.scores) == 0
 
-    def test_bare_game_name_mention_is_silent(self, repo):
-        # Tightened heuristic: without a #N puzzle number, it's chatter.
+    def test_bare_game_name_mention_gets_help(self, repo):
+        # A bare "Queens was brutal" doesn't have a #N marker so it
+        # doesn't look score-ish. Previously silent; now surfaces the
+        # help blurb so users aren't left guessing.
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -208,9 +220,37 @@ class TestHandleInbound:
             profile_name="Alice",
             now=NOW,
         )
-        assert reply is None
+        assert reply is not None
+        assert "didn't understand" in reply.lower()
         assert len(repo.scores) == 0
         assert len(repo.unparsed) == 0
+
+
+class TestHelpCommand:
+    def test_help_lists_commands(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="help",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is not None
+        for keyword in ("stats", "recap", "yesterday", "week", "all"):
+            assert keyword in reply
+        # Format hint should appear too so users see how to submit.
+        assert "Queens #" in reply
+
+    def test_question_mark_is_alias_for_help(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="?",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "stats" in reply
 
     def test_puzzle_date_comes_from_now(self, repo):
         custom_now = datetime(2026, 1, 1, 20, 0, tzinfo=SYDNEY)
@@ -335,7 +375,7 @@ class TestHandleInbound:
             now=NOW,
         )
         assert reply is not None
-        assert "couldn't parse" in reply.lower()
+        assert "couldn't read" in reply.lower()
         assert len(repo.unparsed) == 1
 
 
