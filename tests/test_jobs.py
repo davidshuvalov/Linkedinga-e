@@ -23,7 +23,9 @@ from app.jobs import (
     render_daily,
     render_wrap,
     run_daily_recap,
+    run_final_warning,
     run_morning_nudge,
+    send_champion_loser_dms,
 )
 
 SYDNEY = ZoneInfo("Australia/Sydney")
@@ -339,3 +341,182 @@ class TestMorningNudge:
         # "Done so far" should list Queens; "Still to play" lists Tango.
         assert "Queens" in body.split("Still to play:")[0]
         assert "Tango" in body.split("Still to play:")[1]
+
+
+# ---------------------------------------------------------------------------
+# run_final_warning — 15 minutes before midnight LA
+# ---------------------------------------------------------------------------
+
+
+class TestFinalWarning:
+    """Cron at 23:45 LA. Mirrors morning nudge but with rude copy."""
+
+    @patch("app.jobs.send_dm")
+    def test_no_active_players_does_nothing(self, mock_dm):
+        repo = InMemoryRepository()
+        settings = _make_settings({"queens", "tango"})
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        warned = run_final_warning(repo, settings, now=now)
+        assert warned == []
+        mock_dm.assert_not_called()
+
+    @patch("app.jobs.send_dm")
+    def test_skips_player_already_done(self, mock_dm):
+        from app.puzzles import la_date
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        today_la = la_date(now)
+        _seed(repo, 1, "Alice", today_la, ["queens", "tango"])
+        settings = _make_settings({"queens", "tango"})
+        warned = run_final_warning(repo, settings, now=now)
+        assert warned == []
+        mock_dm.assert_not_called()
+
+    @patch("app.jobs.send_dm")
+    def test_warns_player_with_outstanding_games(self, mock_dm):
+        from app.puzzles import la_date
+        mock_dm.return_value = True
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        today_la = la_date(now)
+        prev_la = today_la - timedelta(days=1)
+        # Bob is active (played yesterday) but hasn't played today.
+        _seed(repo, 1, "Bob", prev_la, ["queens"])
+        settings = _make_settings({"queens", "tango"})
+        warned = run_final_warning(repo, settings, now=now)
+        assert warned == ["whatsapp:+61400000001"]
+        body = mock_dm.call_args[0][2]
+        assert "Bob" in body
+        # Both missing games should be called out by name.
+        assert "Queens" in body
+        assert "Tango" in body
+
+    @patch("app.jobs.send_dm")
+    def test_skips_opted_out_players(self, mock_dm):
+        from app.puzzles import la_date
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        prev_la = la_date(now) - timedelta(days=1)
+        bob = repo.get_or_create_player("whatsapp:+61400000001", "Bob")
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=713,
+            puzzle_date=prev_la, raw_score=10, share_text="x",
+        )
+        repo.set_notifications_enabled(bob.id, False)
+        settings = _make_settings({"queens", "tango"})
+        warned = run_final_warning(repo, settings, now=now)
+        assert warned == []
+        mock_dm.assert_not_called()
+
+    @patch("app.jobs.send_dm")
+    def test_lists_only_missing_games(self, mock_dm):
+        from app.puzzles import la_date
+        mock_dm.return_value = True
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        today_la = la_date(now)
+        _seed(repo, 1, "Charlie", today_la, ["queens"])  # tango still owed
+        settings = _make_settings({"queens", "tango"})
+        run_final_warning(repo, settings, now=now)
+        body = mock_dm.call_args[0][2]
+        # Message should name the owed game (Tango) but not the
+        # already-completed one (Queens).
+        assert "Tango" in body
+        assert "Queens" not in body
+
+
+# ---------------------------------------------------------------------------
+# send_champion_loser_dms — Sunday LA top/bottom personal messages
+# ---------------------------------------------------------------------------
+
+
+class TestChampionLoserDMs:
+    """On Sun LA only, the weekly wrap fan-out triggers a personal DM
+    to the overall winner and overall loser of the week."""
+
+    SUN = date(2026, 4, 19)
+    MON = date(2026, 4, 13)
+    TUE = date(2026, 4, 14)
+
+    @patch("app.jobs.send_dm")
+    def test_silent_on_non_sundays(self, mock_dm):
+        repo = InMemoryRepository()
+        settings = _make_settings({"queens", "tango"})
+        _seed(repo, 1, "Alice", self.TUE, ["queens", "tango"])
+        _seed(repo, 2, "Bob",   self.TUE, ["queens", "tango"])
+        # Tuesday — not a Sunday, should not fire.
+        sent = send_champion_loser_dms(repo, settings, self.TUE)
+        assert sent == []
+        mock_dm.assert_not_called()
+
+    @patch("app.jobs.send_dm")
+    def test_silent_with_solo_player(self, mock_dm):
+        # One player alone can't be both champ and loser — skip.
+        repo = InMemoryRepository()
+        settings = _make_settings({"queens"})
+        _seed(repo, 1, "Alice", self.MON, ["queens"])
+        sent = send_champion_loser_dms(repo, settings, self.SUN)
+        assert sent == []
+        mock_dm.assert_not_called()
+
+    @patch("app.jobs.send_dm")
+    def test_dms_top_and_bottom_of_leaderboard(self, mock_dm):
+        mock_dm.return_value = True
+        repo = InMemoryRepository()
+        settings = _make_settings({"queens"})
+        # Alice wins the week (lower raw_score = more points),
+        # Charlie loses it.
+        repo.insert_score(
+            player_id=repo.get_or_create_player(
+                "whatsapp:+61400000001", "Alice"
+            ).id,
+            game="queens", puzzle_no=713,
+            puzzle_date=self.MON, raw_score=10, share_text="x",
+        )
+        repo.insert_score(
+            player_id=repo.get_or_create_player(
+                "whatsapp:+61400000002", "Bob"
+            ).id,
+            game="queens", puzzle_no=713,
+            puzzle_date=self.MON, raw_score=20, share_text="x",
+        )
+        repo.insert_score(
+            player_id=repo.get_or_create_player(
+                "whatsapp:+61400000003", "Charlie"
+            ).id,
+            game="queens", puzzle_no=713,
+            puzzle_date=self.MON, raw_score=30, share_text="x",
+        )
+        sent = send_champion_loser_dms(repo, settings, self.SUN)
+        # Alice (champion) and Charlie (loser) both get a DM.
+        assert set(sent) == {
+            "whatsapp:+61400000001",
+            "whatsapp:+61400000003",
+        }
+        bodies = [call.args[2] for call in mock_dm.call_args_list]
+        # Champion message mentions Alice.
+        assert any("Alice" in b for b in bodies)
+        # Loser message mentions Charlie.
+        assert any("Charlie" in b for b in bodies)
+        # Bob (the middle player) should not receive a DM.
+        assert not any("Bob" in b for b in bodies)
+
+    @patch("app.jobs.send_dm")
+    def test_skips_opted_out_winner(self, mock_dm):
+        # If the champion has notifications off, only the loser gets a DM.
+        mock_dm.return_value = True
+        repo = InMemoryRepository()
+        settings = _make_settings({"queens"})
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=713,
+            puzzle_date=self.MON, raw_score=10, share_text="x",
+        )
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=713,
+            puzzle_date=self.MON, raw_score=30, share_text="x",
+        )
+        repo.set_notifications_enabled(alice.id, False)
+        sent = send_champion_loser_dms(repo, settings, self.SUN)
+        assert sent == ["whatsapp:+61400000002"]

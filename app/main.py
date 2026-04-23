@@ -113,7 +113,7 @@ def _setup_scheduler() -> None:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
 
-    from .jobs import run_daily_recap, run_morning_nudge
+    from .jobs import run_daily_recap, run_final_warning, run_morning_nudge
 
     settings = load_settings()
     recap_tz = "America/Los_Angeles"
@@ -127,6 +127,9 @@ def _setup_scheduler() -> None:
     def _morning():
         run_morning_nudge(get_repository(), settings)
 
+    def _final_warning():
+        run_final_warning(get_repository(), settings)
+
     scheduler.add_job(
         _daily,
         CronTrigger(hour=0, minute=0, timezone=recap_tz),
@@ -139,13 +142,23 @@ def _setup_scheduler() -> None:
         id="morning_nudge",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _final_warning,
+        # 15 minutes before the LA midnight rollover — the last
+        # realistic moment to nag someone into finishing.
+        CronTrigger(hour=23, minute=45, timezone=recap_tz),
+        id="final_warning",
+        replace_existing=True,
+    )
 
     scheduler.start()
     logger.info(
         "Scheduler started: daily_recap at 00:00 %s, "
-        "morning_nudge at 08:30 %s",
+        "morning_nudge at 08:30 %s, "
+        "final_warning at 23:45 %s",
         recap_tz,
         nudge_tz,
+        recap_tz,
     )
     return scheduler
 
