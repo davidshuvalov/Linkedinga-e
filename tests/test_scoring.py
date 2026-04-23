@@ -46,6 +46,9 @@ def _row(
 
 
 class TestTiedPoints:
+    # Ties now split positional points as a true average (no ceiling)
+    # so the round total stays invariant at 15 (5+4+3+2+1) regardless
+    # of how many are tied. Tied 1st/2nd → 4.5 each, not 5.
     def test_solo_positions(self):
         assert _tied_points(1, 1) == 5
         assert _tied_points(2, 1) == 4
@@ -54,33 +57,33 @@ class TestTiedPoints:
         assert _tied_points(5, 1) == 1
         assert _tied_points(6, 1) == 0
 
-    def test_tied_2nd_3rd_averages_to_4(self):
-        # (4+3)/2 = 3.5 → ceil → 4
-        assert _tied_points(2, 2) == 4
+    def test_tied_2nd_3rd_averages_to_3_5(self):
+        # (4+3)/2 = 3.5 — not ceil'd
+        assert _tied_points(2, 2) == 3.5
 
     def test_three_way_tie_1st_averages_to_4(self):
-        # (5+4+3)/3 = 4.0 → ceil → 4
-        assert _tied_points(1, 3) == 4
+        # (5+4+3)/3 = 4.0 — integer result
+        assert _tied_points(1, 3) == 4.0
 
-    def test_tied_4th_5th_averages_to_2(self):
-        # (2+1)/2 = 1.5 → ceil → 2
-        assert _tied_points(4, 2) == 2
+    def test_tied_4th_5th_averages_to_1_5(self):
+        # (2+1)/2 = 1.5 — fractional
+        assert _tied_points(4, 2) == 1.5
 
-    def test_tied_5th_6th_averages_to_1(self):
-        # (1+0)/2 = 0.5 → ceil → 1
-        assert _tied_points(5, 2) == 1
+    def test_tied_5th_6th_averages_to_0_5(self):
+        # (1+0)/2 = 0.5 — 6th+ is zero, so this dips below a whole point
+        assert _tied_points(5, 2) == 0.5
 
-    def test_tied_1st_2nd_averages_to_5(self):
-        # (5+4)/2 = 4.5 → ceil → 5
-        assert _tied_points(1, 2) == 5
+    def test_tied_1st_2nd_averages_to_4_5(self):
+        # (5+4)/2 = 4.5 — shared across the tied pair, total 9
+        assert _tied_points(1, 2) == 4.5
 
     def test_all_tied_beyond_5th(self):
-        # (0+0)/2 = 0 → ceil → 0
-        assert _tied_points(6, 2) == 0
+        # (0+0)/2 = 0
+        assert _tied_points(6, 2) == 0.0
 
     def test_three_way_tie_4th(self):
-        # (2+1+0)/3 = 1.0 → ceil → 1
-        assert _tied_points(4, 3) == 1
+        # (2+1+0)/3 = 1.0
+        assert _tied_points(4, 3) == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -124,10 +127,10 @@ class TestAssignDailyPoints:
             1: 5.0, 2: 4.0, 3: 3.0, 4: 2.0, 5: 1.0,
         }
 
-    def test_legacy_fallback_for_ties(self):
-        # Ties defeat competitive_score (which breaks ties arbitrarily
-        # by input order). Route to legacy so tied players share
-        # ceil'd averaged points fairly.
+    def test_ties_flow_through_competitive_and_preserve_total(self):
+        # Ties are now handled inline by competitive_score — base
+        # points are averaged within tied groups, and any Case C
+        # bonus is still applied. Round total always lands on 14.
         scores = [
             _row(1, "A", "queens", 714, 10),
             _row(2, "B", "queens", 714, 20),
@@ -135,9 +138,10 @@ class TestAssignDailyPoints:
             _row(4, "D", "queens", 714, 40),
         ]
         pts = assign_daily_points(scores)
-        # Tied 2nd/3rd both get ceil((4+3)/2) = 4.
-        assert pts[2] == 4.0
-        assert pts[3] == 4.0
+        # Tied 2nd/3rd split their share of the final points equally.
+        assert pts[2] == pts[3]
+        # Round total preserved.
+        assert abs(sum(pts.values()) - 14.0) < 0.05
 
     def test_legacy_fallback_for_large_round(self):
         # Competitive scoring supports 3–5 players; 6+ routes to legacy.
@@ -152,7 +156,10 @@ class TestAssignDailyPoints:
         assert r[6] == 0
         assert r[7] == 0
 
-    def test_tied_2nd_3rd_both_get_4(self):
+    def test_tied_2nd_3rd_through_competitive(self):
+        # 4-player round with tied 2nd/3rd. r12 = 2.0 triggers the
+        # clear-winner branch; tied pair's base points are averaged
+        # so they absorb the debit together.
         scores = [
             _row(1, "Alice", "queens", 714, 10),
             _row(2, "Bob", "queens", 714, 20),    # tied 2nd
@@ -160,9 +167,15 @@ class TestAssignDailyPoints:
             _row(4, "Dee", "queens", 714, 30),
         ]
         r = assign_daily_points(scores)
-        assert r == {1: 5, 2: 4, 3: 4, 4: 2}
+        assert r[2] == r[3]            # tied pair shares equally
+        assert r[1] > r[2] > r[4]      # rankings preserved
+        assert abs(sum(r.values()) - 14.0) < 0.05
 
-    def test_three_way_tie_at_top_all_get_4(self):
+    def test_three_way_tie_at_top_all_share_equally(self):
+        # Three tied for 1st with a 4th place well behind: front
+        # cluster triggers (r12=1, r23=1, r34=3), so the top three
+        # split both the averaged base (4 each) and the cluster
+        # bonus. All three should come out equal.
         scores = [
             _row(1, "A", "queens", 714, 10),
             _row(2, "B", "queens", 714, 10),
@@ -170,20 +183,29 @@ class TestAssignDailyPoints:
             _row(4, "D", "queens", 714, 30),
         ]
         r = assign_daily_points(scores)
-        # (5+4+3)/3 = 4; D is 4th = 2
-        assert r == {1: 4, 2: 4, 3: 4, 4: 2}
+        assert r[1] == r[2] == r[3]
+        assert r[1] > r[4]
+        assert abs(sum(r.values()) - 14.0) < 0.05
 
-    def test_tied_1st_2nd_both_get_5(self):
+    def test_tied_1st_2nd_share_4_5_each(self):
+        # 3 players, tied 1st/2nd, 3rd well behind. No Case triggers
+        # (r12=1 rules out both cluster and clear-winner with n=3),
+        # so base points stand: tied pair get (5+4)/2 = 4.5 each.
         scores = [
             _row(1, "A", "queens", 714, 10),
             _row(2, "B", "queens", 714, 10),
             _row(3, "C", "queens", 714, 30),
         ]
         r = assign_daily_points(scores)
-        # (5+4)/2 = 4.5 → 5; C is 3rd = 3
-        assert r == {1: 5, 2: 5, 3: 3}
+        assert r[1] == 4.5
+        assert r[2] == 4.5
+        assert r[3] == 3.0
 
-    def test_tied_4th_5th_both_get_2(self):
+    def test_tied_4th_5th_share_debit(self):
+        # 5 players with tied 4th/5th. r12 = 2 → clear-winner case.
+        # Tied pair's base is averaged to 1.5 each; Case C debit is
+        # distributed proportionally to that averaged base so both
+        # receive an identical final score.
         scores = [
             _row(1, "A", "queens", 714, 10),
             _row(2, "B", "queens", 714, 20),
@@ -192,7 +214,9 @@ class TestAssignDailyPoints:
             _row(5, "E", "queens", 714, 40),  # tied 4th
         ]
         r = assign_daily_points(scores)
-        assert r == {1: 5, 2: 4, 3: 3, 4: 2, 5: 2}
+        assert r[4] == r[5]
+        assert r[1] > r[2] > r[3] > r[4]
+        assert abs(sum(r.values()) - 15.0) < 0.05
 
     def test_pinpoint_lower_guess_count_wins(self):
         scores = [
