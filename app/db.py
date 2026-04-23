@@ -349,6 +349,48 @@ class SupabaseRepository:
 
     def __init__(self, client: Any) -> None:
         self._client = client
+        # ``notifications_enabled`` was added to ``players`` after the
+        # initial schema. Detect once on construction so every
+        # subsequent query picks the right SELECT columns — avoids
+        # hitting a "column does not exist" error on every inbound
+        # message if the migration hasn't been applied yet.
+        self._has_notifications_column = self._detect_notifications_column()
+
+    def _detect_notifications_column(self) -> bool:
+        """Probe whether ``players.notifications_enabled`` exists.
+
+        Returns ``False`` (and logs a warning) if the canary query
+        fails — we assume that's the migration not being applied
+        rather than a transient network error, because old-schema
+        installs should still work gracefully.
+        """
+        try:
+            (
+                self._client.table("players")
+                .select("notifications_enabled")
+                .limit(1)
+                .execute()
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — intentionally broad
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "players.notifications_enabled column missing (%s). "
+                "Run `db/schema.sql` to enable notify on/off. Until "
+                "then, all players receive recap DMs by default.",
+                exc,
+            )
+            return False
+
+    def _player_select_cols(self) -> str:
+        """SELECT column list for reads against ``players`` — omits
+        ``notifications_enabled`` on old schemas so the query doesn't
+        fail with a column-does-not-exist error."""
+        base = "id, whatsapp_id, display_name"
+        if self._has_notifications_column:
+            base += ", notifications_enabled"
+        return base
 
     def _row_to_player(self, row: Dict[str, Any]) -> Player:
         # ``notifications_enabled`` is a recent column; fall back to
@@ -365,7 +407,7 @@ class SupabaseRepository:
     ) -> Player:
         resp = (
             self._client.table("players")
-            .select("id, whatsapp_id, display_name, notifications_enabled")
+            .select(self._player_select_cols())
             .eq("whatsapp_id", whatsapp_id)
             .limit(1)
             .execute()
@@ -394,6 +436,11 @@ class SupabaseRepository:
     def set_notifications_enabled(
         self, player_id: int, enabled: bool
     ) -> None:
+        if not self._has_notifications_column:
+            raise RuntimeError(
+                "players.notifications_enabled column missing — run "
+                "db/schema.sql migration before using notify on/off"
+            )
         (
             self._client.table("players")
             .update({"notifications_enabled": enabled})
@@ -517,11 +564,15 @@ class SupabaseRepository:
         date_from: date,
         date_to: date,
     ) -> List[str]:
+        # Embed the notifications_enabled column only if it exists —
+        # otherwise this SELECT would fail with "column does not
+        # exist" and take every recap command down with it.
+        embed_cols = "whatsapp_id"
+        if self._has_notifications_column:
+            embed_cols += ", notifications_enabled"
         resp = (
             self._client.table("scores")
-            .select(
-                "player_id, players(whatsapp_id, notifications_enabled)"
-            )
+            .select(f"player_id, players({embed_cols})")
             .gte("puzzle_date", date_from.isoformat())
             .lte("puzzle_date", date_to.isoformat())
             .execute()

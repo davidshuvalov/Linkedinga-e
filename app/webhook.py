@@ -772,7 +772,12 @@ def _handle_notify(
     scheduled recap."""
     display_name = (profile_name or "").strip() or from_
     player = repo.get_or_create_player(from_, display_name)
-    repo.set_notifications_enabled(player.id, enabled)
+    try:
+        repo.set_notifications_enabled(player.id, enabled)
+    except RuntimeError as exc:
+        # Surface the migration-missing message so the admin sees
+        # why it's not sticking instead of a generic bot error.
+        return f"Can't toggle notifications yet: {exc}"
     if enabled:
         return "Notifications on — you'll receive the daily recap."
     return "Notifications off — you won't get the daily recap. Submit scores anytime."

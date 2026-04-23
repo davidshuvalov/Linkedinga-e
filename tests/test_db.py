@@ -9,8 +9,9 @@ demo mode.
 from __future__ import annotations
 
 from datetime import date
+from unittest.mock import MagicMock
 
-from app.db import InMemoryRepository, ScoreRow
+from app.db import InMemoryRepository, ScoreRow, SupabaseRepository
 
 
 class TestInMemoryListScores:
@@ -112,3 +113,47 @@ class TestInMemoryListScores:
         by_id = {r.player_id: r.player_name for r in rows}
         assert by_id[alice.id] == "Alice"
         assert by_id[bob.id] == "Bob"
+
+
+class TestSupabaseSchemaDetection:
+    """``SupabaseRepository`` probes for the ``notifications_enabled``
+    column once on construction and gracefully omits it from later
+    SELECT lists if the migration hasn't been applied yet. Keeps the
+    bot from erroring on every inbound message against a fresh DB."""
+
+    def _mock_client(self, column_present: bool):
+        """Fake ``supabase-py`` client. The initial canary probe
+        either succeeds (column present) or raises (column missing)."""
+        client = MagicMock()
+        if column_present:
+            client.table.return_value.select.return_value.limit.return_value.execute.return_value = (
+                MagicMock(data=[])
+            )
+        else:
+            client.table.return_value.select.return_value.limit.return_value.execute.side_effect = (
+                Exception("column players.notifications_enabled does not exist")
+            )
+        return client
+
+    def test_detects_column_present(self):
+        client = self._mock_client(column_present=True)
+        repo = SupabaseRepository(client)
+        assert repo._has_notifications_column is True
+        assert "notifications_enabled" in repo._player_select_cols()
+
+    def test_survives_missing_column(self):
+        client = self._mock_client(column_present=False)
+        # Construction must not raise even though the probe failed.
+        repo = SupabaseRepository(client)
+        assert repo._has_notifications_column is False
+        # Player select omits the missing column so downstream
+        # queries don't crash.
+        assert "notifications_enabled" not in repo._player_select_cols()
+
+    def test_set_notifications_enabled_raises_when_column_missing(self):
+        client = self._mock_client(column_present=False)
+        repo = SupabaseRepository(client)
+        import pytest
+
+        with pytest.raises(RuntimeError, match="notifications_enabled"):
+            repo.set_notifications_enabled(1, False)
