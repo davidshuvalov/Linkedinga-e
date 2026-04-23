@@ -30,6 +30,16 @@ from .scoring import (
 _ALL_GAMES = frozenset(GAME_DISPLAY)
 
 
+def _format_seconds(total: int) -> str:
+    """Render a seconds count as ``M:SS`` (or ``H:MM:SS`` past an hour)."""
+    if total >= 3600:
+        hours, rem = divmod(total, 3600)
+        minutes, seconds = divmod(rem, 60)
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    minutes, seconds = divmod(total, 60)
+    return f"{minutes}:{seconds:02d}"
+
+
 def _pts(points: int) -> str:
     return "1 pt" if points == 1 else f"{points} pts"
 
@@ -103,6 +113,56 @@ def _weekly_leaderboard_lines(
     return lines
 
 
+def _per_game_running_totals(
+    week_scores: Sequence[ScoreRow],
+) -> List[str]:
+    """Per-game running point totals for the week so far.
+
+    Renders one line per game with each player's cumulative points in
+    that game, sorted descending so the current game leader is first.
+    Only games with any submissions this week appear; games are
+    ordered by :data:`GAME_DISPLAY_ORDER` so the block is stable.
+    Returns empty list if nothing's been played this week.
+    """
+    if not week_scores:
+        return []
+
+    # Group by (game, puzzle_no) so we can hand daily rounds to
+    # assign_daily_points — same helper the daily per-game block uses.
+    groups: Dict[Tuple[str, int], List[ScoreRow]] = {}
+    for s in week_scores:
+        groups.setdefault((s.game, s.puzzle_no), []).append(s)
+
+    per_game_totals: Dict[str, Dict[int, int]] = {}
+    player_names: Dict[int, str] = {}
+    for (game, _), group_scores in groups.items():
+        bucket = per_game_totals.setdefault(game, {})
+        for pid, pts in assign_daily_points(group_scores).items():
+            bucket[pid] = bucket.get(pid, 0) + pts
+    for s in week_scores:
+        player_names[s.player_id] = s.player_name
+
+    lines: List[str] = ["Game standings (week):"]
+    any_rendered = False
+    for game in GAME_DISPLAY_ORDER:
+        totals = per_game_totals.get(game)
+        if not totals:
+            continue
+        # Sort players by (points desc, player_id asc) for stable order
+        ranked = sorted(
+            totals.items(),
+            key=lambda kv: (-kv[1], kv[0]),
+        )
+        parts = [
+            f"{player_names.get(pid, '')} {pts}"
+            for pid, pts in ranked
+        ]
+        lines.append(f"  {GAME_DISPLAY[game]}: " + ", ".join(parts))
+        any_rendered = True
+
+    return lines if any_rendered else []
+
+
 # ---------------------------------------------------------------------------
 # daily_recap
 # ---------------------------------------------------------------------------
@@ -135,6 +195,14 @@ def daily_recap(
 
     lines: List[str] = [header, ""]
     lines.extend(_per_game_sections(day, day_scores))
+
+    # Per-game running totals across the whole week — complements the
+    # overall "Week so far" leaderboard below by showing who's ahead in
+    # each game individually, not just on aggregate points.
+    game_totals_lines = _per_game_running_totals(week_filtered)
+    if game_totals_lines:
+        lines.append("")
+        lines.extend(game_totals_lines)
 
     lb_lines = _weekly_leaderboard_lines(week_filtered, title="Week so far")
     if lb_lines:
@@ -230,6 +298,13 @@ def weekly_wrap(
         prize_lines.append(
             f"  Best average: {ba.player_name} "
             f"(avg {ba.average_points:.1f} pts/game, {ba.submissions} submissions)"
+        )
+    if prizes.fastest_total_time is not None:
+        ft = prizes.fastest_total_time
+        prize_lines.append(
+            f"  Fastest total time: {ft.player_name} "
+            f"({_format_seconds(ft.total_time)} across "
+            f"{ft.time_based_submissions} rounds)"
         )
     if prize_lines:
         lines.append("")

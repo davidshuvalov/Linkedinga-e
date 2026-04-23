@@ -13,6 +13,7 @@ from app.scoring import (
     Prizes,
     _tied_points,
     assign_daily_points,
+    competitive_score,
     game_leaders,
     prize_allocations,
     weekly_leaderboard,
@@ -422,3 +423,277 @@ class TestWeeklyLeaderboardFirstPlacesAndSubmissions:
         assert lb[1].submissions == 1
         assert lb[1].distinct_games == 1
         assert lb[1].days_played == 1
+
+
+# ---------------------------------------------------------------------------
+# weekly_leaderboard total_time (powers the Fastest total time prize)
+# ---------------------------------------------------------------------------
+
+
+class TestWeeklyLeaderboardTotalTime:
+    def test_sums_seconds_across_time_based_games(self):
+        scores = [
+            ScoreRow(1, "Alice", "queens", 1, D, 30),
+            ScoreRow(1, "Alice", "tango",  1, D, 40),
+            ScoreRow(1, "Alice", "zip",    1, D, 20),
+            ScoreRow(2, "Bob",   "queens", 1, D, 45),
+        ]
+        lb = {p.player_id: p for p in weekly_leaderboard(scores)}
+        assert lb[1].total_time == 90
+        assert lb[1].time_based_submissions == 3
+        assert lb[2].total_time == 45
+        assert lb[2].time_based_submissions == 1
+
+    def test_pinpoint_excluded_from_total_time(self):
+        # Pinpoint is a guess count (1–5); summing it with seconds would
+        # be meaningless. It must not contribute to total_time or to
+        # time_based_submissions even though it still counts as a
+        # regular submission.
+        scores = [
+            ScoreRow(1, "Alice", "queens",   1, D, 30),
+            ScoreRow(1, "Alice", "pinpoint", 1, D, 3),
+        ]
+        lb = {p.player_id: p for p in weekly_leaderboard(scores)}
+        assert lb[1].total_time == 30
+        assert lb[1].time_based_submissions == 1
+        assert lb[1].submissions == 2
+
+
+# ---------------------------------------------------------------------------
+# prize_allocations — fastest_total_time
+# ---------------------------------------------------------------------------
+
+
+class TestFastestTotalTimePrize:
+    def test_awarded_to_lowest_total_time_over_threshold(self):
+        lb = [
+            PlayerWeeklyStats(1, "Alice", 20, 3, 3, submissions=5,
+                              total_time=300, time_based_submissions=5),
+            PlayerWeeklyStats(2, "Bob",   18, 3, 3, submissions=5,
+                              total_time=200, time_based_submissions=5),
+            PlayerWeeklyStats(3, "Charlie", 15, 2, 2, submissions=5,
+                              total_time=250, time_based_submissions=5),
+        ]
+        p = prize_allocations(lb)
+        assert p.fastest_total_time is not None
+        assert p.fastest_total_time.player_name == "Bob"
+
+    def test_requires_min_submissions(self):
+        # Alice has the lowest total_time but only 3 time-based rounds —
+        # under the 5-round floor she's ineligible. Bob (higher time,
+        # 5 rounds) wins instead.
+        lb = [
+            PlayerWeeklyStats(1, "Alice", 12, 3, 3, submissions=3,
+                              total_time=60, time_based_submissions=3),
+            PlayerWeeklyStats(2, "Bob",   15, 5, 5, submissions=5,
+                              total_time=300, time_based_submissions=5),
+        ]
+        p = prize_allocations(lb)
+        assert p.fastest_total_time.player_name == "Bob"
+
+    def test_returns_none_when_nobody_eligible(self):
+        lb = [
+            PlayerWeeklyStats(1, "Alice", 10, 2, 2, submissions=2,
+                              total_time=60, time_based_submissions=2),
+        ]
+        p = prize_allocations(lb)
+        assert p.fastest_total_time is None
+
+    def test_tiebreak_prefers_more_rounds(self):
+        # Same total_time, different round counts: whoever played more
+        # rounds wins — more impressive to post 300s across 10 games
+        # than across 5.
+        lb = [
+            PlayerWeeklyStats(1, "Alice", 20, 3, 3, submissions=5,
+                              total_time=300, time_based_submissions=5),
+            PlayerWeeklyStats(2, "Bob",   22, 5, 5, submissions=10,
+                              total_time=300, time_based_submissions=10),
+        ]
+        p = prize_allocations(lb)
+        assert p.fastest_total_time.player_name == "Bob"
+
+
+# ---------------------------------------------------------------------------
+# competitive_score — rank + time blended scoring
+# ---------------------------------------------------------------------------
+
+
+class TestCompetitiveScore:
+    def _times(self, result):
+        return [r["time"] for r in result]
+
+    def _scores(self, result):
+        return [r["final_score"] for r in result]
+
+    def test_sorts_by_time_ascending(self):
+        out = competitive_score([
+            {"name": "Slow", "time": 30},
+            {"name": "Fast", "time": 5},
+            {"name": "Mid",  "time": 15},
+        ])
+        assert [r["name"] for r in out] == ["Fast", "Mid", "Slow"]
+
+    def test_tight_game_uses_base_points(self):
+        # Spec example: [16,18,20,23,28] → [5,4,3,2,1]. Spread is 0.75
+        # so technically past the 0.5 threshold, but r12 and r34 don't
+        # trigger cluster or winner either — falls through to base.
+        out = competitive_score([
+            {"name": "A", "time": 16},
+            {"name": "B", "time": 18},
+            {"name": "C", "time": 20},
+            {"name": "D", "time": 23},
+            {"name": "E", "time": 28},
+        ])
+        assert self._scores(out) == [5.0, 4.0, 3.0, 2.0, 1.0]
+
+    def test_strict_tight_game_under_half_spread(self):
+        # spread = (11-10)/10 = 0.1, clearly tight.
+        out = competitive_score([
+            {"name": "A", "time": 10},
+            {"name": "B", "time": 10.5},
+            {"name": "C", "time": 11},
+        ])
+        assert self._scores(out) == [5.0, 4.0, 3.0]
+
+    def test_clear_winner_gets_bonus(self):
+        # r12 = 15/6 = 2.5 → bonus = min(2, 3) = 2 capped.
+        out = competitive_score([
+            {"name": "Simon",  "time": 6},
+            {"name": "Ben",    "time": 15},
+            {"name": "adam",   "time": 20},
+            {"name": "David",  "time": 25},
+            {"name": "Doron",  "time": 30},
+        ])
+        scores = self._scores(out)
+        # First place clearly ahead of the rest.
+        assert scores[0] > 5.0
+        assert scores[0] == max(scores)
+        # Rankings preserved.
+        assert scores == sorted(scores, reverse=True)
+
+    def test_clear_winner_bonus_is_capped_at_two(self):
+        # r12 = 60/6 = 10 → (r12-1)*2 = 18; must cap at +2.
+        out = competitive_score([
+            {"name": "A", "time": 6},
+            {"name": "B", "time": 60},
+            {"name": "C", "time": 70},
+            {"name": "D", "time": 80},
+            {"name": "E", "time": 90},
+        ])
+        scores = self._scores(out)
+        # Base for 1st is 5; +2 cap → at most 7. Rounding slack of 0.1.
+        assert scores[0] <= 7.0 + 0.05
+
+    def test_front_cluster_boosts_top_three(self):
+        # Top 3 are tight (r12=1.25, r23=1.2) and 4th is a big drop
+        # (r34=30/12=2.5) — exactly the cluster shape.
+        out = competitive_score([
+            {"name": "A", "time": 8},
+            {"name": "B", "time": 10},
+            {"name": "C", "time": 12},
+            {"name": "D", "time": 30},
+            {"name": "E", "time": 33},
+        ])
+        scores = self._scores(out)
+        # Top 3 all received a bonus above their base.
+        assert scores[0] > 5.0
+        assert scores[1] > 4.0
+        assert scores[2] > 3.0
+        # Bottom 2 absorbed the debit.
+        assert scores[3] < 2.0
+        assert scores[4] < 1.0
+        # Rankings preserved.
+        assert scores == sorted(scores, reverse=True)
+
+    def test_total_points_preserved_after_adjustments(self):
+        # Base total for 5 players is 15. Rounding residue is absorbed
+        # by the last player, so the sum should land exactly on 15
+        # modulo the rounding-to-1dp noise.
+        out = competitive_score([
+            {"name": "A", "time": 6},
+            {"name": "B", "time": 15},
+            {"name": "C", "time": 20},
+            {"name": "D", "time": 25},
+            {"name": "E", "time": 30},
+        ])
+        assert abs(sum(self._scores(out)) - 15.0) < 0.01
+
+    def test_minimum_score_floor_is_enforced(self):
+        # Any score is at least 0.5 even after a heavy winner-bonus debit.
+        out = competitive_score([
+            {"name": "A", "time": 1},
+            {"name": "B", "time": 100},
+            {"name": "C", "time": 110},
+            {"name": "D", "time": 120},
+            {"name": "E", "time": 130},
+        ])
+        assert min(self._scores(out)) >= 0.5
+
+    def test_rankings_never_change(self):
+        # Sweep of increasing times; the returned order must equal the
+        # input-sorted order and scores must be monotonically descending.
+        out = competitive_score([
+            {"name": "A", "time": 5},
+            {"name": "B", "time": 12},
+            {"name": "C", "time": 40},
+            {"name": "D", "time": 50},
+        ])
+        scores = self._scores(out)
+        assert scores == sorted(scores, reverse=True)
+
+    def test_rounded_to_one_decimal_place(self):
+        out = competitive_score([
+            {"name": "A", "time": 6},
+            {"name": "B", "time": 15},
+            {"name": "C", "time": 20},
+            {"name": "D", "time": 25},
+            {"name": "E", "time": 30},
+        ])
+        for r in out:
+            # Every score is a multiple of 0.1 within FP tolerance.
+            assert abs(round(r["final_score"] * 10) - r["final_score"] * 10) < 1e-6
+
+    def test_supports_three_players(self):
+        out = competitive_score([
+            {"name": "A", "time": 10},
+            {"name": "B", "time": 11},
+            {"name": "C", "time": 12},
+        ])
+        # Base total for 3 players is 5+4+3 = 12.
+        assert abs(sum(self._scores(out)) - 12.0) < 0.01
+
+    def test_supports_four_players(self):
+        out = competitive_score([
+            {"name": "A", "time": 10},
+            {"name": "B", "time": 11},
+            {"name": "C", "time": 12},
+            {"name": "D", "time": 13},
+        ])
+        # Base total for 4 players is 5+4+3+2 = 14.
+        assert abs(sum(self._scores(out)) - 14.0) < 0.01
+
+    def test_rejects_fewer_than_three_players(self):
+        with pytest.raises(ValueError):
+            competitive_score([{"name": "A", "time": 10}])
+
+    def test_rejects_more_than_five_players(self):
+        with pytest.raises(ValueError):
+            competitive_score([
+                {"name": str(i), "time": i * 10} for i in range(1, 7)
+            ])
+
+    def test_rejects_non_positive_time(self):
+        with pytest.raises(ValueError):
+            competitive_score([
+                {"name": "A", "time": 0},
+                {"name": "B", "time": 10},
+                {"name": "C", "time": 20},
+            ])
+
+    def test_rejects_missing_keys(self):
+        with pytest.raises(ValueError):
+            competitive_score([
+                {"name": "A"},  # no 'time'
+                {"name": "B", "time": 10},
+                {"name": "C", "time": 20},
+            ])
