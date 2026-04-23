@@ -193,6 +193,31 @@ class TestDailyRecap:
         assert "Queens:" in out
         assert "Pinpoint" not in out
 
+    def test_per_game_running_totals_caps_at_top_three(self):
+        # 6-player Queens round; per-game standings line should show
+        # only the top 3 so it stays skimmable. Places 4–6 are still
+        # represented in the ``Week so far`` leaderboard below.
+        scores = [
+            _row(1, "Alice",   "queens", 714, 10, TUE),
+            _row(2, "Bob",     "queens", 714, 20, TUE),
+            _row(3, "Charlie", "queens", 714, 30, TUE),
+            _row(4, "Dee",     "queens", 714, 40, TUE),
+            _row(5, "Evan",    "queens", 714, 50, TUE),
+            _row(6, "Fiona",   "queens", 714, 60, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        # Extract the one-line standings entry for Queens to assert on.
+        standings_line = next(
+            ln for ln in out.splitlines() if ln.strip().startswith("Queens:")
+        )
+        assert "Alice" in standings_line
+        assert "Bob" in standings_line
+        assert "Charlie" in standings_line
+        # 4th onward shouldn't appear in the per-game line.
+        assert "Dee" not in standings_line
+        assert "Evan" not in standings_line
+        assert "Fiona" not in standings_line
+
 
 # ---------------------------------------------------------------------------
 # weekly_wrap
