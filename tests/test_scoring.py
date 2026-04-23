@@ -97,11 +97,54 @@ class TestAssignDailyPoints:
             [_row(1, "Alice", "queens", 714, 10)]
         ) == {1: 5}
 
-    def test_straight_ranking_5_players(self):
+    def test_straight_ranking_5_players_uses_competitive_score(self):
+        # 5 evenly-spaced times with r12 = 2.0 trigger the competitive
+        # "clear winner" branch — bonus capped at +2 for 1st, debited
+        # proportionally from everyone else. Rankings preserved and
+        # total still sums to 15 (base 5+4+3+2+1).
         scores = [_row(i, f"P{i}", "queens", 714, i * 10) for i in range(1, 6)]
+        pts = assign_daily_points(scores)
+        # 1st gets the cap; 5th absorbs the rounding residue.
+        assert pts[1] == 7.0
+        assert pts[1] > pts[2] > pts[3] > pts[4] > pts[5]
+        assert abs(sum(pts.values()) - 15.0) < 0.05
+
+    def test_legacy_fallback_for_pinpoint(self):
+        # Pinpoint isn't a time-based game (guess counts 1–5), so the
+        # competitive algorithm is bypassed and legacy 5-4-3-2-1 is
+        # used — same integer output the bot has always produced.
+        scores = [
+            _row(1, "Alice", "pinpoint", 714, 1),
+            _row(2, "Bob",   "pinpoint", 714, 2),
+            _row(3, "Cy",    "pinpoint", 714, 3),
+            _row(4, "Dee",   "pinpoint", 714, 4),
+            _row(5, "Eve",   "pinpoint", 714, 5),
+        ]
         assert assign_daily_points(scores) == {
-            1: 5, 2: 4, 3: 3, 4: 2, 5: 1,
+            1: 5.0, 2: 4.0, 3: 3.0, 4: 2.0, 5: 1.0,
         }
+
+    def test_legacy_fallback_for_ties(self):
+        # Ties defeat competitive_score (which breaks ties arbitrarily
+        # by input order). Route to legacy so tied players share
+        # ceil'd averaged points fairly.
+        scores = [
+            _row(1, "A", "queens", 714, 10),
+            _row(2, "B", "queens", 714, 20),
+            _row(3, "C", "queens", 714, 20),  # tied with B
+            _row(4, "D", "queens", 714, 40),
+        ]
+        pts = assign_daily_points(scores)
+        # Tied 2nd/3rd both get ceil((4+3)/2) = 4.
+        assert pts[2] == 4.0
+        assert pts[3] == 4.0
+
+    def test_legacy_fallback_for_large_round(self):
+        # Competitive scoring supports 3–5 players; 6+ routes to legacy.
+        scores = [_row(i, f"P{i}", "queens", 714, i * 10) for i in range(1, 7)]
+        pts = assign_daily_points(scores)
+        # Legacy points are 5, 4, 3, 2, 1, 0.
+        assert pts == {1: 5.0, 2: 4.0, 3: 3.0, 4: 2.0, 5: 1.0, 6: 0.0}
 
     def test_sixth_and_beyond_get_zero(self):
         scores = [_row(i, f"P{i}", "queens", 714, i * 10) for i in range(1, 8)]

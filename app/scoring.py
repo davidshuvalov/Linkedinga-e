@@ -71,7 +71,10 @@ def _tied_points(rank: int, count: int) -> int:
 class PlayerWeeklyStats:
     player_id: int
     player_name: str
-    total_points: int
+    # Competitive scoring emits floats (e.g. 7.0, 3.2) for 3–5 player
+    # time-based rounds, so totals aggregate as floats too. Integers
+    # still work unchanged for legacy / fallback rounds.
+    total_points: float
     distinct_games: int
     days_played: int
     # Added alongside the Most firsts / Most lasts / Best average prizes.
@@ -103,7 +106,7 @@ class GameLeader:
     game: str
     player_id: int
     player_name: str
-    total_points: int
+    total_points: float
 
 
 @dataclass(frozen=True)
@@ -121,16 +124,16 @@ class Prizes:
 # ---------------------------------------------------------------------------
 
 
-def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, int]:
-    """Return ``{player_id: points}`` for one daily puzzle round.
+def _legacy_rank_points(
+    sorted_scores: Sequence[ScoreRow],
+) -> Dict[int, float]:
+    """Rank-based 5/4/3/2/1 with ceil'd averaged tie points.
 
-    ``scores`` should all be for a single ``(game, puzzle_no)``.
-    Standard competition ranking with averaged + ceil'd tie points.
+    ``sorted_scores`` must already be sorted ascending by ``raw_score``.
+    Retained as the fallback path for cases :func:`competitive_score`
+    can't handle (pinpoint, ties, rounds outside 3–5 players).
     """
-    if not scores:
-        return {}
-    sorted_scores = sorted(scores, key=lambda s: s.raw_score)
-    result: Dict[int, int] = {}
+    result: Dict[int, float] = {}
     rank = 1
     i = 0
     n = len(sorted_scores)
@@ -141,10 +144,59 @@ def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, int]:
         tie_count = j - i
         points = _tied_points(rank, tie_count)
         for k in range(i, j):
-            result[sorted_scores[k].player_id] = points
+            result[sorted_scores[k].player_id] = float(points)
         rank += tie_count
         i = j
     return result
+
+
+def _has_ties(sorted_scores: Sequence[ScoreRow]) -> bool:
+    """True when any two rows share ``raw_score``. ``competitive_score``
+    breaks ties by input order (not fair), so ties route through the
+    legacy helper instead."""
+    raws = [s.raw_score for s in sorted_scores]
+    return len(set(raws)) < len(raws)
+
+
+def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, float]:
+    """Return ``{player_id: points}`` for one daily puzzle round.
+
+    Dispatches between two systems based on the round shape:
+
+    - **competitive_score** (rank + time-performance blended; the
+      CASE A/B/C algorithm) for 3–5 player time-based rounds with no
+      ties. Emits floats rounded to 1 d.p.
+    - **legacy 5/4/3/2/1** with ceil'd averaged tie points, for
+      pinpoint (guess count, not seconds), rounds outside the 3–5
+      range, and any round with ties.
+
+    ``scores`` should all be for a single ``(game, puzzle_no)``.
+    """
+    if not scores:
+        return {}
+    sorted_scores = sorted(scores, key=lambda s: s.raw_score)
+    n = len(sorted_scores)
+
+    # Pinpoint is guess count (1–5); the ratio/spread model the
+    # competitive algorithm uses would treat 1 vs 2 guesses as a 2x
+    # "time" difference which is nonsense. Route all pinpoint rounds
+    # through the legacy rank system.
+    pinpoint_free = all(s.game not in _NON_TIME_GAMES for s in sorted_scores)
+    within_size = 3 <= n <= 5
+    no_ties = not _has_ties(sorted_scores)
+
+    if pinpoint_free and within_size and no_ties:
+        players = [
+            {"name": s.player_name, "time": s.raw_score}
+            for s in sorted_scores
+        ]
+        results = competitive_score(players)
+        return {
+            sorted_scores[i].player_id: results[i]["final_score"]
+            for i in range(n)
+        }
+
+    return _legacy_rank_points(sorted_scores)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +224,7 @@ def weekly_leaderboard(
         groups.setdefault((s.game, s.puzzle_no), []).append(s)
 
     player_names: Dict[int, str] = {}
-    totals: Dict[int, int] = {}
+    totals: Dict[int, float] = {}
     games_by_player: Dict[int, set] = {}
     days_by_player: Dict[int, set] = {}
     submissions: Dict[int, int] = {}
@@ -184,7 +236,7 @@ def weekly_leaderboard(
         player_names[s.player_id] = s.player_name
         games_by_player.setdefault(s.player_id, set()).add(s.game)
         days_by_player.setdefault(s.player_id, set()).add(s.puzzle_date)
-        totals.setdefault(s.player_id, 0)
+        totals.setdefault(s.player_id, 0.0)
         submissions[s.player_id] = submissions.get(s.player_id, 0) + 1
         first_places.setdefault(s.player_id, 0)
         total_time.setdefault(s.player_id, 0)
@@ -216,7 +268,10 @@ def weekly_leaderboard(
         PlayerWeeklyStats(
             player_id=pid,
             player_name=player_names[pid],
-            total_points=totals[pid],
+            # Round aggregated totals to 1 d.p. — summing 1-d.p.
+            # floats across many rounds accumulates FP dust that
+            # would otherwise surface in display as "7.0000001".
+            total_points=round(totals[pid], 1),
             distinct_games=len(games_by_player[pid]),
             days_played=len(days_by_player[pid]),
             first_places=first_places[pid],
@@ -249,14 +304,14 @@ def game_leaders(scores: Sequence[ScoreRow]) -> List[GameLeader]:
         groups.setdefault((s.game, s.puzzle_no), []).append(s)
 
     # Per-player per-game point totals
-    game_player_pts: Dict[str, Dict[int, int]] = {}
+    game_player_pts: Dict[str, Dict[int, float]] = {}
     player_names: Dict[int, str] = {}
 
     for (game, _), group_scores in groups.items():
         pts_map = assign_daily_points(group_scores)
         bucket = game_player_pts.setdefault(game, {})
         for pid, pts in pts_map.items():
-            bucket[pid] = bucket.get(pid, 0) + pts
+            bucket[pid] = bucket.get(pid, 0.0) + pts
 
     for s in scores:
         player_names[s.player_id] = s.player_name
@@ -272,7 +327,8 @@ def game_leaders(scores: Sequence[ScoreRow]) -> List[GameLeader]:
                 game=game,
                 player_id=best_pid,
                 player_name=player_names.get(best_pid, ""),
-                total_points=player_pts[best_pid],
+                # Same FP-dust rounding guard as in weekly_leaderboard.
+                total_points=round(player_pts[best_pid], 1),
             )
         )
     return result

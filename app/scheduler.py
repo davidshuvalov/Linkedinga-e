@@ -55,8 +55,17 @@ def _format_seconds(total: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
-def _pts(points: int) -> str:
-    return "1 pt" if points == 1 else f"{points} pts"
+def _pts(points: float) -> str:
+    """Render a points value — integer-valued floats stay clean
+    ("5 pts", "4 pts"), fractional values render as ``N.N pts``
+    ("7.0 pts", "3.2 pts"). Competitive scoring emits floats;
+    legacy rank rounds still produce integers and should display
+    the same way they always did.
+    """
+    if abs(points - round(points)) < 1e-9:
+        p = int(round(points))
+        return "1 pt" if p == 1 else f"{p} pts"
+    return f"{points:.1f} pts"
 
 
 def _rounds_word(n: int) -> str:
@@ -190,14 +199,20 @@ def _per_game_running_totals(
     for s in week_scores:
         groups.setdefault((s.game, s.puzzle_no), []).append(s)
 
-    per_game_totals: Dict[str, Dict[int, int]] = {}
+    per_game_totals: Dict[str, Dict[int, float]] = {}
     player_names: Dict[int, str] = {}
     for (game, _), group_scores in groups.items():
         bucket = per_game_totals.setdefault(game, {})
         for pid, pts in assign_daily_points(group_scores).items():
-            bucket[pid] = bucket.get(pid, 0) + pts
+            bucket[pid] = bucket.get(pid, 0.0) + pts
     for s in week_scores:
         player_names[s.player_id] = s.player_name
+
+    def _compact(val: float) -> str:
+        """Integer-valued totals stay as ``5``; fractional as ``5.8``."""
+        if abs(val - round(val)) < 1e-9:
+            return str(int(round(val)))
+        return f"{val:.1f}"
 
     lines: List[str] = ["Game standings (week):"]
     any_rendered = False
@@ -211,7 +226,7 @@ def _per_game_running_totals(
             key=lambda kv: (-kv[1], kv[0]),
         )
         parts = [
-            f"{player_names.get(pid, '')} {pts}"
+            f"{player_names.get(pid, '')} {_compact(round(pts, 1))}"
             for pid, pts in ranked
         ]
         lines.append(f"  {GAME_DISPLAY[game]}: " + ", ".join(parts))
