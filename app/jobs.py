@@ -306,3 +306,95 @@ def run_morning_nudge(
         today,
     )
     return nudged
+
+
+# ---------------------------------------------------------------------------
+# 15-min final warning (cron)
+# ---------------------------------------------------------------------------
+
+
+# Rotating rude templates for the last-call nag. Selection keys on
+# the LA date ordinal so every player hits the same flavour on the
+# same day but it rotates night-to-night. ``{name}`` / ``{missing}``
+# are format fields (missing = comma-separated game list).
+_FINAL_WARNING_TEMPLATES = (
+    "15 mins on the clock, {name}. Still haven't played: {missing}. "
+    "Don't be the one who fluffed the streak.",
+    "{name}. The day is about to flip. Missing: {missing}. "
+    "Move or be mocked in tomorrow's recap.",
+    "Last call, {name}. Games owed: {missing}. "
+    "Midnight doesn't wait and neither does your credibility.",
+    "{name}, you've got a quarter hour before LinkedIn eats these puzzles. "
+    "Outstanding: {missing}. Chop chop.",
+    "Tick tock {name}. Still MIA on: {missing}. "
+    "Your future self will thank you. Or roast you. Up to you.",
+    "{name}: 15 minutes to submit {missing}. "
+    "Or don't, and feature tomorrow in the hall of cowards.",
+)
+
+
+def _build_final_warning(
+    player_name: str, missing_games: List[str], today: date
+) -> str:
+    """Render the last-call DM body. Template choice rotates on the
+    day's ordinal so the same player doesn't get the same zinger two
+    nights in a row."""
+    template = _FINAL_WARNING_TEMPLATES[
+        today.toordinal() % len(_FINAL_WARNING_TEMPLATES)
+    ]
+    return template.format(name=player_name, missing=", ".join(missing_games))
+
+
+def run_final_warning(
+    repo: Repository,
+    settings: Settings,
+    *,
+    now: Optional[datetime] = None,
+) -> List[str]:
+    """Cron entry point — DM each active player who hasn't completed
+    every enabled game, 15 minutes before the LA puzzle rollover.
+
+    Mirrors :func:`run_morning_nudge` in structure (same skip rules,
+    same "recent activity" window) but with rude copy fit for the
+    end-of-day crunch. Returns the ``whatsapp_id`` list that received
+    a nag — tested this way and useful for logging daily reach.
+    """
+    now = now or datetime.now(settings.tz)
+    today = la_date(now)
+    enabled = settings.enabled_games
+    if not enabled:
+        logger.info("Final warning: no enabled games configured, skipping")
+        return []
+
+    since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
+    active_players = repo.list_players_active_since(since)
+    if not active_players:
+        logger.info("Final warning: no recently active players, skipping")
+        return []
+
+    today_scores = repo.list_scores(date_from=today, date_to=today)
+    games_by_player: dict[int, set[str]] = {}
+    for s in today_scores:
+        if s.game in enabled:
+            games_by_player.setdefault(s.player_id, set()).add(s.game)
+
+    warned: List[str] = []
+    for player in active_players:
+        if not player.notifications_enabled:
+            continue
+        played = games_by_player.get(player.id, set())
+        missing_ids = [g for g in GAME_DISPLAY_ORDER if g in enabled and g not in played]
+        if not missing_ids:
+            continue  # player is done — no warning needed
+        missing_labels = [GAME_DISPLAY[g] for g in missing_ids]
+        body = _build_final_warning(player.display_name, missing_labels, today)
+        if send_dm(settings, player.whatsapp_id, body):
+            warned.append(player.whatsapp_id)
+
+    logger.info(
+        "Final warning sent to %d/%d active players (LA day %s)",
+        len(warned),
+        len(active_players),
+        today,
+    )
+    return warned

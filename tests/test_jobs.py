@@ -23,6 +23,7 @@ from app.jobs import (
     render_daily,
     render_wrap,
     run_daily_recap,
+    run_final_warning,
     run_morning_nudge,
 )
 
@@ -339,3 +340,85 @@ class TestMorningNudge:
         # "Done so far" should list Queens; "Still to play" lists Tango.
         assert "Queens" in body.split("Still to play:")[0]
         assert "Tango" in body.split("Still to play:")[1]
+
+
+# ---------------------------------------------------------------------------
+# run_final_warning — 15 minutes before midnight LA
+# ---------------------------------------------------------------------------
+
+
+class TestFinalWarning:
+    """Cron at 23:45 LA. Mirrors morning nudge but with rude copy."""
+
+    @patch("app.jobs.send_dm")
+    def test_no_active_players_does_nothing(self, mock_dm):
+        repo = InMemoryRepository()
+        settings = _make_settings({"queens", "tango"})
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        warned = run_final_warning(repo, settings, now=now)
+        assert warned == []
+        mock_dm.assert_not_called()
+
+    @patch("app.jobs.send_dm")
+    def test_skips_player_already_done(self, mock_dm):
+        from app.puzzles import la_date
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        today_la = la_date(now)
+        _seed(repo, 1, "Alice", today_la, ["queens", "tango"])
+        settings = _make_settings({"queens", "tango"})
+        warned = run_final_warning(repo, settings, now=now)
+        assert warned == []
+        mock_dm.assert_not_called()
+
+    @patch("app.jobs.send_dm")
+    def test_warns_player_with_outstanding_games(self, mock_dm):
+        from app.puzzles import la_date
+        mock_dm.return_value = True
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        today_la = la_date(now)
+        prev_la = today_la - timedelta(days=1)
+        # Bob is active (played yesterday) but hasn't played today.
+        _seed(repo, 1, "Bob", prev_la, ["queens"])
+        settings = _make_settings({"queens", "tango"})
+        warned = run_final_warning(repo, settings, now=now)
+        assert warned == ["whatsapp:+61400000001"]
+        body = mock_dm.call_args[0][2]
+        assert "Bob" in body
+        # Both missing games should be called out by name.
+        assert "Queens" in body
+        assert "Tango" in body
+
+    @patch("app.jobs.send_dm")
+    def test_skips_opted_out_players(self, mock_dm):
+        from app.puzzles import la_date
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        prev_la = la_date(now) - timedelta(days=1)
+        bob = repo.get_or_create_player("whatsapp:+61400000001", "Bob")
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=713,
+            puzzle_date=prev_la, raw_score=10, share_text="x",
+        )
+        repo.set_notifications_enabled(bob.id, False)
+        settings = _make_settings({"queens", "tango"})
+        warned = run_final_warning(repo, settings, now=now)
+        assert warned == []
+        mock_dm.assert_not_called()
+
+    @patch("app.jobs.send_dm")
+    def test_lists_only_missing_games(self, mock_dm):
+        from app.puzzles import la_date
+        mock_dm.return_value = True
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        today_la = la_date(now)
+        _seed(repo, 1, "Charlie", today_la, ["queens"])  # tango still owed
+        settings = _make_settings({"queens", "tango"})
+        run_final_warning(repo, settings, now=now)
+        body = mock_dm.call_args[0][2]
+        # Message should name the owed game (Tango) but not the
+        # already-completed one (Queens).
+        assert "Tango" in body
+        assert "Queens" not in body
