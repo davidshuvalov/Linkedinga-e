@@ -1,16 +1,26 @@
-"""Unit tests for ``app.notifications`` — PB / worst-ever DM logic.
+"""Unit tests for ``app.notifications`` — PB / worst-ever DM logic
+and the "day complete" personal summary.
 
-Focuses on :func:`render_personal_best_message` (the pure-function
-classifier) so tests don't need to stub the Twilio sender. The
-webhook-wiring path is covered by :mod:`tests.test_webhook_pb`.
+Focuses on the pure-function cores (``_classify``,
+``render_personal_best_message``, ``render_day_complete_summary``,
+``maybe_notify_day_complete``) so tests don't need to stub the
+Twilio sender.
 """
 
 from __future__ import annotations
 
+from datetime import date
+
+from app.db import InMemoryRepository, Player, ScoreRow
 from app.notifications import (
     _classify,
+    maybe_notify_day_complete,
+    render_day_complete_summary,
     render_personal_best_message,
 )
+
+MON = date(2026, 4, 13)
+TUE = date(2026, 4, 14)
 
 
 class TestClassify:
@@ -112,3 +122,103 @@ class TestRenderMessage:
         )
         assert body is not None
         assert "1 guess" in body
+
+
+# ---------------------------------------------------------------------------
+# render_day_complete_summary + maybe_notify_day_complete
+# ---------------------------------------------------------------------------
+
+
+def _s(pid, name, game, pn, raw, d=TUE):
+    return ScoreRow(pid, name, game, pn, d, raw)
+
+
+class TestDayCompleteSummary:
+    def test_renders_each_enabled_game_with_rank(self):
+        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
+        today_scores = [
+            _s(1, "Alice", "queens", 714, 30),
+            _s(2, "Bob",   "queens", 714, 50),
+            _s(1, "Alice", "tango",  554, 40),
+            _s(2, "Bob",   "tango",  554, 30),
+        ]
+        enabled = frozenset({"queens", "tango"})
+        body = render_day_complete_summary(
+            player=alice,
+            today=TUE,
+            today_scores=today_scores,
+            week_scores=today_scores,
+            enabled_games=enabled,
+        )
+        assert "Alice" in body
+        assert "Queens" in body
+        assert "Tango" in body
+        # Alice wins Queens (rank 1/2), loses Tango (rank 2/2).
+        assert "rank 1/2" in body
+        assert "rank 2/2" in body
+        # Weekly standing line.
+        assert "currently" in body
+
+    def test_pinpoint_renders_as_guesses(self):
+        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
+        today_scores = [_s(1, "Alice", "pinpoint", 714, 3)]
+        enabled = frozenset({"pinpoint"})
+        body = render_day_complete_summary(
+            player=alice,
+            today=TUE,
+            today_scores=today_scores,
+            week_scores=today_scores,
+            enabled_games=enabled,
+        )
+        assert "3 guesses" in body
+
+
+class TestMaybeNotifyDayComplete:
+    def test_fires_when_every_game_done(self):
+        repo = InMemoryRepository()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=TUE, raw_score=30, share_text="",
+        )
+        repo.insert_score(
+            player_id=alice.id, game="tango", puzzle_no=554,
+            puzzle_date=TUE, raw_score=40, share_text="",
+        )
+        enabled = frozenset({"queens", "tango"})
+        body = maybe_notify_day_complete(
+            repo, None,
+            player=alice,
+            today=TUE,
+            enabled_games=enabled,
+        )
+        assert body is not None
+        assert "Alice" in body
+
+    def test_silent_when_games_missing(self):
+        repo = InMemoryRepository()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=TUE, raw_score=30, share_text="",
+        )
+        # tango not yet submitted
+        enabled = frozenset({"queens", "tango"})
+        body = maybe_notify_day_complete(
+            repo, None,
+            player=alice,
+            today=TUE,
+            enabled_games=enabled,
+        )
+        assert body is None
+
+    def test_silent_when_no_enabled_games(self):
+        repo = InMemoryRepository()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        body = maybe_notify_day_complete(
+            repo, None,
+            player=alice,
+            today=TUE,
+            enabled_games=frozenset(),
+        )
+        assert body is None

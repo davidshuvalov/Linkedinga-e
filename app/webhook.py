@@ -975,6 +975,28 @@ def handle_inbound(
             player.id,
         )
 
+    # "Day complete" personal summary — fires the moment this player
+    # has submitted every enabled game for today's LA date. Different
+    # audience from the group early-fire recap below: this one DMs
+    # the individual, that one DMs the whole roster.
+    try:
+        from .notifications import maybe_notify_day_complete
+
+        maybe_notify_day_complete(
+            repo,
+            settings,
+            player=player,
+            today=puzzle_date,
+            enabled_games=enabled_games,
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "maybe_notify_day_complete failed after insert by player %s",
+            player.id,
+        )
+
     # Event-driven early recap: if this submission completes the day
     # (everyone's played all enabled games), fire the recap right
     # away rather than waiting for the LA-midnight cron. Wrapped in
