@@ -335,15 +335,46 @@ drill:
 
 Players can DM the bot (case-insensitive) with these keywords:
 
-| Command            | Response                                                                |
-| ------------------ | ----------------------------------------------------------------------- |
-| `stats`            | Your all-time per-game stats and personal bests                         |
-| `recap` / `today`  | Daily recap for the current in-progress LA day — per-game rankings and the running "Week so far" leaderboard. Lets you pull the "where are we up to" view from your phone, e.g. midday once everyone has played. |
-| `wrap` / `week`    | Weekly wrap for the current in-progress LA week — final-day per-game rankings, week totals, per-game weekly winners, and the three prizes (partial data shown if not yet end-of-week). |
-| `unparsed`         | Last 10 unparsed messages (admin debugging)                             |
+**Look at scores**
 
-Any other non-score message is **silent** (no reply) so the bot doesn't
-spam the group with help text.
+| Command                                      | Response |
+| -------------------------------------------- | -------- |
+| `recap` / `today`                            | Daily recap for today (LA) — per-game rankings + "Week so far" leaderboard + passive-aggressive nudge for anyone ghosting. |
+| `yesterday`                                  | Yesterday's recap. |
+| `N days ago` (1–6)                           | Recap for N days back. |
+| `recap YYYY-MM-DD`                           | Recap for a specific date within the last 6 days. |
+| `week` / `wrap`                              | Weekly wrap — per-game winners + prizes. |
+| `all` / `history`                            | Every round day-by-day, Mon → today. |
+| `leaderboard` / `standings`                  | Just the weekly leaderboard. |
+| `leaderboard <game>` (e.g. `leaderboard queens`) | Per-game weekly standings. |
+| `prizes`                                     | Live snapshot of who's winning each prize. |
+| `missing` / `who` / `ghosts`                 | Players who played earlier this week but not today. |
+| `games` / `enabled`                          | Which games are tracked vs parsed-but-untracked. |
+| `rules` / `scoring`                          | How points are calculated. |
+
+**About you**
+
+| Command            | Response |
+| ------------------ | -------- |
+| `stats`            | Your all-time per-game stats + personal bests. |
+| `pb` / `bests`     | Just personal bests (subset of `stats`). |
+| `streak`           | Your current consecutive-days streak. |
+| `vs <name>`        | Head-to-head, all-time, vs the named opponent. |
+
+**Change things**
+
+| Command            | Response |
+| ------------------ | -------- |
+| `undo`             | Delete your most recent submission for today (LA). Older days are locked. |
+| `name <new>`       | Change your display name (overrides WhatsApp profile name). |
+| `notify on` / `off` | Opt in/out of daily recap DMs. Scores still accepted when off. |
+| `help` / `?`       | Show the full command list. |
+| `unparsed`         | Last 10 unparsed messages (admin debugging). |
+
+**Unrecognised messages** (anything that isn't a command and isn't a
+score share) now get a "I didn't understand that" reply plus the help
+blurb. The bot operates in 1:1 DMs so silence was leaving users
+guessing. Empty / whitespace-only sends stay silent.
 
 ## Share-text format regression fixtures
 

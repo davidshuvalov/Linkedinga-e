@@ -13,6 +13,13 @@ create table if not exists players (
     created_at   timestamptz not null default now()
 );
 
+-- Opt-out flag for daily/weekly recap DMs. Added after the initial
+-- schema, so it's applied as an idempotent ALTER rather than baked
+-- into the CREATE above — safe to re-run against existing databases.
+alter table players
+    add column if not exists notifications_enabled boolean
+    not null default true;
+
 -- ---------- scores ----------
 -- raw_score convention:
 --   queens/tango/crossclimb/zip/patches/mini_sudoku → seconds (lower is better)

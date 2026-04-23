@@ -252,6 +252,413 @@ class TestHelpCommand:
         assert reply is not None
         assert "stats" in reply
 
+
+# ---------------------------------------------------------------------------
+# Utility commands added in the "do it all" batch
+# ---------------------------------------------------------------------------
+
+
+def _seed_three_queens(repo, today):
+    """Alice/Bob/Charlie play Queens today with increasing times."""
+    for i, (name, raw) in enumerate(
+        [("Alice", 10), ("Bob", 20), ("Charlie", 30)], start=1
+    ):
+        repo.get_or_create_player(f"whatsapp:+6140000000{i}", name)
+        repo.insert_score(
+            player_id=i, game="queens", puzzle_no=714,
+            puzzle_date=today, raw_score=raw,
+            share_text=f"Queens #714 {raw}s",
+        )
+
+
+class TestLeaderboardCommand:
+    def test_leaderboard_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="leaderboard",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No scores yet" in reply
+
+    def test_leaderboard_lists_players_ranked(self, repo):
+        from app.puzzles import la_date
+        _seed_three_queens(repo, la_date(NOW))
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="leaderboard",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "1. Alice" in reply
+        assert "2. Bob" in reply
+        assert "3. Charlie" in reply
+
+    def test_leaderboard_per_game_filter(self, repo):
+        from app.puzzles import la_date
+        _seed_three_queens(repo, la_date(NOW))
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="leaderboard queens",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Queens — week so far" in reply
+        assert "Alice" in reply
+
+    def test_leaderboard_unknown_game_falls_through_to_help(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="leaderboard widgets",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        # "leaderboard widgets" isn't a known command; treated as chatter.
+        assert "didn't understand" in reply.lower()
+
+
+class TestMissingCommand:
+    def test_missing_when_full_turnout(self, repo):
+        from app.puzzles import la_date
+        _seed_three_queens(repo, la_date(NOW))
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="missing",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "full turnout" in reply.lower()
+
+    def test_missing_names_ghosting_players(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        # Alice played yesterday, Bob played today. Alice is "missing".
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=713,
+            puzzle_date=yesterday, raw_score=15, share_text="x",
+        )
+        repo.insert_score(
+            player_id=2, game="queens", puzzle_no=714,
+            puzzle_date=today, raw_score=20, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000002", body="missing",
+            profile_name="Bob", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Alice" in reply
+        assert "Still to play today" in reply
+
+
+class TestPbCommand:
+    def test_pb_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="pb",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No scores" in reply
+
+    def test_pb_shows_best_per_game(self, repo):
+        # Two Queens submissions; PB is the lower raw_score.
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=714,
+            puzzle_date=NOW.date(), raw_score=30, share_text="x",
+        )
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=715,
+            puzzle_date=NOW.date(), raw_score=10, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="pb",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Personal bests for Alice" in reply
+        assert "0:10" in reply
+        assert "0:30" not in reply
+
+
+class TestGamesCommand:
+    def test_games_lists_enabled_and_disabled(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="games",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Tracked games" in reply
+        assert "Queens" in reply
+        # Default enabled_games omits Pinpoint + Crossclimb.
+        assert "Pinpoint" in reply
+        assert "Crossclimb" in reply
+
+
+class TestRulesCommand:
+    def test_rules_mentions_core_concepts(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="rules",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        for keyword in ("competitive", "Base points", "legacy", "Prizes"):
+            assert keyword.lower() in reply.lower()
+
+    def test_scoring_is_alias_for_rules(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="scoring",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "legacy" in reply.lower()
+
+
+class TestPrizesCommand:
+    def test_prizes_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="prizes",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No scores yet" in reply
+
+    def test_prizes_shows_live_winners(self, repo):
+        from app.puzzles import la_date
+        _seed_three_queens(repo, la_date(NOW))
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="prizes",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Prizes so far" in reply
+        # Alice wins Queens → most firsts; Charlie gets most lasts.
+        assert "Alice" in reply
+
+
+class TestStreakCommand:
+    def test_streak_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="streak",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "no streak yet" in reply.lower()
+
+    def test_streak_counts_consecutive_days(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+        today = la_date(NOW)
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        # 3 consecutive days including today.
+        for n in range(3):
+            repo.insert_score(
+                player_id=1, game="queens", puzzle_no=714 - n,
+                puzzle_date=today - timedelta(days=n), raw_score=10,
+                share_text="x",
+            )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="streak",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "3-day" in reply or "3-days" in reply
+
+
+class TestVsCommand:
+    def test_vs_with_no_shared_rounds(self, repo):
+        # Alice has scores, Bob has scores, but on different puzzles.
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=714,
+            puzzle_date=NOW.date(), raw_score=10, share_text="x",
+        )
+        repo.insert_score(
+            player_id=2, game="queens", puzzle_no=715,
+            puzzle_date=NOW.date(), raw_score=20, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="vs Bob",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No shared rounds" in reply
+
+    def test_vs_unknown_opponent(self, repo):
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=714,
+            puzzle_date=NOW.date(), raw_score=10, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="vs Mystery",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Couldn't find" in reply
+
+    def test_vs_self_rejected(self, repo):
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=714,
+            puzzle_date=NOW.date(), raw_score=10, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="vs Alice",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "yourself" in reply.lower()
+
+    def test_vs_reports_head_to_head(self, repo):
+        # Alice and Bob both play Queens #714 (Alice wins) and
+        # Tango #554 (Bob wins). Expect 1W-1L overall.
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        for pid, game, raw in [
+            (1, "queens", 10), (2, "queens", 20),
+            (1, "tango",  40), (2, "tango",  30),
+        ]:
+            puzzle_no = 714 if game == "queens" else 554
+            repo.insert_score(
+                player_id=pid, game=game, puzzle_no=puzzle_no,
+                puzzle_date=NOW.date(), raw_score=raw, share_text="x",
+            )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="vs Bob",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Alice vs Bob" in reply
+        assert "Queens: 1W–0L" in reply
+        assert "Tango: 0W–1L" in reply
+        assert "Overall: 1W–1L" in reply
+
+
+class TestUndoCommand:
+    def test_undo_with_nothing_today(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="undo",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Nothing to undo" in reply
+
+    def test_undo_removes_todays_submission(self, repo):
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=714,
+            puzzle_date=NOW.date(), raw_score=10, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="undo",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Deleted" in reply
+        assert len(repo.scores) == 0
+
+    def test_undo_wont_touch_prior_days(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+        yesterday = la_date(NOW) - timedelta(days=1)
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=713,
+            puzzle_date=yesterday, raw_score=10, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="undo",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Nothing to undo" in reply
+        assert len(repo.scores) == 1  # yesterday's row survives
+
+
+class TestNameCommand:
+    def test_name_updates_display_name(self, repo):
+        player = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        assert player.display_name == "Alice"
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="name Alicia",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Alicia" in reply
+        # Check the rename stuck — second lookup should return the new name.
+        # Note: get_or_create_player ignores the passed display_name when a
+        # row exists, so the profile_name="Alice" doesn't overwrite.
+        updated = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        assert updated.display_name == "Alicia"
+
+    def test_name_rejects_empty(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="name   ",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        # Trailing whitespace-only name: the parser extracts "" which
+        # means the regex didn't match, so it falls through to help.
+        assert "didn't understand" in reply.lower() or "empty" in reply.lower()
+
+    def test_name_rejects_overlong(self, repo):
+        long_name = "A" * 50
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body=f"name {long_name}",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "too long" in reply.lower()
+
+
+class TestNotifyCommand:
+    def test_notify_off_flips_flag(self, repo):
+        player = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        assert player.notifications_enabled is True
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="notify off",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "off" in reply.lower()
+        updated = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        assert updated.notifications_enabled is False
+
+    def test_notify_on_flips_flag_back(self, repo):
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="notify off",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="notify on",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "on" in reply.lower()
+        updated = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        assert updated.notifications_enabled is True
+
+    def test_opted_out_player_excluded_from_active_whatsapp_ids(self, repo):
+        from datetime import date as _d
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=NOW.date(), raw_score=10, share_text="x",
+        )
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=714,
+            puzzle_date=NOW.date(), raw_score=20, share_text="x",
+        )
+        repo.set_notifications_enabled(alice.id, False)
+        active = repo.list_active_whatsapp_ids(
+            date_from=_d(2000, 1, 1), date_to=_d(2100, 1, 1),
+        )
+        assert alice.whatsapp_id not in active
+        assert bob.whatsapp_id in active
+
     def test_puzzle_date_comes_from_now(self, repo):
         custom_now = datetime(2026, 1, 1, 20, 0, tzinfo=SYDNEY)
         handle_inbound(
