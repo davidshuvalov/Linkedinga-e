@@ -1,18 +1,23 @@
 """Scheduled-job orchestration.
 
-The single scheduled job is :func:`run_daily_recap`, wired to the
-00:00 America/Los_Angeles cron in :func:`app.main._setup_scheduler`.
-It fires at the LinkedIn puzzle rollover — the moment the previous
-day's puzzles expire — and:
+Two scheduled cron jobs:
 
-- On Mon–Sat (LA), emits the daily recap: per-game rankings for the
-  day that just closed, plus a running "Week so far" leaderboard.
-- On Sun (LA) — which in Sydney is Monday afternoon — emits the
-  weekly wrap: Sunday's per-game rankings, final week totals, per-game
-  weekly winners, and the three prizes.
+- :func:`run_daily_recap` — fires at 00:00 America/Los_Angeles (the
+  LinkedIn puzzle rollover). On Mon–Sat (LA) emits a daily recap;
+  on Sun (LA) emits the full weekly wrap. Skips if the recap was
+  already fired early via :func:`maybe_fire_early_recap`.
+- :func:`run_morning_nudge` — fires at 08:30 Australia/Sydney.
+  DMs each opted-in player who hasn't yet played all enabled games
+  for today's LA puzzle day, listing what's still outstanding.
+
+Plus an event-driven helper, :func:`maybe_fire_early_recap`, called
+by the webhook after every successful score insert. When everyone
+who's been active in the last 7 days has played all enabled games
+for the day, it fires the daily recap (or weekly wrap on Sun LA)
+immediately and marks it sent so the cron doesn't double-send.
 
 Both formats are produced by :mod:`app.scheduler` (pure formatters).
-This module just handles the I/O: figure out the date window, fetch
+This module handles the I/O: figure out the date window, fetch
 scores from the repository, call the formatter, and send via Twilio.
 
 Same entrypoint also powers the on-demand ``recap`` and ``wrap``
@@ -28,15 +33,28 @@ from typing import List, Optional, Tuple
 
 from .config import Settings
 from .db import Repository
+from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER
 from .puzzles import la_date, week_bounds
 from .scheduler import daily_recap, weekly_wrap
-from .sender import send_recap
+from .sender import send_dm, send_recap
 
 logger = logging.getLogger(__name__)
+
+# How far back a player can have last submitted to count as "active"
+# (and therefore expected to play today). Seven days catches anyone
+# in the natural weekly rhythm of LinkedIn games.
+_ACTIVE_WINDOW_DAYS = 7
 
 
 def _is_sunday(day: date) -> bool:
     return day.weekday() == 6
+
+
+def _recap_type_for(day: date) -> str:
+    """Daily recap on Mon–Sat (LA), weekly wrap on Sun (LA). Used as
+    the ``recap_type`` key in ``recap_log`` so the early-fire path
+    and the cron agree on whether a given day has been "covered"."""
+    return "weekly" if _is_sunday(day) else "daily"
 
 
 def render_daily(
@@ -96,15 +114,30 @@ def run_daily_recap(
     settings: Settings,
     *,
     now: Optional[datetime] = None,
-) -> str:
+) -> Optional[str]:
     """Cron entry point — fire the daily recap (or weekly wrap on Sun).
 
     Called by the APScheduler job at 00:00 America/Los_Angeles. At that
     instant the new puzzle is dropping; the "target day" to recap is
     the LA day that just closed (``la_date(now) - 1``).
+
+    Skips silently if :func:`maybe_fire_early_recap` already sent this
+    day's recap during the day — the recap_log entry is the source of
+    truth for "has this been covered". Returns ``None`` in that case
+    so callers can distinguish "fired" from "skipped (already sent)".
     """
     now = now or datetime.now(settings.tz)
     target_day = la_date(now) - timedelta(days=1)
+    recap_type = _recap_type_for(target_day)
+
+    if repo.has_recap_been_sent(target_day, recap_type):
+        logger.info(
+            "Skipping cron recap for LA day %s — already sent (%s)",
+            target_day,
+            recap_type,
+        )
+        return None
+
     logger.info(
         "Running daily recap for LA day %s (sunday=%s)",
         target_day,
@@ -113,4 +146,163 @@ def run_daily_recap(
 
     body, dm_targets = render_daily(repo, settings, target_day)
     send_recap(settings, body, dm_targets=dm_targets)
+    repo.mark_recap_sent(target_day, recap_type)
     return body
+
+
+# ---------------------------------------------------------------------------
+# Early-fire daily recap (event-driven, called from webhook)
+# ---------------------------------------------------------------------------
+
+
+def _everyone_done_today(
+    repo: Repository, settings: Settings, today: date
+) -> bool:
+    """Has every recently-active player submitted every enabled game
+    for ``today`` (LA)? Drives the early-fire decision."""
+    if not settings.enabled_games:
+        return False
+
+    since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
+    active_players = repo.list_players_active_since(since)
+    if not active_players:
+        return False
+
+    today_scores = repo.list_scores(date_from=today, date_to=today)
+    games_by_player: dict[int, set[str]] = {}
+    for s in today_scores:
+        if s.game in settings.enabled_games:
+            games_by_player.setdefault(s.player_id, set()).add(s.game)
+
+    enabled = set(settings.enabled_games)
+    return all(
+        games_by_player.get(p.id, set()) >= enabled
+        for p in active_players
+    )
+
+
+def maybe_fire_early_recap(
+    repo: Repository,
+    settings: Settings,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """If everyone's done for today, send the recap now and mark it.
+
+    Called from the webhook after each successful score insert. Cheap
+    when nobody's done (one query for active players, one for today's
+    scores). Returns the recap body if fired, ``None`` if not.
+    """
+    now = now or datetime.now(settings.tz)
+    today = la_date(now)
+    recap_type = _recap_type_for(today)
+
+    if repo.has_recap_been_sent(today, recap_type):
+        return None
+    if not _everyone_done_today(repo, settings, today):
+        return None
+
+    logger.info(
+        "Early-firing %s recap for LA day %s — everyone has played all games",
+        recap_type,
+        today,
+    )
+    body, dm_targets = render_daily(repo, settings, today)
+    send_recap(settings, body, dm_targets=dm_targets)
+    repo.mark_recap_sent(today, recap_type)
+    return body
+
+
+# ---------------------------------------------------------------------------
+# Morning nudge (cron)
+# ---------------------------------------------------------------------------
+
+
+def _build_morning_nudge(
+    player_name: str,
+    enabled_games: frozenset,
+    played_games: set,
+) -> str:
+    """Render the per-player nudge body. ``played_games`` is the set of
+    games the player has already submitted today; the message lists
+    only the enabled games they still owe."""
+    missing = [
+        GAME_DISPLAY[g]
+        for g in GAME_DISPLAY_ORDER
+        if g in enabled_games and g not in played_games
+    ]
+    played = [
+        GAME_DISPLAY[g]
+        for g in GAME_DISPLAY_ORDER
+        if g in enabled_games and g in played_games
+    ]
+
+    lines = [f"Morning {player_name}!"]
+    if not played:
+        lines.append("You haven't played any LinkedIn games today yet.")
+    else:
+        lines.append(f"Done so far: {', '.join(played)}.")
+    lines.append("")
+    lines.append("Still to play:")
+    for game in missing:
+        lines.append(f"  - {game}")
+    lines.append("")
+    lines.append("DM your shares back to me when you're done.")
+    return "\n".join(lines)
+
+
+def run_morning_nudge(
+    repo: Repository,
+    settings: Settings,
+    *,
+    now: Optional[datetime] = None,
+) -> List[str]:
+    """Cron entry point — DM each active player a list of games they
+    haven't played today.
+
+    Skips:
+    - players with ``notifications_enabled = False``
+    - players who've already played every enabled game today (no
+      point nudging someone who's done)
+    - days when no enabled games are configured
+
+    Returns the list of whatsapp_ids that received a nudge — handy for
+    tests and for logging the daily reach.
+    """
+    now = now or datetime.now(settings.tz)
+    today = la_date(now)
+    enabled = settings.enabled_games
+    if not enabled:
+        logger.info("Morning nudge: no enabled games configured, skipping")
+        return []
+
+    since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
+    active_players = repo.list_players_active_since(since)
+    if not active_players:
+        logger.info("Morning nudge: no recently active players, skipping")
+        return []
+
+    today_scores = repo.list_scores(date_from=today, date_to=today)
+    games_by_player: dict[int, set[str]] = {}
+    for s in today_scores:
+        if s.game in enabled:
+            games_by_player.setdefault(s.player_id, set()).add(s.game)
+
+    nudged: List[str] = []
+    for player in active_players:
+        if not player.notifications_enabled:
+            continue
+        played = games_by_player.get(player.id, set())
+        if played >= set(enabled):
+            continue  # they're already done — nothing to nudge about
+        body = _build_morning_nudge(player.display_name, enabled, played)
+        if send_dm(settings, player.whatsapp_id, body):
+            nudged.append(player.whatsapp_id)
+
+    logger.info(
+        "Morning nudge sent to %d/%d active players (LA day %s)",
+        len(nudged),
+        len(active_players),
+        today,
+    )
+    return nudged

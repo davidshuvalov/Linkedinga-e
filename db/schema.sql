@@ -68,3 +68,19 @@ create table if not exists unparsed_messages (
 
 create index if not exists unparsed_messages_created_at_idx
     on unparsed_messages (created_at desc);
+
+-- ---------- recap_log ----------
+-- Records each recap/wrap that's been sent, so the bot can fire the
+-- daily recap early (the moment everyone's played all their games)
+-- and the scheduled end-of-day cron knows to skip rather than
+-- double-send. Unique constraint on (recap_date, recap_type) makes
+-- "has this been sent?" a simple lookup.
+create table if not exists recap_log (
+    id          bigserial primary key,
+    recap_date  date not null,
+    recap_type  text not null check (recap_type in ('daily', 'weekly')),
+    sent_at     timestamptz not null default now(),
+    unique (recap_date, recap_type)
+);
+
+create index if not exists recap_log_date_idx on recap_log (recap_date);

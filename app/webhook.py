@@ -953,6 +953,24 @@ def handle_inbound(
     if parsed.game not in enabled_games:
         off_note = " (Not tracked for the leaderboard.)"
 
+    # Event-driven early recap: if this submission completes the day
+    # (everyone's played all enabled games), fire the recap right
+    # away rather than waiting for the LA-midnight cron. Wrapped in
+    # try/except so a failure in the recap path can't sink the
+    # acknowledgment of a perfectly valid submission.
+    if settings is not None:
+        try:
+            from .jobs import maybe_fire_early_recap
+
+            maybe_fire_early_recap(repo, settings, now=now)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "maybe_fire_early_recap failed after insert by player %s",
+                player.id,
+            )
+
     return (
         f"Got it, {player.display_name}. "
         f"{pretty_game} #{parsed.puzzle_no}: {pretty_new}.{off_note}"

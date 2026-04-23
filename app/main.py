@@ -92,42 +92,60 @@ def get_puzzle_validator() -> Optional[Callable[[str, datetime], int]]:
 
 
 def _setup_scheduler() -> None:
-    """Create and start a BackgroundScheduler with the single daily job.
+    """Create and start a BackgroundScheduler with the cron jobs.
 
-    One cron, fires at **00:00 America/Los_Angeles every day** — the
-    LinkedIn puzzle rollover. :func:`app.jobs.run_daily_recap` decides
-    which format to emit: a regular daily recap on Mon–Sat (LA), or
-    the full weekly wrap when the closed day is a Sunday (which lands
-    Monday afternoon Sydney time, just before the new puzzle drops).
+    Two crons:
 
-    Runs inside the FastAPI lifespan so the scheduler starts after the
-    app boots and shuts down when the app stops.
+    - ``daily_recap`` — fires at **00:00 America/Los_Angeles every
+      day** — the LinkedIn puzzle rollover.
+      :func:`app.jobs.run_daily_recap` decides which format to emit:
+      a regular daily recap on Mon–Sat (LA), or the full weekly wrap
+      when the closed day is a Sunday. Skips if
+      :func:`app.jobs.maybe_fire_early_recap` already covered the
+      day (everyone played every game before the cron fired).
+    - ``morning_nudge`` — fires at **08:30 Australia/Sydney every
+      day**. DMs every recently-active opted-in player a list of
+      games they haven't played yet today.
+
+    Runs inside the FastAPI lifespan so the scheduler starts after
+    the app boots and shuts down when the app stops.
     """
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
 
-    from .jobs import run_daily_recap
+    from .jobs import run_daily_recap, run_morning_nudge
 
     settings = load_settings()
-    scheduler_tz = "America/Los_Angeles"
+    recap_tz = "America/Los_Angeles"
+    nudge_tz = "Australia/Sydney"
 
     scheduler = BackgroundScheduler()
 
     def _daily():
         run_daily_recap(get_repository(), settings)
 
+    def _morning():
+        run_morning_nudge(get_repository(), settings)
+
     scheduler.add_job(
         _daily,
-        CronTrigger(hour=0, minute=0, timezone=scheduler_tz),
+        CronTrigger(hour=0, minute=0, timezone=recap_tz),
         id="daily_recap",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        _morning,
+        CronTrigger(hour=8, minute=30, timezone=nudge_tz),
+        id="morning_nudge",
         replace_existing=True,
     )
 
     scheduler.start()
     logger.info(
-        "Scheduler started: daily_recap at 00:00 %s every day "
-        "(Sunday fires the weekly wrap format)",
-        scheduler_tz,
+        "Scheduler started: daily_recap at 00:00 %s, "
+        "morning_nudge at 08:30 %s",
+        recap_tz,
+        nudge_tz,
     )
     return scheduler
 
