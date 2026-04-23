@@ -16,7 +16,7 @@ weekly wrap can reconcile the final standings.
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict, FrozenSet, List, Sequence, Tuple
+from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .db import ScoreRow
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER, format_raw_score
@@ -29,6 +29,21 @@ from .scoring import (
 
 _ALL_GAMES = frozenset(GAME_DISPLAY)
 
+# Passive-aggressive templates for players who submitted earlier this
+# week but ghosted today. ``{names}`` is interpolated with a
+# comma-separated join. Selection rotates deterministically on
+# ``day.toordinal()`` so every recipient sees the same line on the
+# same day but the zinger changes across days.
+_MISSING_TODAY_TEMPLATES = (
+    "Still MIA today: {names}. The puzzles aren't going to solve themselves.",
+    "Today's no-shows: {names}. Hoping everything's alright.",
+    "Haven't heard from {names} today. Suspicious.",
+    "{names}: we noticed. The leaderboard noticed. LinkedIn noticed.",
+    "Where art thou, {names}? Your rank is slipping.",
+    "{names} are busy doing literally anything other than today's puzzles.",
+    "Benched today: {names}. Room on the couch for snacks and excuses.",
+)
+
 
 def _format_seconds(total: int) -> str:
     """Render a seconds count as ``M:SS`` (or ``H:MM:SS`` past an hour)."""
@@ -40,12 +55,25 @@ def _format_seconds(total: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
-def _pts(points: int) -> str:
-    return "1 pt" if points == 1 else f"{points} pts"
+def _pts(points: float) -> str:
+    """Render a points value — integer-valued floats stay clean
+    ("5 pts", "4 pts"), fractional values render as ``N.N pts``
+    ("7.0 pts", "3.2 pts"). Competitive scoring emits floats;
+    legacy rank rounds still produce integers and should display
+    the same way they always did.
+    """
+    if abs(points - round(points)) < 1e-9:
+        p = int(round(points))
+        return "1 pt" if p == 1 else f"{p} pts"
+    return f"{points:.1f} pts"
 
 
-def _games_word(n: int) -> str:
-    return "1 game" if n == 1 else f"{n} games"
+def _rounds_word(n: int) -> str:
+    """Submissions count (every individual round played). ``distinct_games``
+    — the number of *game types* touched — tops out at 7 and undercounts
+    people who replay the same game daily; ``submissions`` grows linearly
+    with participation which is what users actually want to see."""
+    return "1 round" if n == 1 else f"{n} rounds"
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +136,47 @@ def _weekly_leaderboard_lines(
     for i, p in enumerate(lb, start=1):
         lines.append(
             f"  {i}. {p.player_name}: {_pts(p.total_points)} "
-            f"({_games_word(p.distinct_games)})"
+            f"({_rounds_word(p.submissions)})"
         )
     return lines
+
+
+def _missing_today_line(
+    day: date,
+    week_scores: Sequence[ScoreRow],
+    day_scores: Sequence[ScoreRow],
+) -> Optional[str]:
+    """Passive-aggressive callout naming players who played earlier
+    this week but skipped today.
+
+    Returns ``None`` when nobody is missing (all weekly participants
+    also played today, or nobody's played all week). Defines "missing"
+    as the set of player_ids active earlier in the week minus those
+    active today — so we don't nag people who are new to the group or
+    weren't expected to play.
+    """
+    today_ids = {s.player_id for s in day_scores}
+    # Preserve first-seen order so the output is deterministic regardless
+    # of dict-ordering quirks between Python builds.
+    missing: List[str] = []
+    seen: set[int] = set()
+    for s in week_scores:
+        if s.puzzle_date >= day:
+            continue  # today or future — not "earlier this week"
+        if s.player_id in today_ids:
+            continue
+        if s.player_id in seen:
+            continue
+        seen.add(s.player_id)
+        missing.append(s.player_name)
+
+    if not missing:
+        return None
+
+    template = _MISSING_TODAY_TEMPLATES[
+        day.toordinal() % len(_MISSING_TODAY_TEMPLATES)
+    ]
+    return template.format(names=", ".join(missing))
 
 
 def _per_game_running_totals(
@@ -133,14 +199,20 @@ def _per_game_running_totals(
     for s in week_scores:
         groups.setdefault((s.game, s.puzzle_no), []).append(s)
 
-    per_game_totals: Dict[str, Dict[int, int]] = {}
+    per_game_totals: Dict[str, Dict[int, float]] = {}
     player_names: Dict[int, str] = {}
     for (game, _), group_scores in groups.items():
         bucket = per_game_totals.setdefault(game, {})
         for pid, pts in assign_daily_points(group_scores).items():
-            bucket[pid] = bucket.get(pid, 0) + pts
+            bucket[pid] = bucket.get(pid, 0.0) + pts
     for s in week_scores:
         player_names[s.player_id] = s.player_name
+
+    def _compact(val: float) -> str:
+        """Integer-valued totals stay as ``5``; fractional as ``5.8``."""
+        if abs(val - round(val)) < 1e-9:
+            return str(int(round(val)))
+        return f"{val:.1f}"
 
     lines: List[str] = ["Game standings (week):"]
     any_rendered = False
@@ -154,7 +226,7 @@ def _per_game_running_totals(
             key=lambda kv: (-kv[1], kv[0]),
         )
         parts = [
-            f"{player_names.get(pid, '')} {pts}"
+            f"{player_names.get(pid, '')} {_compact(round(pts, 1))}"
             for pid, pts in ranked
         ]
         lines.append(f"  {GAME_DISPLAY[game]}: " + ", ".join(parts))
@@ -208,6 +280,14 @@ def daily_recap(
     if lb_lines:
         lines.append("")
         lines.extend(lb_lines)
+
+    # Passive-aggressive nudge for players who played earlier this
+    # week but skipped today. Sits at the bottom where it won't
+    # compete with the actual scores.
+    nag = _missing_today_line(day, week_filtered, day_scores)
+    if nag is not None:
+        lines.append("")
+        lines.append(nag)
 
     return "\n".join(lines).rstrip() + "\n"
 

@@ -6,8 +6,10 @@ derived stats. No I/O; feed them data from the repository layer.
 Rules:
 
 - Per game per day: 1st=5, 2nd=4, 3rd=3, 4th=2, 5th=1, 6th+=0.
-- Ties: average the position points the tied players would fill, then
-  round **up** (``math.ceil``). E.g. tied 2nd/3rd → ceil((4+3)/2) = 4.
+- Ties: tied players split the sum of the positions they'd fill. No
+  rounding — tied 2nd/3rd both get (4+3)/2 = 3.5, tied 1st/2nd both
+  get 4.5, three-way tie at top all get 4.0. Keeps the round total
+  invariant at 15 regardless of how many are tied.
 - Weekly total = sum of daily points across all **enabled** games.
 - Per-game leader = player with the most total points in that game over
   the period.
@@ -29,7 +31,6 @@ grouping uses ``(game, puzzle_no)`` rather than ``puzzle_date``.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -53,25 +54,32 @@ MIN_SUBMISSIONS_FOR_FASTEST_PRIZE = 5
 _NON_TIME_GAMES = frozenset({"pinpoint"})
 
 
-def _tied_points(rank: int, count: int) -> int:
+def _tied_points(rank: int, count: int) -> float:
     """Points for ``count`` players tied starting at ``rank``.
 
-    Average the position-points they'd fill, then ``math.ceil``.
+    Tied players split the sum of the positions they fill. No rounding
+    — returned as a float so the total points awarded per round stays
+    invariant (5+4+3+2+1 = 15, regardless of how many are tied).
 
-    >>> _tied_points(2, 2)   # tied 2nd/3rd: (4+3)/2 = 3.5 → 4
-    4
-    >>> _tied_points(1, 3)   # tied 1st/2nd/3rd: (5+4+3)/3 = 4.0 → 4
-    4
+    >>> _tied_points(2, 2)   # tied 2nd/3rd: (4+3)/2 = 3.5
+    3.5
+    >>> _tied_points(1, 2)   # tied 1st/2nd: (5+4)/2 = 4.5
+    4.5
+    >>> _tied_points(1, 3)   # tied 1st/2nd/3rd: (5+4+3)/3 = 4.0
+    4.0
     """
     total = sum(_POSITION_POINTS.get(rank + i, 0) for i in range(count))
-    return math.ceil(total / count)
+    return total / count
 
 
 @dataclass(frozen=True)
 class PlayerWeeklyStats:
     player_id: int
     player_name: str
-    total_points: int
+    # Competitive scoring emits floats (e.g. 7.0, 3.2) for 3–5 player
+    # time-based rounds, so totals aggregate as floats too. Integers
+    # still work unchanged for legacy / fallback rounds.
+    total_points: float
     distinct_games: int
     days_played: int
     # Added alongside the Most firsts / Most lasts / Best average prizes.
@@ -103,7 +111,7 @@ class GameLeader:
     game: str
     player_id: int
     player_name: str
-    total_points: int
+    total_points: float
 
 
 @dataclass(frozen=True)
@@ -121,16 +129,16 @@ class Prizes:
 # ---------------------------------------------------------------------------
 
 
-def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, int]:
-    """Return ``{player_id: points}`` for one daily puzzle round.
+def _legacy_rank_points(
+    sorted_scores: Sequence[ScoreRow],
+) -> Dict[int, float]:
+    """Rank-based 5/4/3/2/1 with ceil'd averaged tie points.
 
-    ``scores`` should all be for a single ``(game, puzzle_no)``.
-    Standard competition ranking with averaged + ceil'd tie points.
+    ``sorted_scores`` must already be sorted ascending by ``raw_score``.
+    Retained as the fallback path for cases :func:`competitive_score`
+    can't handle (pinpoint, ties, rounds outside 3–5 players).
     """
-    if not scores:
-        return {}
-    sorted_scores = sorted(scores, key=lambda s: s.raw_score)
-    result: Dict[int, int] = {}
+    result: Dict[int, float] = {}
     rank = 1
     i = 0
     n = len(sorted_scores)
@@ -141,10 +149,63 @@ def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, int]:
         tie_count = j - i
         points = _tied_points(rank, tie_count)
         for k in range(i, j):
-            result[sorted_scores[k].player_id] = points
+            result[sorted_scores[k].player_id] = float(points)
         rank += tie_count
         i = j
     return result
+
+
+def _has_ties(sorted_scores: Sequence[ScoreRow]) -> bool:
+    """True when any two rows share ``raw_score``. ``competitive_score``
+    breaks ties by input order (not fair), so ties route through the
+    legacy helper instead."""
+    raws = [s.raw_score for s in sorted_scores]
+    return len(set(raws)) < len(raws)
+
+
+def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, float]:
+    """Return ``{player_id: points}`` for one daily puzzle round.
+
+    Dispatches between two systems based on the round shape:
+
+    - **competitive_score** (rank + time-performance blended; the
+      CASE A/B/C algorithm) for any round of 3+ players in a
+      time-based game. Handles ties inline by averaging base
+      points and sharing any awarded bonus. Emits floats rounded
+      to 1 d.p. Round total stays invariant per round size
+      (12 for 3p, 14 for 4p, 15 for 5+).
+    - **legacy rank-based** shares of positional points for
+      pinpoint (guess count, not seconds) and 1–2 player rounds
+      where the ratio model has nothing to bite on. Tied players
+      split the sum of the positions they'd fill; no ceiling
+      applied so the round total stays invariant.
+
+    ``scores`` should all be for a single ``(game, puzzle_no)``.
+    """
+    if not scores:
+        return {}
+    sorted_scores = sorted(scores, key=lambda s: s.raw_score)
+    n = len(sorted_scores)
+
+    # Pinpoint is guess count (1–5); the ratio/spread model the
+    # competitive algorithm uses would treat 1 vs 2 guesses as a 2x
+    # "time" difference which is nonsense. Route all pinpoint rounds
+    # through the legacy rank system.
+    pinpoint_free = all(s.game not in _NON_TIME_GAMES for s in sorted_scores)
+    big_enough = n >= 3
+
+    if pinpoint_free and big_enough:
+        players = [
+            {"name": s.player_name, "time": s.raw_score}
+            for s in sorted_scores
+        ]
+        results = competitive_score(players)
+        return {
+            sorted_scores[i].player_id: results[i]["final_score"]
+            for i in range(n)
+        }
+
+    return _legacy_rank_points(sorted_scores)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +233,7 @@ def weekly_leaderboard(
         groups.setdefault((s.game, s.puzzle_no), []).append(s)
 
     player_names: Dict[int, str] = {}
-    totals: Dict[int, int] = {}
+    totals: Dict[int, float] = {}
     games_by_player: Dict[int, set] = {}
     days_by_player: Dict[int, set] = {}
     submissions: Dict[int, int] = {}
@@ -184,7 +245,7 @@ def weekly_leaderboard(
         player_names[s.player_id] = s.player_name
         games_by_player.setdefault(s.player_id, set()).add(s.game)
         days_by_player.setdefault(s.player_id, set()).add(s.puzzle_date)
-        totals.setdefault(s.player_id, 0)
+        totals.setdefault(s.player_id, 0.0)
         submissions[s.player_id] = submissions.get(s.player_id, 0) + 1
         first_places.setdefault(s.player_id, 0)
         total_time.setdefault(s.player_id, 0)
@@ -216,7 +277,10 @@ def weekly_leaderboard(
         PlayerWeeklyStats(
             player_id=pid,
             player_name=player_names[pid],
-            total_points=totals[pid],
+            # Round aggregated totals to 1 d.p. — summing 1-d.p.
+            # floats across many rounds accumulates FP dust that
+            # would otherwise surface in display as "7.0000001".
+            total_points=round(totals[pid], 1),
             distinct_games=len(games_by_player[pid]),
             days_played=len(days_by_player[pid]),
             first_places=first_places[pid],
@@ -249,14 +313,14 @@ def game_leaders(scores: Sequence[ScoreRow]) -> List[GameLeader]:
         groups.setdefault((s.game, s.puzzle_no), []).append(s)
 
     # Per-player per-game point totals
-    game_player_pts: Dict[str, Dict[int, int]] = {}
+    game_player_pts: Dict[str, Dict[int, float]] = {}
     player_names: Dict[int, str] = {}
 
     for (game, _), group_scores in groups.items():
         pts_map = assign_daily_points(group_scores)
         bucket = game_player_pts.setdefault(game, {})
         for pid, pts in pts_map.items():
-            bucket[pid] = bucket.get(pid, 0) + pts
+            bucket[pid] = bucket.get(pid, 0.0) + pts
 
     for s in scores:
         player_names[s.player_id] = s.player_name
@@ -272,7 +336,8 @@ def game_leaders(scores: Sequence[ScoreRow]) -> List[GameLeader]:
                 game=game,
                 player_id=best_pid,
                 player_name=player_names.get(best_pid, ""),
-                total_points=player_pts[best_pid],
+                # Same FP-dust rounding guard as in weekly_leaderboard.
+                total_points=round(player_pts[best_pid], 1),
             )
         )
     return result
@@ -354,15 +419,6 @@ def prize_allocations(leaderboard: Sequence[PlayerWeeklyStats]) -> Prizes:
 # competitive_score: rank + time-performance blended scoring
 # ---------------------------------------------------------------------------
 
-# Supported round sizes → base points. Kept in sync with the spec; total
-# points are preserved through adjustments so the sum is invariant at 15
-# (5-player), 14 (4-player), or 12 (3-player).
-_BASE_POINTS_BY_SIZE: Dict[int, List[int]] = {
-    3: [5, 4, 3],
-    4: [5, 4, 3, 2],
-    5: [5, 4, 3, 2, 1],
-}
-
 # Spec thresholds. Named constants so the classification reads like the spec.
 _TIGHT_SPREAD_THRESHOLD = 0.5        # Case A: spread < this
 _CLUSTER_TOP_RATIO = 1.4             # Case B: r12 and r23 both < this
@@ -370,7 +426,24 @@ _CLUSTER_DROP_RATIO = 1.6            # Case B: r34 (or late-drop) > this
 _CLEAR_WINNER_RATIO = 1.5            # Case C: r12 > this
 _CLUSTER_BONUS_POOL = 1.5            # points redistributed in Case B
 _CLEAR_WINNER_MAX_BONUS = 2.0        # hard cap in Case C
-_MIN_SCORE = 0.5                     # floor for any player
+_MIN_SCORE = 0.0                     # floor for any player — only
+                                     # prevents negatives from debits;
+                                     # positions 6+ naturally stay at 0
+                                     # unless they tie with 5th place
+
+
+def _base_points_for_size(n: int) -> List[int]:
+    """Base points by rank for an ``n``-player round.
+
+    Reuses :data:`_POSITION_POINTS` (1st=5, 2nd=4, … 5th=1, 6th+=0)
+    so a 5-player round gets ``[5,4,3,2,1]`` (total 15) and a
+    6-player round gets ``[5,4,3,2,1,0]`` (total still 15). The
+    spec only enumerates 3/4/5 explicitly, but the natural
+    extension keeps the round total invariant at 15 for any
+    ``n >= 5`` and at 12/14 for 3/4-player rounds — matching the
+    legacy convention the bot already uses for 6+ player rounds.
+    """
+    return [_POSITION_POINTS.get(rank, 0) for rank in range(1, n + 1)]
 
 
 def _classify_round(
@@ -429,7 +502,11 @@ def _apply_cluster_bonus(
 
 
 def _apply_clear_winner_bonus(
-    scores: List[float], base_points: Sequence[int], r12: float, n: int
+    scores: List[float],
+    base_points: Sequence[float],
+    times: Sequence[float],
+    r12: float,
+    n: int,
 ) -> None:
     """Case C — big gap to 1st, so top-heavy the points.
 
@@ -437,26 +514,43 @@ def _apply_clear_winner_bonus(
     runaway winner (r12 = 10x) doesn't blow the scale. The bonus is
     then subtracted from the other players proportionally to their
     base points — stronger mid-pack finishers absorb more of the hit.
+
+    If multiple players are tied for 1st (same ``times[0]``) the
+    bonus is shared equally — honours the "if they are far ahead
+    then they share the bonus" rule. Note: in practice tied 1st
+    makes ``r12 = 1.0`` which keeps Case C from triggering in the
+    first place, so this branch is defensive.
     """
     bonus = min(_CLEAR_WINNER_MAX_BONUS, (r12 - 1.0) * 2.0)
-    scores[0] += bonus
-    other_base_sum = sum(base_points[1:])
+
+    tied_with_1st = 1
+    while tied_with_1st < n and times[tied_with_1st] == times[0]:
+        tied_with_1st += 1
+
+    for i in range(tied_with_1st):
+        scores[i] += bonus / tied_with_1st
+
+    other_base_sum = sum(base_points[tied_with_1st:])
     if other_base_sum > 0:
-        for i in range(1, n):
+        for i in range(tied_with_1st, n):
             scores[i] -= bonus * base_points[i] / other_base_sum
 
 
 def _floor_and_rebalance(
     scores: List[float], total_base: int, n: int
 ) -> List[float]:
-    """Enforce the 0.5 floor then rebalance the sum back to ``total_base``.
+    """Enforce the 0 floor then rebalance the sum back to ``total_base``.
 
-    Flooring can push the total above ``total_base`` (we raised some
-    scores without debiting others). A single scale_factor multiply
-    across every score restores the invariant without changing
-    rankings. Scaling can nudge a floored score back below 0.5, so we
-    re-apply the floor once more as a belt-and-braces step — the
-    rounding pass afterwards will pin the total exactly.
+    Only the cluster debit (Case B) can push a base-0 position below
+    zero; the floor exists purely to preserve the "no negative
+    scores" hard constraint, not to bump every low-ranked player up
+    to a participation minimum. Positions 6+ naturally stay at 0
+    unless they tie with 5th place (in which case base-points
+    averaging gives the tied pair 0.5 each via ``(1+0)/2``).
+
+    Flooring a negative score to 0 adds that deficit back to the
+    total; a single ``scale_factor`` multiply restores the invariant
+    without reordering rankings.
     """
     for i in range(n):
         if scores[i] < _MIN_SCORE:
@@ -481,8 +575,10 @@ def _round_and_reconcile(
 
     Rounding independently drifts the sum off ``total_base`` by up to
     ``n * 0.05``; the spec resolves that by dumping the difference on
-    the slowest player. We clamp that back to the 0.5 floor if needed —
-    the hard-constraint summary says min = 0.5 *after* all adjustments.
+    the slowest player. We clamp that back to the 0 floor if the
+    residue would drive them negative — accepts a ~0.1-pt total
+    mismatch in that rare case rather than violate the
+    "no negative scores" hard constraint.
     """
     rounded = [round(s, 1) for s in scores]
     diff = total_base - sum(rounded)
@@ -490,6 +586,30 @@ def _round_and_reconcile(
     if rounded[-1] < _MIN_SCORE:
         rounded[-1] = _MIN_SCORE
     return rounded
+
+
+def _base_points_with_tied_groups(
+    raw_base: Sequence[int], times: Sequence[float], n: int
+) -> List[float]:
+    """Turn the rank-by-rank base points into a per-player list that
+    averages tied groups.
+
+    Example: 3 players with the two fastest tied — raw base is
+    ``[5, 4, 3]``; tied 1st/2nd both get ``(5+4)/2 = 4.5`` → result
+    ``[4.5, 4.5, 3]``. Round total is preserved at 12.
+    """
+    points = [float(p) for p in raw_base]
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and times[j + 1] == times[i]:
+            j += 1
+        if j > i:
+            avg = sum(points[i : j + 1]) / (j - i + 1)
+            for k in range(i, j + 1):
+                points[k] = avg
+        i = j + 1
+    return points
 
 
 def competitive_score(
@@ -502,12 +622,19 @@ def competitive_score(
     better. Output: the same players sorted fastest-first, each with a
     ``final_score`` rounded to 1 d.p.
 
+    Ties (same ``time``) share the sum of the positions they'd fill —
+    tied 1st/2nd each get ``(5+4)/2 = 4.5``, three-way tie at top get
+    ``4.0`` each. When a Case B/C bonus lands on a tied group, the
+    bonus is shared (cluster does this naturally via equal
+    ``1/time`` weights; clear-winner splits evenly).
+
     Pipeline (see spec for the full rule set):
 
     1. Sort by ``time`` ascending and hand out base points by rank.
-    2. Compute the ratios ``r12``, ``r23``, ``r34`` and the overall
+    2. Average base points across tied groups.
+    3. Compute the ratios ``r12``, ``r23``, ``r34`` and the overall
        ``spread = (tn - t1) / t1``.
-    3. Classify the round:
+    4. Classify the round:
          * **Tight** (``spread < 0.5``) — leave base points alone.
          * **Front cluster** (top 3 close + big drop after 3rd) —
            redistribute a 1.5-point bonus pool across the top 3 by
@@ -515,15 +642,18 @@ def competitive_score(
          * **Clear winner** (``r12 > 1.5``) — award 1st a ``min(2,
            2*(r12-1))`` bonus, debit the rest proportional to base.
          * Otherwise — no adjustment.
-    4. Enforce a 0.5 floor, scale back to the base-points total,
-       round to 1 d.p. with the residue absorbed by the last player.
+    5. Clamp any cluster-debit-induced negative to 0, scale back to
+       the base-points total, round to 1 d.p. with the residue
+       absorbed by the last player. Positions 6+ naturally stay at
+       0 unless they tie with 5th (only top 5 score; a tied 5th/6th
+       shares 0.5 each).
 
     Rankings never change (sorted input is preserved), scores are
     never negative, and the total is held constant (barring rounding).
     """
-    if not 3 <= len(players) <= 5:
+    if len(players) < 3:
         raise ValueError(
-            f"competitive_score expects 3–5 players, got {len(players)}"
+            f"competitive_score expects at least 3 players, got {len(players)}"
         )
     for p in players:
         if "name" not in p or "time" not in p:
@@ -531,30 +661,34 @@ def competitive_score(
         if p["time"] <= 0:
             raise ValueError(f"time must be positive (got {p['time']!r})")
 
-    # Step 1 — sort fastest-first and seed base points.
+    # Step 1 — sort fastest-first.
     sorted_players = sorted(players, key=lambda p: p["time"])
     n = len(sorted_players)
-    base_points = _BASE_POINTS_BY_SIZE[n]
-    total_base = sum(base_points)
-    scores: List[float] = [float(p) for p in base_points]
-
-    # Step 2 — ratios + spread against the fastest time.
+    raw_base = _base_points_for_size(n)
+    total_base = sum(raw_base)
     times = [float(p["time"]) for p in sorted_players]
+
+    # Step 2 — seed base points, averaging tied groups so the round
+    # total stays at ``total_base`` regardless of how many are tied.
+    base_points = _base_points_with_tied_groups(raw_base, times, n)
+    scores: List[float] = list(base_points)
+
+    # Step 3 — ratios + spread against the fastest time.
     t1, tn = times[0], times[-1]
     r12 = times[1] / t1
     r23 = times[2] / times[1] if n >= 3 else None
     r34 = times[3] / times[2] if n >= 4 else None
     spread = (tn - t1) / t1
 
-    # Step 3 — classify and apply at most one adjustment block.
+    # Step 4 — classify and apply at most one adjustment block.
     regime = _classify_round(n, spread, r12, r23, r34)
     if regime == "cluster":
         _apply_cluster_bonus(scores, times, n)
     elif regime == "winner":
-        _apply_clear_winner_bonus(scores, base_points, r12, n)
+        _apply_clear_winner_bonus(scores, base_points, times, r12, n)
     # regime == "tight": fall through with base points intact.
 
-    # Step 4 — floor, rebalance, round, reconcile.
+    # Step 5 — floor, rebalance, round, reconcile.
     scores = _floor_and_rebalance(scores, total_base, n)
     rounded = _round_and_reconcile(scores, total_base, n)
 

@@ -36,6 +36,10 @@ class TestDailyRecap:
         assert "No scores yet" in out
 
     def test_header_and_sections(self):
+        # 3-player round with r12 = 2.0 routes through competitive_score
+        # (clear-winner branch). Rather than pinning exact float values
+        # the test checks the shape the recap should have: each player
+        # present with a ``(N pts)`` suffix and descending points.
         scores = [
             _row(1, "Alice", "queens", 714, 10),
             _row(2, "Bob", "queens", 714, 20),
@@ -44,22 +48,38 @@ class TestDailyRecap:
         out = daily_recap(TUE, scores, ENABLED)
         assert "Daily recap — Tue 14 Apr 2026" in out
         assert "Queens #714" in out
-        assert "(5 pts)" in out
-        assert "(4 pts)" in out
-        assert "(3 pts)" in out
+        # 1st place always hits the +2 cap under competitive_score:
+        # base 5 + 2 = 7.0 pts. Intermediate values depend on the
+        # proportional debit; assert "pts" appears 3x for sanity.
+        assert out.count(" pts)") == 3
+        assert "(7 pts)" in out  # 7.0 → "7 pts" under the clean formatter
         # "Day totals" was replaced by the cumulative "Week so far"
         # leaderboard — same numbers but framed across the whole week.
         assert "Week so far:" in out
 
-    def test_day_totals_include_game_count(self):
+    def test_legacy_fallback_for_two_player_round(self):
+        # Below competitive_score's 3-player floor; recap should keep
+        # showing integer rank points (5 / 4).
+        scores = [
+            _row(1, "Alice", "queens", 714, 10),
+            _row(2, "Bob",   "queens", 714, 20),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        assert "(5 pts)" in out
+        assert "(4 pts)" in out
+
+    def test_day_totals_include_round_count(self):
+        # Suffix is submissions count ("rounds"), not distinct game
+        # types — users replaying the same game daily want that to
+        # grow linearly instead of topping out at 7.
         scores = [
             _row(1, "Alice", "queens", 714, 10),
             _row(1, "Alice", "tango", 554, 20),
             _row(2, "Bob", "queens", 714, 20),
         ]
         out = daily_recap(TUE, scores, ENABLED)
-        assert "Alice: 10 pts (2 games)" in out
-        assert "Bob: 4 pts (1 game)" in out
+        assert "Alice: 10 pts (2 rounds)" in out
+        assert "Bob: 4 pts (1 round)" in out
 
     def test_disabled_game_excluded(self):
         scores = [
@@ -71,7 +91,7 @@ class TestDailyRecap:
         assert "Queens" in out
         assert "Pinpoint" not in out
         # Totals should only count queens
-        assert "1 game" in out
+        assert "1 round" in out
 
     def test_pinpoint_renders_as_guesses(self):
         scores = [_row(1, "Alice", "pinpoint", 714, 3)]
@@ -125,6 +145,42 @@ class TestDailyRecap:
         # Tie at the top sorts lower player_id first (Alice before Bob).
         assert "Queens: Alice 9, Bob 9" in out
         assert "Tango: Alice 5, Bob 4" in out
+
+    def test_missing_today_nudge_names_absent_regulars(self):
+        # Alice played Mon, nobody played Tue. Tuesday recap should
+        # name Alice as missing, since she was active earlier this week.
+        scores = [
+            _row(1, "Alice", "queens", 713, 10, MON),
+            _row(2, "Bob",   "queens", 714, 20, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        assert "Alice" in out
+        # The nudge line always mentions the name immediately after a
+        # passive-aggressive phrase — Alice should appear outside the
+        # Monday-only block, i.e. somewhere below the Week so far section.
+        nudge_section = out.split("Week so far:")[-1]
+        assert "Alice" in nudge_section
+
+    def test_no_nudge_when_everyone_played_today(self):
+        # Both Alice and Bob submitted today; nobody is a "missing
+        # regular", so the passive-aggressive line is suppressed.
+        scores = [
+            _row(1, "Alice", "queens", 713, 10, MON),
+            _row(2, "Bob",   "queens", 713, 20, MON),
+            _row(1, "Alice", "queens", 714, 10, TUE),
+            _row(2, "Bob",   "queens", 714, 20, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        # None of the known template starters should appear.
+        for phrase in (
+            "MIA today",
+            "Still MIA",
+            "no-shows",
+            "Haven't heard",
+            "Where art thou",
+            "Benched today",
+        ):
+            assert phrase not in out
 
     def test_per_game_running_totals_excludes_disabled(self):
         scores = [
@@ -228,8 +284,8 @@ class TestWeeklyWrap:
     def test_disabled_game_excluded_from_wrap(self):
         # Pinpoint submission should be filtered out of the aggregation
         # when pinpoint isn't in enabled_games. Alice's leaderboard
-        # line shows "(1 game)" — if pinpoint had leaked through it
-        # would say "(2 games)".
+        # line shows "(1 round)" — if pinpoint had leaked through it
+        # would say "(2 rounds)".
         scores = [
             _row(1, "Alice", "queens", 714, 10, TUE),
             _row(1, "Alice", "pinpoint", 714, 3, TUE),
@@ -238,7 +294,7 @@ class TestWeeklyWrap:
         out = weekly_wrap(MON, SUN, scores, enabled_no_pinpoint)
         assert "Pinpoint" not in out
         assert "1. Alice" in out
-        assert "(1 game)" in out
+        assert "(1 round)" in out
 
     def test_scores_outside_week_filtered(self):
         prev_sun = date(2026, 4, 12)

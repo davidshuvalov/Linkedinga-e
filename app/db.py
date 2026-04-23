@@ -22,6 +22,10 @@ class Player:
     id: int
     whatsapp_id: str
     display_name: str
+    # Opt-out flag for daily/weekly recap DMs. Defaults to ``True`` so
+    # existing rows (and fresh signups) get recaps unless the player
+    # runs ``notify off``. Stored as a column on ``players``.
+    notifications_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,36 @@ class Repository(Protocol):
         """Return the most recent unparsed messages (newest first)."""
         ...
 
+    def delete_score(
+        self,
+        *,
+        player_id: int,
+        game: str,
+        puzzle_no: int,
+    ) -> bool:
+        """Delete a specific score submission. Returns ``True`` if a row
+        was removed, ``False`` if nothing matched. Callers should check
+        that the target row is still within the current LA puzzle day
+        before invoking — deleting older submissions would retroactively
+        rewrite past recaps."""
+        ...
+
+    def update_player_name(
+        self, player_id: int, display_name: str
+    ) -> None:
+        """Rename an existing player. Used by the ``name <new>`` command
+        so the WhatsApp profile name (which the bot captures on first
+        submission) can be overridden by something friendlier."""
+        ...
+
+    def set_notifications_enabled(
+        self, player_id: int, enabled: bool
+    ) -> None:
+        """Toggle whether recap DMs go to this player. The sender's
+        audience query (:func:`list_active_whatsapp_ids`) filters out
+        players with the flag set to ``False``."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # In-memory implementation (tests + local fallback)
@@ -138,6 +172,61 @@ class InMemoryRepository:
         self._next_player_id += 1
         self._players[whatsapp_id] = player
         return player
+
+    def _find_player_by_id(self, player_id: int) -> Optional[Player]:
+        for p in self._players.values():
+            if p.id == player_id:
+                return p
+        return None
+
+    def update_player_name(
+        self, player_id: int, display_name: str
+    ) -> None:
+        existing = self._find_player_by_id(player_id)
+        if existing is None:
+            return
+        renamed = Player(
+            id=existing.id,
+            whatsapp_id=existing.whatsapp_id,
+            display_name=display_name,
+            notifications_enabled=existing.notifications_enabled,
+        )
+        self._players[existing.whatsapp_id] = renamed
+
+    def set_notifications_enabled(
+        self, player_id: int, enabled: bool
+    ) -> None:
+        existing = self._find_player_by_id(player_id)
+        if existing is None:
+            return
+        updated = Player(
+            id=existing.id,
+            whatsapp_id=existing.whatsapp_id,
+            display_name=existing.display_name,
+            notifications_enabled=enabled,
+        )
+        self._players[existing.whatsapp_id] = updated
+
+    def delete_score(
+        self,
+        *,
+        player_id: int,
+        game: str,
+        puzzle_no: int,
+    ) -> bool:
+        key: Tuple[int, str, int] = (player_id, game, puzzle_no)
+        if key not in self._score_keys:
+            return False
+        self._score_keys.discard(key)
+        self.scores = [
+            s for s in self.scores
+            if not (
+                s["player_id"] == player_id
+                and s["game"] == game
+                and s["puzzle_no"] == puzzle_no
+            )
+        ]
+        return True
 
     def insert_score(
         self,
@@ -201,7 +290,14 @@ class InMemoryRepository:
             for s in self.scores
             if date_from <= s["puzzle_date"] <= date_to
         }
-        id_by_pid = {p.id: p.whatsapp_id for p in self._players.values()}
+        # Exclude opted-out players — the sender uses this list to
+        # decide who receives the recap DM, so we honor the opt-out
+        # at the audience layer.
+        id_by_pid = {
+            p.id: p.whatsapp_id
+            for p in self._players.values()
+            if p.notifications_enabled
+        }
         return [id_by_pid[pid] for pid in sorted(active_pids) if pid in id_by_pid]
 
     def get_existing_score(
@@ -254,23 +350,28 @@ class SupabaseRepository:
     def __init__(self, client: Any) -> None:
         self._client = client
 
+    def _row_to_player(self, row: Dict[str, Any]) -> Player:
+        # ``notifications_enabled`` is a recent column; fall back to
+        # ``True`` when the field is missing so old schemas still load.
+        return Player(
+            id=row["id"],
+            whatsapp_id=row["whatsapp_id"],
+            display_name=row["display_name"],
+            notifications_enabled=row.get("notifications_enabled", True),
+        )
+
     def get_or_create_player(
         self, whatsapp_id: str, display_name: str
     ) -> Player:
         resp = (
             self._client.table("players")
-            .select("id, whatsapp_id, display_name")
+            .select("id, whatsapp_id, display_name, notifications_enabled")
             .eq("whatsapp_id", whatsapp_id)
             .limit(1)
             .execute()
         )
         if resp.data:
-            row = resp.data[0]
-            return Player(
-                id=row["id"],
-                whatsapp_id=row["whatsapp_id"],
-                display_name=row["display_name"],
-            )
+            return self._row_to_player(resp.data[0])
         inserted = (
             self._client.table("players")
             .insert(
@@ -278,12 +379,58 @@ class SupabaseRepository:
             )
             .execute()
         )
-        row = inserted.data[0]
-        return Player(
-            id=row["id"],
-            whatsapp_id=row["whatsapp_id"],
-            display_name=row["display_name"],
+        return self._row_to_player(inserted.data[0])
+
+    def update_player_name(
+        self, player_id: int, display_name: str
+    ) -> None:
+        (
+            self._client.table("players")
+            .update({"display_name": display_name})
+            .eq("id", player_id)
+            .execute()
         )
+
+    def set_notifications_enabled(
+        self, player_id: int, enabled: bool
+    ) -> None:
+        (
+            self._client.table("players")
+            .update({"notifications_enabled": enabled})
+            .eq("id", player_id)
+            .execute()
+        )
+
+    def delete_score(
+        self,
+        *,
+        player_id: int,
+        game: str,
+        puzzle_no: int,
+    ) -> bool:
+        # Check first so we can distinguish "no such row" from a
+        # successful delete — Supabase's delete response doesn't
+        # surface a row count in every client version.
+        existing = (
+            self._client.table("scores")
+            .select("id")
+            .eq("player_id", player_id)
+            .eq("game", game)
+            .eq("puzzle_no", puzzle_no)
+            .limit(1)
+            .execute()
+        )
+        if not existing.data:
+            return False
+        (
+            self._client.table("scores")
+            .delete()
+            .eq("player_id", player_id)
+            .eq("game", game)
+            .eq("puzzle_no", puzzle_no)
+            .execute()
+        )
+        return True
 
     def insert_score(
         self,
@@ -372,7 +519,9 @@ class SupabaseRepository:
     ) -> List[str]:
         resp = (
             self._client.table("scores")
-            .select("player_id, players(whatsapp_id)")
+            .select(
+                "player_id, players(whatsapp_id, notifications_enabled)"
+            )
             .gte("puzzle_date", date_from.isoformat())
             .lte("puzzle_date", date_to.isoformat())
             .execute()
@@ -380,7 +529,11 @@ class SupabaseRepository:
         seen: set[str] = set()
         result: List[str] = []
         for row in resp.data or []:
-            wid = (row.get("players") or {}).get("whatsapp_id", "")
+            player = row.get("players") or {}
+            wid = player.get("whatsapp_id", "")
+            # Missing column (old schema) → treat as enabled.
+            if not player.get("notifications_enabled", True):
+                continue
             if wid and wid not in seen:
                 seen.add(wid)
                 result.append(wid)

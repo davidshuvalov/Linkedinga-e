@@ -105,9 +105,9 @@ class TestWebhook:
         assert r.status_code == 200
         assert len(repo.unparsed) == 1
         assert len(repo.scores) == 0
-        # Bot replies explaining it couldn't parse
+        # Bot replies explaining it couldn't read the share
         root = ET.fromstring(r.text)
-        assert "couldn't parse" in (root.find("Message").text or "").lower()
+        assert "couldn't read" in (root.find("Message").text or "").lower()
 
     def test_duplicate_submission_does_not_double_insert(self, client, repo):
         data = {
@@ -133,7 +133,10 @@ class TestWebhook:
         assert "<Response/>" in r.text
         assert "<Message>" not in r.text
 
-    def test_random_chatter_returns_silent_twiml(self, client):
+    def test_random_chatter_gets_help_reply(self, client):
+        # Bot now replies with a "didn't understand" blurb + command
+        # list rather than staying silent — it operates in 1:1 DMs
+        # so users were being left guessing.
         r = client.post(
             "/webhook",
             data={
@@ -143,8 +146,11 @@ class TestWebhook:
             },
         )
         assert r.status_code == 200
-        assert "<Response/>" in r.text
-        assert "<Message>" not in r.text
+        assert "<Message>" in r.text
+        root = ET.fromstring(r.text)
+        msg = (root.find("Message").text or "").lower()
+        assert "didn't understand" in msg
+        assert "stats" in msg
 
     def test_missing_from_is_422(self, client):
         r = client.post(
