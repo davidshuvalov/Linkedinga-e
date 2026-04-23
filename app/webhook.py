@@ -953,6 +953,28 @@ def handle_inbound(
     if parsed.game not in enabled_games:
         off_note = " (Not tracked for the leaderboard.)"
 
+    # Personal-best / worst-ever DM. Compares the just-inserted row
+    # against the player's history for this game and fires a
+    # congrats / roast DM when the score is notable. Try/except
+    # wrapper so a DM failure can never sink the webhook ack.
+    try:
+        from .notifications import maybe_notify_personal_best
+
+        maybe_notify_personal_best(
+            repo,
+            settings,
+            player=player,
+            game=parsed.game,
+            new_raw=parsed.raw_score,
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "maybe_notify_personal_best failed after insert by player %s",
+            player.id,
+        )
+
     # Event-driven early recap: if this submission completes the day
     # (everyone's played all enabled games), fire the recap right
     # away rather than waiting for the LA-midnight cron. Wrapped in
