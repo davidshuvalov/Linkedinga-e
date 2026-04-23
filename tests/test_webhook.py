@@ -562,3 +562,153 @@ class TestWrapCommand:
             settings=_settings_with_default_games(),
         )
         assert "Weekly wrap" in reply
+
+
+class TestHistoricalRecapCommands:
+    """``yesterday`` / ``N days ago`` / ``recap YYYY-MM-DD`` — pull
+    prior-day recaps so a midweek user can check what happened without
+    scrolling back through old DMs."""
+
+    def _seed_day(self, repo, day, player_id, name, raw, puzzle_no=714):
+        repo.get_or_create_player(f"whatsapp:+6140000000{player_id}", name)
+        repo.insert_score(
+            player_id=player_id,
+            game="queens",
+            puzzle_no=puzzle_no,
+            puzzle_date=day,
+            raw_score=raw,
+            share_text=f"Queens #{puzzle_no} seeded",
+        )
+
+    def test_yesterday_pulls_previous_la_day(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        self._seed_day(repo, yesterday, 1, "Alice", 10, puzzle_no=713)
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="yesterday",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Daily recap" in reply
+        assert yesterday.strftime("%a %d %b") in reply
+        assert "Queens #713" in reply
+
+    def test_n_days_ago_pulls_that_day(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        three_ago = today - timedelta(days=3)
+        self._seed_day(repo, three_ago, 1, "Alice", 15, puzzle_no=711)
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="3 days ago",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert three_ago.strftime("%a %d %b") in reply
+        assert "Queens #711" in reply
+
+    def test_n_days_ago_out_of_range_replies_with_hint(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="30 days ago",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "last 6 days" in reply or "6 days ago" in reply
+
+    def test_recap_with_iso_date(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        two_ago = today - timedelta(days=2)
+        self._seed_day(repo, two_ago, 1, "Alice", 12, puzzle_no=712)
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body=f"recap {two_ago.isoformat()}",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Queens #712" in reply
+
+    def test_recap_with_future_date_rejected(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="recap 2099-01-01",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "future" in reply.lower()
+
+
+class TestAllWeekCommand:
+    def test_all_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="all",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "No scores yet this week" in reply
+
+    def test_all_includes_every_day_with_scores(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date, week_bounds
+
+        today = la_date(NOW)
+        monday, _ = week_bounds(today)
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        # Seed one score per day of the week so far.
+        cursor = monday
+        pno = 700
+        while cursor <= today:
+            repo.insert_score(
+                player_id=1, game="queens", puzzle_no=pno,
+                puzzle_date=cursor, raw_score=10,
+                share_text=f"Queens #{pno}",
+            )
+            cursor += timedelta(days=1)
+            pno += 1
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="all",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Week so far" in reply
+        # Every weekday header Mon..today appears.
+        cursor = monday
+        while cursor <= today:
+            assert cursor.strftime("%a %d %b") in reply
+            cursor += timedelta(days=1)

@@ -28,7 +28,8 @@ Commands (case-insensitive):
 
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from datetime import date, datetime, timedelta
 from typing import Callable, Dict, FrozenSet, List, Optional
 
 from .config import Settings
@@ -42,6 +43,72 @@ from .parsers import (
     parse_any,
 )
 from .puzzles import la_date
+
+# Max look-back for the "N days ago" command. Cap at 6 so users can
+# still grab any day within the current week (Mon–Sat from Sunday)
+# but can't accidentally ask for a long-closed week.
+_MAX_DAYS_AGO = 6
+
+# Matches "N days ago" / "N day ago" / "N days" — tolerant of
+# pluralisation and trailing ``ago``.
+_DAYS_AGO_RE = re.compile(r"^(\d+)\s+days?(\s+ago)?$", re.IGNORECASE)
+
+# Matches "recap YYYY-MM-DD" for exact-date pulls.
+_RECAP_DATE_RE = re.compile(
+    r"^recap\s+(\d{4}-\d{2}-\d{2})$", re.IGNORECASE
+)
+
+
+def _resolve_recap_target(
+    lower: str, today: date
+) -> Optional[tuple[date, Optional[str]]]:
+    """Parse a recap-style command into a target date.
+
+    Returns ``(target_day, error_msg)``. ``error_msg`` is ``None`` on
+    success; if set, the command matched shape but the date was out of
+    range and the caller should reply with that explanation. Returns
+    ``None`` when the text isn't a recap command at all (so the main
+    handler can try other commands or fall through to score parsing).
+
+    Supported forms:
+    - ``recap`` / ``today`` → today
+    - ``yesterday`` → today - 1
+    - ``N days ago`` (N = 1..6) → today - N
+    - ``recap YYYY-MM-DD`` → exact date within the last week
+    """
+    if lower in ("recap", "today"):
+        return (today, None)
+    if lower == "yesterday":
+        return (today - timedelta(days=1), None)
+
+    m = _DAYS_AGO_RE.match(lower)
+    if m:
+        n = int(m.group(1))
+        if n < 1 or n > _MAX_DAYS_AGO:
+            return (
+                today,
+                f"I can only pull recaps from the last {_MAX_DAYS_AGO} days. "
+                f"Try ``yesterday``, ``2 days ago`` … up to "
+                f"``{_MAX_DAYS_AGO} days ago``.",
+            )
+        return (today - timedelta(days=n), None)
+
+    m = _RECAP_DATE_RE.match(lower)
+    if m:
+        try:
+            target = date.fromisoformat(m.group(1))
+        except ValueError:
+            return (today, "Couldn't parse that date. Use YYYY-MM-DD.")
+        if target > today:
+            return (today, "That's in the future — I don't have those scores yet.")
+        if (today - target).days > _MAX_DAYS_AGO:
+            return (
+                today,
+                f"I can only pull recaps from the last {_MAX_DAYS_AGO} days.",
+            )
+        return (target, None)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +183,9 @@ def _handle_recap(
     repo: Repository,
     settings: Optional[Settings],
     now: datetime,
+    target_day: Optional[date] = None,
 ) -> str:
-    """On-demand daily recap for the current in-progress LA day."""
+    """On-demand daily recap for ``target_day`` (defaults to today LA)."""
     if settings is None:
         return "Recap isn't available in this context."
     # Lazy import to avoid a circular dep (jobs imports scheduler which
@@ -125,9 +193,54 @@ def _handle_recap(
     # but the webhook module is imported early by main.py).
     from .jobs import render_daily
 
-    target_day = la_date(now)
-    body, _ = render_daily(repo, settings, target_day)
+    day = target_day or la_date(now)
+    body, _ = render_daily(repo, settings, day)
     return body
+
+
+def _handle_all_week(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+) -> str:
+    """Every round this week, day by day.
+
+    Builds a compact per-day per-game block Monday-through-today. Lets
+    users see the whole week at a glance without scrolling back
+    through multiple daily recaps.
+    """
+    if settings is None:
+        return "Week summary isn't available in this context."
+    from .puzzles import week_bounds
+    from .scheduler import _per_game_sections
+
+    today = la_date(now)
+    monday, sunday = week_bounds(today)
+    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_filtered = [
+        s for s in week_scores if s.game in settings.enabled_games
+    ]
+
+    if not week_filtered:
+        return "No scores yet this week."
+
+    header = (
+        f"Week so far — "
+        f"{monday.strftime('%a %d %b')} to {today.strftime('%a %d %b %Y')}"
+    )
+    lines: List[str] = [header, ""]
+
+    # Iterate Mon → today; skip empty days so the output stays tight.
+    cursor = monday
+    while cursor <= today:
+        day_scores = [s for s in week_filtered if s.puzzle_date == cursor]
+        if day_scores:
+            lines.append(cursor.strftime("%a %d %b:"))
+            lines.extend(_per_game_sections(cursor, day_scores))
+            lines.append("")
+        cursor += timedelta(days=1)
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _handle_wrap(
@@ -184,10 +297,20 @@ def handle_inbound(
         return _handle_stats(repo, from_, profile_name)
     if lower == "unparsed":
         return _handle_unparsed(repo)
-    if lower in ("recap", "today"):
-        return _handle_recap(repo, settings, now)
     if lower in ("wrap", "week"):
         return _handle_wrap(repo, settings, now)
+    if lower in ("all", "all week", "history"):
+        return _handle_all_week(repo, settings, now)
+
+    # Date-anchored recap commands: ``recap`` / ``today`` / ``yesterday``
+    # / ``N days ago`` / ``recap YYYY-MM-DD``. Consolidated into one
+    # resolver so the handler doesn't grow a branch per phrasing.
+    recap_target = _resolve_recap_target(lower, la_date(now))
+    if recap_target is not None:
+        target_day, error = recap_target
+        if error is not None:
+            return error
+        return _handle_recap(repo, settings, now, target_day=target_day)
 
     # Try to parse as a game share
     parsed = parse_any(body_stripped)
