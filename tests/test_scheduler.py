@@ -69,17 +69,19 @@ class TestDailyRecap:
         assert "(4 pts)" in out
 
     def test_day_totals_include_round_count(self):
-        # Suffix is submissions count ("rounds"), not distinct game
-        # types — users replaying the same game daily want that to
-        # grow linearly instead of topping out at 7.
+        # Suffix is "G:<submissions>, T: <total time>" — submissions
+        # is every individual round played (not distinct game types,
+        # which top out at 7) and total time covers the time-based
+        # games so the leaderboard surfaces the same fields the
+        # Fastest total time prize gates on.
         scores = [
             _row(1, "Alice", "queens", 714, 10),
             _row(1, "Alice", "tango", 554, 20),
             _row(2, "Bob", "queens", 714, 20),
         ]
         out = daily_recap(TUE, scores, ENABLED)
-        assert "Alice: 10 pts (2 rounds)" in out
-        assert "Bob: 4 pts (1 round)" in out
+        assert "Alice: 10 pts (G:2, T: 0:30)" in out
+        assert "Bob: 4 pts (G:1, T: 0:20)" in out
 
     def test_disabled_game_excluded(self):
         scores = [
@@ -90,8 +92,9 @@ class TestDailyRecap:
         out = daily_recap(TUE, scores, enabled_no_pinpoint)
         assert "Queens" in out
         assert "Pinpoint" not in out
-        # Totals should only count queens
-        assert "1 round" in out
+        # Totals should only count queens (G:1, the queens raw_score
+        # of 10s as T) — if pinpoint had leaked through it would be G:2.
+        assert "G:1, T: 0:10" in out
 
     def test_pinpoint_renders_as_guesses(self):
         scores = [_row(1, "Alice", "pinpoint", 714, 3)]
@@ -309,8 +312,8 @@ class TestWeeklyWrap:
     def test_disabled_game_excluded_from_wrap(self):
         # Pinpoint submission should be filtered out of the aggregation
         # when pinpoint isn't in enabled_games. Alice's leaderboard
-        # line shows "(1 round)" — if pinpoint had leaked through it
-        # would say "(2 rounds)".
+        # line shows "G:1" — if pinpoint had leaked through it would
+        # be G:2.
         scores = [
             _row(1, "Alice", "queens", 714, 10, TUE),
             _row(1, "Alice", "pinpoint", 714, 3, TUE),
@@ -319,7 +322,7 @@ class TestWeeklyWrap:
         out = weekly_wrap(MON, SUN, scores, enabled_no_pinpoint)
         assert "Pinpoint" not in out
         assert "1. Alice" in out
-        assert "(1 round)" in out
+        assert "(G:1, T: 0:10)" in out
 
     def test_scores_outside_week_filtered(self):
         prev_sun = date(2026, 4, 12)

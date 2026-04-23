@@ -21,6 +21,7 @@ from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 from .db import ScoreRow
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER, format_raw_score
 from .scoring import (
+    _NON_TIME_GAMES,
     assign_daily_points,
     game_leaders,
     prize_allocations,
@@ -74,6 +75,27 @@ def _rounds_word(n: int) -> str:
     people who replay the same game daily; ``submissions`` grows linearly
     with participation which is what users actually want to see."""
     return "1 round" if n == 1 else f"{n} rounds"
+
+
+def _player_game_totals(
+    scores: Sequence[ScoreRow], player_id: int, game: str
+) -> Tuple[int, int]:
+    """Return ``(submissions, total_seconds)`` for one ``(player, game)``.
+
+    Pinpoint is a guess count, not seconds, so its raw_score never
+    contributes to the time total — matches the convention used by
+    :func:`weekly_leaderboard`.
+    """
+    subs = 0
+    secs = 0
+    is_time_game = game not in _NON_TIME_GAMES
+    for s in scores:
+        if s.player_id != player_id or s.game != game:
+            continue
+        subs += 1
+        if is_time_game:
+            secs += s.raw_score
+    return subs, secs
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +158,7 @@ def _weekly_leaderboard_lines(
     for i, p in enumerate(lb, start=1):
         lines.append(
             f"  {i}. {p.player_name}: {_pts(p.total_points)} "
-            f"({_rounds_word(p.submissions)})"
+            f"(G:{p.submissions}, T: {_format_seconds(p.total_time)})"
         )
     return lines
 
@@ -359,9 +381,13 @@ def weekly_wrap(
         for game in GAME_DISPLAY_ORDER:
             gl = next((g for g in leaders if g.game == game), None)
             if gl is not None:
+                g_subs, g_time = _player_game_totals(
+                    week_filtered, gl.player_id, game
+                )
                 lines.append(
                     f"  {GAME_DISPLAY[game]}: "
-                    f"{gl.player_name} ({_pts(gl.total_points)})"
+                    f"{gl.player_name} ({_pts(gl.total_points)}, "
+                    f"G:{g_subs}, T: {_format_seconds(g_time)})"
                 )
 
     # Prizes
