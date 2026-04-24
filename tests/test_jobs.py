@@ -110,6 +110,48 @@ class TestRunDailyRecap:
         mock_send.assert_called_once()
 
 
+class TestPeriodEndRecapBlocks:
+    """``render_daily`` (and the cron) append Month/Year totals when
+    the target_day is the last day of the period. Separate from the
+    core recap path so the common case doesn't pay for the extra
+    repo queries."""
+
+    def test_last_day_of_month_appends_month_totals(self):
+        # Seed a full April of scores; close out Apr 30 (Thu).
+        repo = InMemoryRepository()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        for d in (date(2026, 4, 1), date(2026, 4, 15), date(2026, 4, 30)):
+            repo.insert_score(
+                player_id=alice.id, game="queens",
+                puzzle_no=700 + (d - date(2026, 4, 1)).days,
+                puzzle_date=d, raw_score=30, share_text="x",
+            )
+        body, _ = render_daily(repo, SETTINGS, date(2026, 4, 30))
+        assert "Month totals — Apr 2026" in body
+
+    def test_non_month_end_does_not_append(self):
+        repo = InMemoryRepository()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=date(2026, 4, 14), raw_score=30, share_text="x",
+        )
+        body, _ = render_daily(repo, SETTINGS, date(2026, 4, 14))
+        assert "Month totals" not in body
+        assert "Year totals" not in body
+
+    def test_dec_31_appends_both_month_and_year(self):
+        repo = InMemoryRepository()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=999,
+            puzzle_date=date(2026, 12, 31), raw_score=30, share_text="x",
+        )
+        body, _ = render_daily(repo, SETTINGS, date(2026, 12, 31))
+        assert "Month totals — Dec 2026" in body
+        assert "Year totals — 2026" in body
+
+
 class TestRenderHelpers:
     """``render_daily`` / ``render_wrap`` are the on-demand entry points
     used by the webhook ``recap`` and ``wrap`` commands."""

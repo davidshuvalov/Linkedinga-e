@@ -332,6 +332,90 @@ class TestLeaderboardCommand:
         assert "1. Alice" in reply
 
 
+class TestPeriodLeaderboards:
+    """``month`` / ``mtd`` and ``year`` / ``ytd`` — month-to-date and
+    year-to-date leaderboards. Aggregate across the period up through
+    the current LA day, rendered with the weekly formatter so the
+    shape matches the other leaderboards."""
+
+    def test_month_to_date_aggregates_month(self, repo):
+        from datetime import date as _date, timedelta
+        # NOW is Tue Apr 14 2026 Sydney (→ LA day 14 Apr). Seed
+        # scores earlier in April and one in March so we can see
+        # the filter in action.
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob   = repo.get_or_create_player("whatsapp:+2", "Bob")
+        # March (prior month) — should NOT appear
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=700,
+                          puzzle_date=_date(2026, 3, 30), raw_score=10, share_text="x")
+        # April
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=710,
+                          puzzle_date=_date(2026, 4, 1), raw_score=20, share_text="x")
+        repo.insert_score(player_id=bob.id,   game="queens", puzzle_no=710,
+                          puzzle_date=_date(2026, 4, 1), raw_score=40, share_text="x")
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=714,
+                          puzzle_date=_date(2026, 4, 14), raw_score=30, share_text="x")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="mtd",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Month so far" in reply
+        assert "Apr 2026" in reply
+        assert "1. Alice" in reply
+        assert "2. Bob" in reply
+        # Alice: 2 April rows (Apr 1 + Apr 14); her March row is excluded.
+        # Bob: 1 April row.
+        assert "G:2" in reply
+        assert "G:1" in reply
+
+    def test_year_to_date_aggregates_year(self, repo):
+        from datetime import date as _date
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        # Prior year — should NOT appear
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=600,
+                          puzzle_date=_date(2025, 12, 31), raw_score=10, share_text="x")
+        # Current year
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=601,
+                          puzzle_date=_date(2026, 1, 2), raw_score=20, share_text="x")
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=714,
+                          puzzle_date=_date(2026, 4, 14), raw_score=30, share_text="x")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="ytd",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Year so far" in reply
+        assert "2026" in reply
+        # Two 2026 rows; 2025 row should be filtered out.
+        assert "G:2" in reply
+
+    def test_month_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="month",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No scores yet" in reply
+
+    def test_month_to_date_aliases(self, repo):
+        # "month", "mtd", "month to date", "this month" all dispatch
+        # to the same handler.
+        from datetime import date as _date
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=714,
+            puzzle_date=_date(2026, 4, 14), raw_score=30, share_text="x",
+        )
+        for keyword in ("month", "mtd", "month to date", "this month"):
+            reply = handle_inbound(
+                repo, from_="whatsapp:+1", body=keyword,
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+            assert "Month so far" in reply, f"keyword={keyword!r} failed"
+
+
 class TestTimesCommand:
     def test_times_lists_per_game_ranking_by_time(self, repo):
         from app.puzzles import la_date

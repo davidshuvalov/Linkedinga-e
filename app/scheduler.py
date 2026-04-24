@@ -20,6 +20,12 @@ from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .db import ScoreRow
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER, format_raw_score
+from .puzzles import (
+    is_last_day_of_month,
+    is_last_day_of_year,
+    month_bounds,
+    year_bounds,
+)
 from .scoring import (
     _NON_TIME_GAMES,
     assign_daily_points,
@@ -305,6 +311,9 @@ def daily_recap(
     day: date,
     week_scores: Sequence[ScoreRow],
     enabled_games: FrozenSet[str] = _ALL_GAMES,
+    *,
+    month_scores: Optional[Sequence[ScoreRow]] = None,
+    year_scores: Optional[Sequence[ScoreRow]] = None,
 ) -> str:
     """Format a daily recap for ``day``.
 
@@ -313,6 +322,10 @@ def daily_recap(
     - Running "Week so far" cumulative leaderboard across the whole week
       (which is why ``week_scores`` is the **whole week**, not just
       ``day``'s slice).
+    - Optional "Month totals" / "Year totals" blocks when ``month_scores``
+      / ``year_scores`` are provided. Callers (jobs.render_daily)
+      decide when to pass them — typically on the last day of the
+      month / year.
 
     ``week_scores`` must include ``day``'s scores. Scores for disabled
     games are filtered out before rendering and before leaderboard
@@ -349,6 +362,22 @@ def daily_recap(
         lines.append("")
         lines.extend(lb_lines)
 
+    # Month / year totals — opt-in via params. Caller-driven so the
+    # formatter stays pure (no date math to decide when to include).
+    month_block = _period_totals_block(
+        month_scores, enabled_games, f"Month totals — {day.strftime('%b %Y')}"
+    )
+    if month_block:
+        lines.append("")
+        lines.extend(month_block)
+
+    year_block = _period_totals_block(
+        year_scores, enabled_games, f"Year totals — {day.year}"
+    )
+    if year_block:
+        lines.append("")
+        lines.extend(year_block)
+
     # Passive-aggressive nudge for players who played earlier this
     # week but skipped today. Sits at the bottom where it won't
     # compete with the actual scores.
@@ -358,6 +387,26 @@ def daily_recap(
         lines.append(nag)
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _period_totals_block(
+    scores: Optional[Sequence[ScoreRow]],
+    enabled_games: FrozenSet[str],
+    title: str,
+) -> List[str]:
+    """Render a period-totals block (Month / Year) or empty list.
+
+    ``scores`` is the full period — callers pass the month or year's
+    scores when they want the block rendered; passing ``None`` (or
+    an empty list) produces nothing. Disabled games are filtered out
+    for consistency with the weekly block.
+    """
+    if not scores:
+        return []
+    filtered = [s for s in scores if s.game in enabled_games]
+    if not filtered:
+        return []
+    return _weekly_leaderboard_lines(filtered, title=title)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +419,9 @@ def weekly_wrap(
     week_end: date,
     week_scores: Sequence[ScoreRow],
     enabled_games: FrozenSet[str] = _ALL_GAMES,
+    *,
+    month_scores: Optional[Sequence[ScoreRow]] = None,
+    year_scores: Optional[Sequence[ScoreRow]] = None,
 ) -> str:
     """Format a weekly wrap covering ``[week_start, week_end]`` inclusive.
 
@@ -467,5 +519,24 @@ def weekly_wrap(
         lines.append("")
         lines.append("Prizes:")
         lines.extend(prize_lines)
+
+    # Month / year totals — appended when the wrap's week_end also
+    # closes out the month / year. Caller-driven (pass scores or
+    # don't), mirrors daily_recap's hook.
+    month_block = _period_totals_block(
+        month_scores,
+        enabled_games,
+        f"Month totals — {week_end.strftime('%b %Y')}",
+    )
+    if month_block:
+        lines.append("")
+        lines.extend(month_block)
+
+    year_block = _period_totals_block(
+        year_scores, enabled_games, f"Year totals — {week_end.year}"
+    )
+    if year_block:
+        lines.append("")
+        lines.extend(year_block)
 
     return "\n".join(lines).rstrip() + "\n"

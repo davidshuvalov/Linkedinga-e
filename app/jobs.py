@@ -34,7 +34,14 @@ from typing import List, Optional, Tuple
 from .config import Settings
 from .db import Repository
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER
-from .puzzles import la_date, week_bounds
+from .puzzles import (
+    is_last_day_of_month,
+    is_last_day_of_year,
+    la_date,
+    month_bounds,
+    week_bounds,
+    year_bounds,
+)
 from .scheduler import daily_recap, weekly_wrap
 from .scoring import PlayerWeeklyStats, weekly_leaderboard
 from .sender import send_dm, send_recap
@@ -73,12 +80,33 @@ def render_daily(
     monday, sunday = week_bounds(target_day)
     week_scores = repo.list_scores(date_from=monday, date_to=sunday)
 
+    # Month / year totals are only appended on the last day of the
+    # respective period. One extra repo query each, gated behind the
+    # date check so the common path stays cheap.
+    month_scores = None
+    if is_last_day_of_month(target_day):
+        m_start, m_end = month_bounds(target_day)
+        month_scores = repo.list_scores(date_from=m_start, date_to=m_end)
+
+    year_scores = None
+    if is_last_day_of_year(target_day):
+        y_start, y_end = year_bounds(target_day)
+        year_scores = repo.list_scores(date_from=y_start, date_to=y_end)
+
     if _is_sunday(target_day):
-        body = weekly_wrap(monday, sunday, week_scores,
-                           enabled_games=settings.enabled_games)
+        body = weekly_wrap(
+            monday, sunday, week_scores,
+            enabled_games=settings.enabled_games,
+            month_scores=month_scores,
+            year_scores=year_scores,
+        )
     else:
-        body = daily_recap(target_day, week_scores,
-                           enabled_games=settings.enabled_games)
+        body = daily_recap(
+            target_day, week_scores,
+            enabled_games=settings.enabled_games,
+            month_scores=month_scores,
+            year_scores=year_scores,
+        )
 
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday

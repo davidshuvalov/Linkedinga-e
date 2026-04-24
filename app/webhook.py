@@ -42,7 +42,7 @@ from .parsers import (
     looks_like_score,
     parse_any,
 )
-from .puzzles import la_date, week_bounds
+from .puzzles import la_date, month_bounds, week_bounds, year_bounds
 
 # Max look-back for the "N days ago" command. Cap at 6 so users can
 # still grab any day within the current week (Mon–Sat from Sunday)
@@ -83,6 +83,8 @@ _HELP_TEXT = (
     "    leaderboard / standings (+ optional game, e.g. \"leaderboard queens\")\n"
     "    leaderboard yesterday / leaderboard YYYY-MM-DD — past standings\n"
     "    times — per-game time standings (fastest totals this week)\n"
+    "    month / mtd — month-to-date leaderboard\n"
+    "    year / ytd — year-to-date leaderboard\n"
     "    prizes — live prize snapshot\n"
     "    missing / who — who hasn't played today\n"
     "    games — which games are tracked\n"
@@ -561,6 +563,46 @@ def _handle_times(
     return "\n".join(lines)
 
 
+def _handle_period_leaderboard(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    *,
+    period: str,
+) -> str:
+    """Shared renderer for ``month`` and ``year`` commands.
+
+    ``period`` is ``"month"`` or ``"year"``. Aggregates every score
+    in the current LA month / year, filters to enabled games, and
+    renders with the shared leaderboard formatter so the format
+    matches the weekly board. Scope goes up to today only — future
+    days obviously have no scores, so the "to date" framing is
+    implicit.
+    """
+    if settings is None:
+        return f"{period.title()}-to-date isn't available in this context."
+    from .scheduler import _weekly_leaderboard_lines
+
+    today = la_date(now)
+    if period == "month":
+        start, _end = month_bounds(today)
+        title = f"Month so far — {today.strftime('%b %Y')}"
+    else:
+        start, _end = year_bounds(today)
+        title = f"Year so far — {today.year}"
+
+    scores = repo.list_scores(date_from=start, date_to=today)
+    filtered = [
+        s for s in scores
+        if s.game in settings.enabled_games and s.puzzle_date <= today
+    ]
+    if not filtered:
+        return f"No scores yet this {period}."
+
+    lines = _weekly_leaderboard_lines(filtered, title=title)
+    return "\n".join(lines)
+
+
 def _handle_missing(
     repo: Repository,
     settings: Optional[Settings],
@@ -1011,6 +1053,11 @@ def handle_inbound(
     # ``times`` — per-game cumulative time standings across time-based games.
     if lower in ("times", "game times", "time standings"):
         return _handle_times(repo, settings, now)
+    # ``month`` / ``year`` — month-to-date and year-to-date leaderboards.
+    if lower in ("month", "mtd", "month to date", "this month"):
+        return _handle_period_leaderboard(repo, settings, now, period="month")
+    if lower in ("year", "ytd", "year to date", "this year"):
+        return _handle_period_leaderboard(repo, settings, now, period="year")
     if lower in ("missing", "who", "ghosts"):
         return _handle_missing(repo, settings, now)
     if lower in ("games", "enabled"):

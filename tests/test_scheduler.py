@@ -287,6 +287,47 @@ class TestDailyRecap:
 # ---------------------------------------------------------------------------
 
 
+class TestPeriodTotalsInRecap:
+    """Month / year totals are caller-driven: the formatter appends
+    a block if month_scores / year_scores is passed. ``jobs.render_daily``
+    decides whether to pass them based on the calendar date."""
+
+    def test_daily_recap_month_block_when_month_scores_passed(self):
+        # Tue recap — passing month_scores yields a "Month totals" block.
+        week = [_row(1, "Alice", "queens", 714, 10, TUE)]
+        month = [
+            _row(1, "Alice", "queens", 710, 20, date(2026, 4, 1)),
+            _row(1, "Alice", "queens", 714, 10, TUE),
+        ]
+        out = daily_recap(TUE, week, ENABLED, month_scores=month)
+        assert "Month totals — Apr 2026" in out
+        # Alice should appear on the month line with combined stats.
+        month_block = out.split("Month totals — Apr 2026")[1]
+        assert "Alice" in month_block
+        assert "G:2" in month_block
+
+    def test_daily_recap_omits_month_block_when_none(self):
+        week = [_row(1, "Alice", "queens", 714, 10, TUE)]
+        out = daily_recap(TUE, week, ENABLED)
+        assert "Month totals" not in out
+
+    def test_daily_recap_year_block(self):
+        week = [_row(1, "Alice", "queens", 714, 10, TUE)]
+        year = [
+            _row(1, "Alice", "queens", 600, 20, date(2026, 1, 5)),
+            _row(1, "Alice", "queens", 714, 10, TUE),
+        ]
+        out = daily_recap(TUE, week, ENABLED, year_scores=year)
+        assert "Year totals — 2026" in out
+
+    def test_weekly_wrap_period_blocks(self):
+        week = [_row(1, "Alice", "queens", 714, 10, TUE)]
+        month = [_row(1, "Alice", "queens", 710, 20, date(2026, 4, 1)),
+                 _row(1, "Alice", "queens", 714, 10, TUE)]
+        out = weekly_wrap(MON, SUN, week, ENABLED, month_scores=month)
+        assert "Month totals — Apr 2026" in out
+
+
 class TestWeeklyWrap:
     def test_no_scores(self):
         out = weekly_wrap(MON, SUN, [], ENABLED)
