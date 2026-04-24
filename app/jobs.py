@@ -201,6 +201,20 @@ _CHAMPION_TEMPLATES = (
     "Somewhere, a loser is weeping. That loser is not you.",
     "Put the trophy on the mantelpiece, {name}. "
     "Week's over, you won it. {points}. King/queen behaviour.",
+    "Hear ye hear ye — {name} has TAKEN week {iso}. {points}. "
+    "All hail. Brief reign. Lap it up.",
+    "{name} you absolute MENACE. Week {iso} champion with {points}. "
+    "Print it. Frame it. Mention it at parties.",
+    "Week {iso}: solved. By {name}. {points}. "
+    "Try not to peak too early. (Joke. You already have.)",
+    "Trophy room update, {name}: one new entry. {points}. "
+    "Champion of week {iso}. Insufferable until Sunday next.",
+    "{name}, the leaderboard called. It said your name. {points}. "
+    "Champion. No notes.",
+    "Crown's yours this week, {name}. {points}. "
+    "Wear it like you mean it.",
+    "{name} took week {iso} like it was personal. {points}. "
+    "Maybe it was. Who knows. Champion regardless.",
 )
 _LOSER_TEMPLATES = (
     "{name} — wooden spoon this week with {points}. "
@@ -210,6 +224,20 @@ _LOSER_TEMPLATES = (
     "Good news: only way is up. Medium news: we're all laughing.",
     "Congratulations {name}, you are this week's official {points} "
     "person of the week — aka last. Get your revenge Monday.",
+    "{name}, the leaderboard called. It put you on hold. {points}. "
+    "Last place. We've all been there. Some of us only briefly.",
+    "{name} — the floor is cosy down there, isn't it. {points}. "
+    "Last this week. Mondays exist for a reason.",
+    "{name} you finished week {iso} on a mighty {points}. "
+    "Last. But you SHOWED UP, which is honestly more than some.",
+    "Wooden spoon recipient, week {iso}: {name}. {points}. "
+    "Comes with a small ceremony. Mostly pity claps.",
+    "{name}, somebody had to be last. The universe picked you. "
+    "{points}. Don't take it personally. Take it next week.",
+    "{name} — week {iso} in the rear-view, {points}, last place. "
+    "Tactical retreat. Regroup. Avenge.",
+    "{name}, you ended week {iso} with {points}. "
+    "On the bright side: you can only improve. On the other bright side: easily.",
 )
 
 
@@ -342,14 +370,63 @@ def maybe_fire_early_recap(
 # ---------------------------------------------------------------------------
 
 
+# Rotating greeting + sign-off pools so the morning nudge doesn't read
+# the same to the same player every day. ``today.toordinal()`` picks
+# the index, matching the rotation strategy used by the other nag
+# jobs. Keep ``"Still to play:"`` as a literal section header — tests
+# split on it.
+_MORNING_OPENERS_NO_PROGRESS = (
+    "Morning {name}! You haven't played any LinkedIn games today yet.",
+    "Top of the morning, {name}. Zero puzzles solved. Plenty of day left.",
+    "{name} — fresh day, blank scorecard. Time to fix that.",
+    "Morning {name}. Reporting in: nothing played, nothing won.",
+    "{name}, the puzzles are warm. The keyboard is cold. Coincidence?",
+    "Heads up, {name}: today's puzzles are dropping silently into oblivion. Want to save them?",
+    "{name}, the leaderboard misses you already. Today is salvageable.",
+    "Morning {name} — the games are out there, mocking your absence.",
+    "{name}, day's on. Puzzles untouched. Reputation: pending.",
+    "Rise and grind, {name}. The puzzles aren't grinding themselves.",
+)
+
+_MORNING_OPENERS_PARTIAL = (
+    "Morning {name}! Done so far: {played}.",
+    "Off to a flyer, {name}. Knocked over: {played}.",
+    "{name}, nicely warmed up. Already in the bag: {played}.",
+    "Decent start, {name}. Banked: {played}.",
+    "Morning {name} — got you down for: {played}. Tidy.",
+    "{name}, ticking the boxes. Played: {played}.",
+    "Solid, {name}. You've already crushed: {played}.",
+    "Morning {name}. On the board with: {played}.",
+    "{name} — the early bird, etc. So far: {played}.",
+    "{name}, look at you go. Done: {played}.",
+)
+
+_MORNING_SIGN_OFFS = (
+    "DM your shares back to me when you're done.",
+    "Send your shares my way once you've cracked them.",
+    "Forward me each share when you finish — I'll handle the rest.",
+    "Smash 'em out and DM me the shares.",
+    "Shares to me when complete. Easy.",
+    "Drop the shares in here as you go.",
+    "DM me your shares when each one's done — that's how you make it onto the board.",
+)
+
+
 def _build_morning_nudge(
     player_name: str,
     enabled_games: frozenset,
     played_games: set,
+    *,
+    today: Optional[date] = None,
 ) -> str:
     """Render the per-player nudge body. ``played_games`` is the set of
     games the player has already submitted today; the message lists
-    only the enabled games they still owe."""
+    only the enabled games they still owe.
+
+    ``today`` drives the day-ordinal rotation across the opener and
+    sign-off pools so the same player doesn't read identical copy
+    every morning. Falls back to ``date.today()`` for callers that
+    don't pass it (tests, ad-hoc invocations)."""
     missing = [
         GAME_DISPLAY[g]
         for g in GAME_DISPLAY_ORDER
@@ -361,17 +438,25 @@ def _build_morning_nudge(
         if g in enabled_games and g in played_games
     ]
 
-    lines = [f"Morning {player_name}!"]
+    ordinal = (today or date.today()).toordinal()
+
     if not played:
-        lines.append("You haven't played any LinkedIn games today yet.")
+        opener = _MORNING_OPENERS_NO_PROGRESS[
+            ordinal % len(_MORNING_OPENERS_NO_PROGRESS)
+        ].format(name=player_name)
     else:
-        lines.append(f"Done so far: {', '.join(played)}.")
-    lines.append("")
+        opener = _MORNING_OPENERS_PARTIAL[
+            ordinal % len(_MORNING_OPENERS_PARTIAL)
+        ].format(name=player_name, played=", ".join(played))
+
+    sign_off = _MORNING_SIGN_OFFS[ordinal % len(_MORNING_SIGN_OFFS)]
+
+    lines = [opener, ""]
     lines.append("Still to play:")
     for game in missing:
         lines.append(f"  - {game}")
     lines.append("")
-    lines.append("DM your shares back to me when you're done.")
+    lines.append(sign_off)
     return "\n".join(lines)
 
 
@@ -419,7 +504,9 @@ def run_morning_nudge(
         played = games_by_player.get(player.id, set())
         if played >= set(enabled):
             continue  # they're already done — nothing to nudge about
-        body = _build_morning_nudge(player.display_name, enabled, played)
+        body = _build_morning_nudge(
+            player.display_name, enabled, played, today=today
+        )
         if send_dm(settings, player.whatsapp_id, body):
             nudged.append(player.whatsapp_id)
 
@@ -458,6 +545,18 @@ _PRE_RESET_TEMPLATES: dict = {
         "You've done harder things before lunch.",
         "{name} — friendly ping. 2 hours until rollover. "
         "Owed: {missing}. Knock 'em out before dinner gets cold.",
+        "{name}: 120 minutes on the clock. Outstanding: {missing}. "
+        "Future-you will thank past-you. Maybe.",
+        "Two hours and counting, {name}. {missing} hasn't played itself. "
+        "It's not going to.",
+        "Polite reminder, {name} — 2h to puzzle rollover. {missing} pending. "
+        "I'm not your mother. But I am, briefly, your mother.",
+        "{name}, the rollover bus leaves in 2 hours. Boarding: {missing}. "
+        "Don't make me chase you down the platform.",
+        "Friendly heads-up, {name}: 2 hours, {missing} outstanding. "
+        "You've still got time to look smart on the leaderboard.",
+        "{name} — 2h until midnight (LA). {missing} on the to-do list. "
+        "Lots of runway. Fly the plane.",
     ),
     "1h": (
         "60 minutes, {name}. Outstanding: {missing}. "
@@ -469,6 +568,12 @@ _PRE_RESET_TEMPLATES: dict = {
         "{name}: 60 minutes left and still owe {missing}. "
         "Whatever you're doing right now, the puzzles are more important. "
         "Probably.",
+        "{name}, t-minus 60 minutes. {missing} unplayed. "
+        "I'd ask if you're ok but I already know the answer.",
+        "One hour, {name}. {missing}. "
+        "The window is closing. The puzzles are not. Yet.",
+        "{name} — 60 to go, {missing} on the slate. "
+        "You said \"in a sec\" four hours ago. The sec is now.",
     ),
     "30min": (
         "Thirty minutes, {name}. Still mocking the streak: {missing}. "
@@ -479,6 +584,14 @@ _PRE_RESET_TEMPLATES: dict = {
         "Embarrassing. For us. For you. For the bot.",
         "{name} — half hour warning. Owed: {missing}. "
         "Stop. Drop. Open LinkedIn. Solve. Repeat.",
+        "{name}: 30 minutes. {missing}. "
+        "I refuse to be the one tomorrow's recap pities. Move.",
+        "Half an hour to redeem yourself, {name}. {missing}. "
+        "Whatever the excuse is, save it for therapy.",
+        "{name}, 30 mins. {missing} undone. "
+        "This is the part of the movie where the hero finally does the thing.",
+        "Thirty. Minutes. {name}. {missing}. "
+        "The clock is doing its job. Are you?",
     ),
     "5min": (
         "FIVE MINUTES {name}. {missing}. "
@@ -494,6 +607,12 @@ _PRE_RESET_TEMPLATES: dict = {
         "{name}: 300 seconds. {missing}. "
         "GO GO GO GO GO. I will not be held responsible for "
         "what tomorrow's recap says about you.",
+        "{name}, FIVE. {missing}. "
+        "Fingers on phone. Eyes on screen. Brain on. NOW.",
+        "{name} — 5 minutes. {missing}. "
+        "I have begged. I have pleaded. I am now SHOUTING. PLAY.",
+        "{name} this is the LAST PING. 5 minutes. {missing}. "
+        "Tomorrow's recap is being written and it does NOT flatter you.",
     ),
 }
 
@@ -606,6 +725,20 @@ _NEW_GAMES_TEMPLATES: Tuple[str, ...] = (
     "Get in it.",
     "Day flipped. Puzzles flipped. Leaderboard flipped. "
     "New games are out — get in it before someone else does.",
+    "Ding ding — new puzzles. Yesterday's heroes are today's fossils. "
+    "Get in it.",
+    "Today's drop has landed. Tango is judgmental, Queens is unforgiving, "
+    "Zip is mean. Get in it.",
+    "Puzzles up. Coffee in hand. Honour on the line. Get in it.",
+    "Heads up — fresh games, blank slate, zero excuses. "
+    "Whoever shares first gets bragging rights until lunch. Get in it.",
+    "The puzzles are out and they're already laughing at you. "
+    "Get in it before they get cocky.",
+    "Brand new day, brand new puzzles, same old mediocrity unless you "
+    "do something about it. Get in it.",
+    "Reset complete. The leaderboard has been wiped of yesterday's sins. "
+    "New games are LIVE — get in it.",
+    "Morning. Puzzles dropped. The clock is running. Get in it.",
 )
 
 

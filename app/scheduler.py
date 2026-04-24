@@ -37,18 +37,39 @@ from .scoring import (
 _ALL_GAMES = frozenset(GAME_DISPLAY)
 
 # Passive-aggressive templates for players who submitted earlier this
-# week but ghosted today. ``{names}`` is interpolated with a
-# comma-separated join. Selection rotates deterministically on
+# week but ghosted today. Selection rotates deterministically on
 # ``day.toordinal()`` so every recipient sees the same line on the
-# same day but the zinger changes across days.
-_MISSING_TODAY_TEMPLATES = (
+# same day but the zinger changes across days. Two pools — singular
+# vs. plural — because forcing "Doron are busy doing literally
+# anything" on a one-person no-show reads as a bug.
+_MISSING_TODAY_SINGULAR_TEMPLATES = (
     "Still MIA today: {names}. The puzzles aren't going to solve themselves.",
-    "Today's no-shows: {names}. Hoping everything's alright.",
+    "Today's no-show: {names}. Hoping everything's alright.",
     "Haven't heard from {names} today. Suspicious.",
     "{names}: we noticed. The leaderboard noticed. LinkedIn noticed.",
     "Where art thou, {names}? Your rank is slipping.",
+    "{names} is busy doing literally anything other than today's puzzles.",
+    "Benched today: {names}. Room on the couch for snacks and excuses.",
+    "{names} took the day off. From puzzles. Not from scrolling, almost certainly.",
+    "Conspicuously absent: {names}. The board misses you. A bit.",
+    "{names}, the puzzles called. They want a swing.",
+    "One name on today's wall of shame: {names}. Lonely up there.",
+    "{names} ghosted today's drop. Bold strategy.",
+)
+
+_MISSING_TODAY_PLURAL_TEMPLATES = (
+    "Still MIA today: {names}. The puzzles aren't going to solve themselves.",
+    "Today's no-shows: {names}. Hoping everyone's alright.",
+    "Haven't heard from {names} today. Suspicious.",
+    "{names}: we noticed. The leaderboard noticed. LinkedIn noticed.",
+    "Where art thou, {names}? Ranks are slipping.",
     "{names} are busy doing literally anything other than today's puzzles.",
     "Benched today: {names}. Room on the couch for snacks and excuses.",
+    "{names} all took the day off. From puzzles. Not from scrolling, almost certainly.",
+    "Conspicuously absent: {names}. The board misses you lot. A bit.",
+    "{names} — the puzzles called. They want a swing.",
+    "Today's wall of shame, populated by: {names}. Cosy in there?",
+    "{names} ghosted today's drop. Coordinated. Suspicious.",
 )
 
 
@@ -330,9 +351,12 @@ def _missing_today_line(
     if not missing:
         return None
 
-    template = _MISSING_TODAY_TEMPLATES[
-        day.toordinal() % len(_MISSING_TODAY_TEMPLATES)
-    ]
+    pool = (
+        _MISSING_TODAY_SINGULAR_TEMPLATES
+        if len(missing) == 1
+        else _MISSING_TODAY_PLURAL_TEMPLATES
+    )
+    template = pool[day.toordinal() % len(pool)]
     return template.format(names=", ".join(missing))
 
 
