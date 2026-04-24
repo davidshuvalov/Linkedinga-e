@@ -42,7 +42,7 @@ from .parsers import (
     looks_like_score,
     parse_any,
 )
-from .puzzles import la_date
+from .puzzles import la_date, week_bounds
 
 # Max look-back for the "N days ago" command. Cap at 6 so users can
 # still grab any day within the current week (Mon–Sat from Sunday)
@@ -58,6 +58,15 @@ _RECAP_DATE_RE = re.compile(
     r"^recap\s+(\d{4}-\d{2}-\d{2})$", re.IGNORECASE
 )
 
+# Strip an optional leading ``leaderboard`` / ``standings`` prefix so
+# ``leaderboard yesterday`` parses the same as ``yesterday`` for
+# date-keyword resolution. Kept separate from the recap parser so
+# ``recap yesterday`` can still yield the full recap while bare
+# ``yesterday`` yields just the leaderboard.
+_LEADERBOARD_PREFIX_RE = re.compile(
+    r"^(leaderboard|standings)\s+", re.IGNORECASE
+)
+
 
 # Compact help message. Used by the ``help`` / ``?`` command and as
 # the fallback reply when the bot can't classify a message. Grouped
@@ -66,10 +75,14 @@ _RECAP_DATE_RE = re.compile(
 _HELP_TEXT = (
     "Commands:\n"
     "  Look at scores:\n"
-    "    recap / today / yesterday / \"3 days ago\" / recap YYYY-MM-DD\n"
+    "    recap / today — full daily recap\n"
+    "    recap yesterday / recap N days ago / recap YYYY-MM-DD — past recap\n"
+    "    yesterday / \"N days ago\" — leaderboard as of that day\n"
     "    week / wrap — weekly wrap\n"
     "    all / history — every round this week\n"
     "    leaderboard / standings (+ optional game, e.g. \"leaderboard queens\")\n"
+    "    leaderboard yesterday / leaderboard YYYY-MM-DD — past standings\n"
+    "    times — per-game time standings (fastest totals this week)\n"
     "    prizes — live prize snapshot\n"
     "    missing / who — who hasn't played today\n"
     "    games — which games are tracked\n"
@@ -114,26 +127,34 @@ def _resolve_recap_target(
 
     Supported forms:
     - ``recap`` / ``today`` → today
-    - ``yesterday`` → today - 1
-    - ``N days ago`` (N = 1..6) → today - N
+    - ``recap yesterday`` → today - 1
+    - ``recap N days ago`` (N = 1..6) → today - N
     - ``recap YYYY-MM-DD`` → exact date within the last week
+
+    Bare ``yesterday`` / ``N days ago`` are handled by
+    :func:`_resolve_leaderboard_target` instead — they return just the
+    leaderboard, not a full recap, which matches how people actually
+    use those queries ("what were the standings yesterday?").
     """
     if lower in ("recap", "today"):
         return (today, None)
-    if lower == "yesterday":
+    if lower == "recap yesterday":
         return (today - timedelta(days=1), None)
 
-    m = _DAYS_AGO_RE.match(lower)
-    if m:
-        n = int(m.group(1))
-        if n < 1 or n > _MAX_DAYS_AGO:
-            return (
-                today,
-                f"I can only pull recaps from the last {_MAX_DAYS_AGO} days. "
-                f"Try ``yesterday``, ``2 days ago`` … up to "
-                f"``{_MAX_DAYS_AGO} days ago``.",
-            )
-        return (today - timedelta(days=n), None)
+    # ``recap 3 days ago`` / ``recap 3 days``
+    if lower.startswith("recap "):
+        rest = lower[len("recap "):]
+        m = _DAYS_AGO_RE.match(rest)
+        if m:
+            n = int(m.group(1))
+            if n < 1 or n > _MAX_DAYS_AGO:
+                return (
+                    today,
+                    f"I can only pull recaps from the last {_MAX_DAYS_AGO} days. "
+                    f"Try ``recap yesterday``, ``recap 2 days ago`` … up to "
+                    f"``recap {_MAX_DAYS_AGO} days ago``.",
+                )
+            return (today - timedelta(days=n), None)
 
     m = _RECAP_DATE_RE.match(lower)
     if m:
@@ -147,6 +168,63 @@ def _resolve_recap_target(
             return (
                 today,
                 f"I can only pull recaps from the last {_MAX_DAYS_AGO} days.",
+            )
+        return (target, None)
+
+    return None
+
+
+def _resolve_leaderboard_target(
+    lower: str, today: date
+) -> Optional[tuple[date, Optional[str]]]:
+    """Parse a leaderboard-style date command into a target date.
+
+    Returns the same ``(target_day, error_msg)`` shape as
+    :func:`_resolve_recap_target`; returns ``None`` when the text
+    isn't a date-scoped leaderboard command.
+
+    Supported forms (with or without a leading ``leaderboard`` /
+    ``standings`` prefix):
+    - bare ``yesterday`` → today - 1
+    - bare ``N days ago`` (N = 1..6) → today - N
+    - ``leaderboard YYYY-MM-DD`` → exact date within the last week
+
+    The idea: readers who care about a past day mostly want the final
+    standings, not the full per-game recap, so the bare date keywords
+    default to leaderboard mode.
+    """
+    # Strip optional leading "leaderboard " / "standings " prefix, but
+    # remember whether we stripped it — YYYY-MM-DD is only accepted
+    # when prefixed so a bare date string doesn't get grabbed.
+    stripped = _LEADERBOARD_PREFIX_RE.sub("", lower, count=1)
+    prefixed = stripped != lower
+
+    if stripped == "yesterday":
+        return (today - timedelta(days=1), None)
+
+    m = _DAYS_AGO_RE.match(stripped)
+    if m:
+        n = int(m.group(1))
+        if n < 1 or n > _MAX_DAYS_AGO:
+            return (
+                today,
+                f"I can only pull leaderboards from the last {_MAX_DAYS_AGO} days. "
+                f"Try ``yesterday``, ``2 days ago`` … up to "
+                f"``{_MAX_DAYS_AGO} days ago``.",
+            )
+        return (today - timedelta(days=n), None)
+
+    if prefixed:
+        try:
+            target = date.fromisoformat(stripped)
+        except ValueError:
+            return None
+        if target > today:
+            return (today, "That's in the future — I don't have those scores yet.")
+        if (today - target).days > _MAX_DAYS_AGO:
+            return (
+                today,
+                f"I can only pull leaderboards from the last {_MAX_DAYS_AGO} days.",
             )
         return (target, None)
 
@@ -334,34 +412,54 @@ def _handle_leaderboard(
     settings: Optional[Settings],
     now: datetime,
     game: Optional[str] = None,
+    target_day: Optional[date] = None,
 ) -> str:
     """Weekly leaderboard — overall or restricted to one game.
 
-    Overall mode (``game is None``) is the same table used by the
-    daily/weekly recap's "Week so far" block, surfaced on its own
-    so users can pull just the standings without the per-game
-    sections. Game-filtered mode tallies weekly points for that
-    single game only, still using :func:`assign_daily_points`.
+    ``target_day`` scopes the standings "as of" a specific LA date —
+    passing yesterday gives yesterday's end-of-day leaderboard, etc.
+    Defaults to today LA. Scores after ``target_day`` are excluded
+    so historical leaderboards are stable even if more scores arrive
+    later (which happens in practice — people forget to share).
+
+    Overall mode (``game is None``) uses the same renderer as the
+    daily recap's "Week so far" block so the format stays consistent
+    across surfaces. Game-filtered mode shows per-player cumulative
+    time + submissions for that single game.
     """
     if settings is None:
         return "Leaderboard isn't available in this context."
-    from .scoring import assign_daily_points, weekly_leaderboard
+    from .scheduler import _weekly_leaderboard_lines, _format_seconds
+    from .scoring import _NON_TIME_GAMES, assign_daily_points
 
-    filtered, today, _, _ = _week_filtered_scores(repo, settings, now)
+    target_day = target_day or la_date(now)
+    monday, sunday = week_bounds(target_day)
+    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    filtered = [
+        s for s in week_scores
+        if s.game in settings.enabled_games and s.puzzle_date <= target_day
+    ]
     if not filtered:
-        return "No scores yet this week."
+        return (
+            f"No scores yet for week of "
+            f"{monday.strftime('%a %d %b %Y')}."
+        )
+
+    header_date = target_day.strftime("%a %d %b %Y")
 
     if game is None:
-        lb = weekly_leaderboard(filtered)
-        lines = [f"Week so far — {today.strftime('%a %d %b %Y')}:"]
-        for i, p in enumerate(lb, start=1):
-            rounds_word = "1 round" if p.submissions == 1 else f"{p.submissions} rounds"
-            lines.append(
-                f"  {i}. {p.player_name}: {_fmt_pts(p.total_points)} pts ({rounds_word})"
-            )
+        # Prior = week scores strictly before target_day, so the
+        # arrows compare the requested day's board to the preceding
+        # day's board (None on Monday → no arrows, by design).
+        prior = [s for s in filtered if s.puzzle_date < target_day]
+        lines = _weekly_leaderboard_lines(
+            filtered,
+            title=f"Week so far — {header_date}",
+            prior_scores=prior,
+        )
         return "\n".join(lines)
 
-    # Per-game leaderboard: tally competitive_score results per player.
+    # Per-game leaderboard — tally points + cumulative time per player.
     groups: Dict[int, List[ScoreRow]] = {}
     player_names: Dict[int, str] = {}
     for s in filtered:
@@ -371,27 +469,95 @@ def _handle_leaderboard(
         player_names[s.player_id] = s.player_name
 
     if not groups:
-        return f"No {GAME_DISPLAY[game]} scores yet this week."
+        return f"No {GAME_DISPLAY[game]} scores yet for week of {monday.strftime('%a %d %b %Y')}."
 
     totals: Dict[int, float] = {}
     submissions: Dict[int, int] = {}
+    time_total: Dict[int, int] = {}
     for group_scores in groups.values():
         for pid, pts in assign_daily_points(group_scores).items():
             totals[pid] = totals.get(pid, 0.0) + pts
         for s in group_scores:
             submissions[s.player_id] = submissions.get(s.player_id, 0) + 1
+            if s.game not in _NON_TIME_GAMES:
+                time_total[s.player_id] = time_total.get(s.player_id, 0) + s.raw_score
 
-    ranked = sorted(
-        totals.items(),
-        key=lambda kv: (-kv[1], kv[0]),
-    )
-    lines = [f"{GAME_DISPLAY[game]} — week so far:"]
+    ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+    is_time_game = game not in _NON_TIME_GAMES
+    lines = [f"{GAME_DISPLAY[game]} — week so far ({header_date}):"]
     for i, (pid, pts) in enumerate(ranked, start=1):
         subs = submissions.get(pid, 0)
-        subs_word = "1 round" if subs == 1 else f"{subs} rounds"
+        if is_time_game:
+            stats = f"T: {_format_seconds(time_total.get(pid, 0))}, G:{subs}"
+        else:
+            stats = f"G:{subs}"
         lines.append(
-            f"  {i}. {player_names[pid]}: {_fmt_pts(round(pts, 1))} pts ({subs_word})"
+            f"  {i}. {player_names[pid]}: "
+            f"{_fmt_pts(round(pts, 1))} pts ({stats})"
         )
+    return "\n".join(lines)
+
+
+def _handle_times(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    target_day: Optional[date] = None,
+) -> str:
+    """Per-game time-standings for the current LA week.
+
+    Ranks players by cumulative seconds in each time-based enabled
+    game, ascending (fastest first). Pinpoint is skipped since its
+    raw_score is a guess count, not seconds.
+    """
+    if settings is None:
+        return "Time standings aren't available in this context."
+    from .scoring import _NON_TIME_GAMES
+    from .scheduler import _format_seconds
+
+    target_day = target_day or la_date(now)
+    monday, sunday = week_bounds(target_day)
+    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    filtered = [
+        s for s in week_scores
+        if s.game in settings.enabled_games and s.puzzle_date <= target_day
+    ]
+    if not filtered:
+        return f"No scores yet for week of {monday.strftime('%a %d %b %Y')}."
+
+    # per-game per-player: (total_seconds, submissions)
+    per_game: Dict[str, Dict[int, List[int]]] = {}
+    player_names: Dict[int, str] = {}
+    for s in filtered:
+        if s.game in _NON_TIME_GAMES:
+            continue
+        bucket = per_game.setdefault(s.game, {})
+        acc = bucket.setdefault(s.player_id, [0, 0])
+        acc[0] += s.raw_score
+        acc[1] += 1
+        player_names[s.player_id] = s.player_name
+
+    if not per_game:
+        return f"No time-based scores yet for week of {monday.strftime('%a %d %b %Y')}."
+
+    header_date = target_day.strftime("%a %d %b %Y")
+    lines: List[str] = [f"Game times — week so far ({header_date}):"]
+    for game in GAME_DISPLAY_ORDER:
+        stats = per_game.get(game)
+        if not stats:
+            continue
+        lines.append("")
+        lines.append(f"{GAME_DISPLAY[game]}:")
+        # Sort by total time ascending (fastest first), tiebreak by pid.
+        ranked = sorted(
+            stats.items(),
+            key=lambda kv: (kv[1][0], kv[0]),
+        )
+        for i, (pid, (total, subs)) in enumerate(ranked, start=1):
+            lines.append(
+                f"  {i}. {player_names[pid]}: "
+                f"{_format_seconds(total)} (G:{subs})"
+            )
     return "\n".join(lines)
 
 
@@ -842,6 +1008,9 @@ def handle_inbound(
             f"standings {display_lower}",
         ):
             return _handle_leaderboard(repo, settings, now, game=game_key)
+    # ``times`` — per-game cumulative time standings across time-based games.
+    if lower in ("times", "game times", "time standings"):
+        return _handle_times(repo, settings, now)
     if lower in ("missing", "who", "ghosts"):
         return _handle_missing(repo, settings, now)
     if lower in ("games", "enabled"):
@@ -869,9 +1038,22 @@ def handle_inbound(
     if new_name is not None:
         return _handle_rename(repo, from_, profile_name, new_name)
 
-    # Date-anchored recap commands: ``recap`` / ``today`` / ``yesterday``
-    # / ``N days ago`` / ``recap YYYY-MM-DD``. Consolidated into one
-    # resolver so the handler doesn't grow a branch per phrasing.
+    # Date-scoped leaderboard commands — checked BEFORE the recap
+    # parser so bare ``yesterday`` / ``N days ago`` route to the
+    # compact standings rather than the full recap.
+    lb_target = _resolve_leaderboard_target(lower, la_date(now))
+    if lb_target is not None:
+        target_day, error = lb_target
+        if error is not None:
+            return error
+        return _handle_leaderboard(
+            repo, settings, now, target_day=target_day
+        )
+
+    # Date-anchored recap commands: ``recap`` / ``today`` /
+    # ``recap yesterday`` / ``recap N days ago`` / ``recap YYYY-MM-DD``.
+    # Consolidated into one resolver so the handler doesn't grow a
+    # branch per phrasing.
     recap_target = _resolve_recap_target(lower, la_date(now))
     if recap_target is not None:
         target_day, error = recap_target

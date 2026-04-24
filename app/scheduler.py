@@ -142,14 +142,16 @@ def _per_game_sections(
 def _rank_delta_suffix(
     prior_ranks: Dict[int, int], player_id: int, current_rank: int
 ) -> str:
-    """Render ``↑N`` / ``↓N`` / ``=`` / ``NEW`` based on how the player's
-    rank moved since ``prior_ranks``. Empty string when there's nothing
-    to compare against (callers skip the whole block in that case)."""
+    """Render ``↑N`` / ``↓N`` / ``NEW`` based on how the player's rank
+    moved since ``prior_ranks``. Empty string when the position is
+    unchanged or when there's nothing to compare against — readers
+    only care about *changes*, so a sea of ``=`` markers on an
+    otherwise stable board just added noise."""
     prev = prior_ranks.get(player_id)
     if prev is None:
         return " NEW"
     if prev == current_rank:
-        return " ="
+        return ""
     if prev > current_rank:
         return f" ↑{prev - current_rank}"
     return f" ↓{current_rank - prev}"
@@ -188,7 +190,7 @@ def _weekly_leaderboard_lines(
         )
         lines.append(
             f"  {i}. {p.player_name}: {_pts(p.total_points)} "
-            f"(G:{p.submissions}, T: {_format_seconds(p.total_time)}){suffix}"
+            f"(T: {_format_seconds(p.total_time)}, G:{p.submissions}){suffix}"
         )
     return lines
 
@@ -426,7 +428,7 @@ def weekly_wrap(
                 if game in _NON_TIME_GAMES:
                     stats = f"G:{g_subs}"
                 else:
-                    stats = f"G:{g_subs}, T: {_format_seconds(g_time)}"
+                    stats = f"T: {_format_seconds(g_time)}, G:{g_subs}"
                 lines.append(
                     f"  {GAME_DISPLAY[game]}: "
                     f"{gl.player_name} ({_pts(gl.total_points)}, {stats})"

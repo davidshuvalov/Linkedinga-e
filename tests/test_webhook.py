@@ -312,6 +312,83 @@ class TestLeaderboardCommand:
         # "leaderboard widgets" isn't a known command; treated as chatter.
         assert "didn't understand" in reply.lower()
 
+    def test_leaderboard_with_iso_date(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+        today = la_date(NOW)
+        two_ago = today - timedelta(days=2)
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=712,
+            puzzle_date=two_ago, raw_score=10, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001",
+            body=f"leaderboard {two_ago.isoformat()}",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Week so far" in reply
+        assert "1. Alice" in reply
+
+
+class TestTimesCommand:
+    def test_times_lists_per_game_ranking_by_time(self, repo):
+        from app.puzzles import la_date
+        today = la_date(NOW)
+        alice = repo.get_or_create_player("whatsapp:+6140000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+6140000002", "Bob")
+        # Queens: Alice 30s, Bob 40s
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=714,
+                          puzzle_date=today, raw_score=30, share_text="x")
+        repo.insert_score(player_id=bob.id,   game="queens", puzzle_no=714,
+                          puzzle_date=today, raw_score=40, share_text="x")
+        # Tango: Bob 20s, Alice 25s
+        repo.insert_score(player_id=alice.id, game="tango", puzzle_no=554,
+                          puzzle_date=today, raw_score=25, share_text="x")
+        repo.insert_score(player_id=bob.id,   game="tango", puzzle_no=554,
+                          puzzle_date=today, raw_score=20, share_text="x")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+6140000001", body="times",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Game times" in reply
+        assert "Queens:" in reply
+        assert "Tango:" in reply
+        # Queens ascending: Alice first (0:30), Bob second (0:40).
+        # Tango ascending: Bob first (0:20), Alice second (0:25).
+        queens_block = reply.split("Queens:")[1].split("Tango:")[0]
+        tango_block = reply.split("Tango:")[1]
+        assert "1. Alice" in queens_block
+        assert "2. Bob" in queens_block
+        assert "1. Bob" in tango_block
+        assert "2. Alice" in tango_block
+
+    def test_times_skips_pinpoint(self, repo):
+        from app.puzzles import la_date
+        today = la_date(NOW)
+        repo.get_or_create_player("whatsapp:+6140000001", "Alice")
+        repo.insert_score(
+            player_id=1, game="pinpoint", puzzle_no=714,
+            puzzle_date=today, raw_score=3, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+6140000001", body="times",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        # Pinpoint stores guess counts, not seconds; times command skips it.
+        assert "Pinpoint" not in reply
+
+    def test_times_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+6140000001", body="times",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No scores" in reply
+
 
 class TestMissingCommand:
     def test_missing_when_full_turnout(self, repo):
@@ -1012,9 +1089,11 @@ class TestWrapCommand:
 
 
 class TestHistoricalRecapCommands:
-    """``yesterday`` / ``N days ago`` / ``recap YYYY-MM-DD`` — pull
-    prior-day recaps so a midweek user can check what happened without
-    scrolling back through old DMs."""
+    """Date-scoped queries. Bare date keywords (``yesterday``, ``N days
+    ago``) return just the leaderboard as of that day — the common ask
+    is "what were the standings?". ``recap yesterday`` / ``recap N days
+    ago`` / ``recap YYYY-MM-DD`` return the full daily recap for
+    someone who actually wants the per-game breakdown."""
 
     def _seed_day(self, repo, day, player_id, name, raw, puzzle_no=714):
         repo.get_or_create_player(f"whatsapp:+6140000000{player_id}", name)
@@ -1027,7 +1106,7 @@ class TestHistoricalRecapCommands:
             share_text=f"Queens #{puzzle_no} seeded",
         )
 
-    def test_yesterday_pulls_previous_la_day(self, repo):
+    def test_yesterday_returns_leaderboard_as_of_yesterday(self, repo):
         from datetime import timedelta
         from app.puzzles import la_date
 
@@ -1044,11 +1123,15 @@ class TestHistoricalRecapCommands:
             settings=_settings_with_default_games(),
         )
         assert reply is not None
-        assert "Daily recap" in reply
+        # Leaderboard header, not a recap header.
+        assert "Week so far" in reply
         assert yesterday.strftime("%a %d %b") in reply
-        assert "Queens #713" in reply
+        assert "1. Alice" in reply
+        # The per-game "Queens #713" section only shows up in the full
+        # recap, not the leaderboard-only response.
+        assert "Queens #713" not in reply
 
-    def test_n_days_ago_pulls_that_day(self, repo):
+    def test_n_days_ago_returns_leaderboard_for_that_day(self, repo):
         from datetime import timedelta
         from app.puzzles import la_date
 
@@ -1066,7 +1149,71 @@ class TestHistoricalRecapCommands:
         )
         assert reply is not None
         assert three_ago.strftime("%a %d %b") in reply
+        assert "1. Alice" in reply
+        # Leaderboard-only — no per-game block.
+        assert "Queens #711" not in reply
+
+    def test_recap_yesterday_returns_full_recap(self, repo):
+        # Explicit ``recap yesterday`` still yields the per-game
+        # breakdown — different command, different intent.
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        self._seed_day(repo, yesterday, 1, "Alice", 10, puzzle_no=713)
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="recap yesterday",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Daily recap" in reply
+        assert "Queens #713" in reply
+
+    def test_recap_n_days_ago_returns_full_recap(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        three_ago = today - timedelta(days=3)
+        self._seed_day(repo, three_ago, 1, "Alice", 15, puzzle_no=711)
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="recap 3 days ago",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Daily recap" in reply
         assert "Queens #711" in reply
+
+    def test_leaderboard_yesterday_alias_works(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        self._seed_day(repo, yesterday, 1, "Alice", 10, puzzle_no=713)
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="leaderboard yesterday",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Week so far" in reply
+        assert "1. Alice" in reply
 
     def test_n_days_ago_out_of_range_replies_with_hint(self, repo):
         reply = handle_inbound(

@@ -69,19 +69,20 @@ class TestDailyRecap:
         assert "(4 pts)" in out
 
     def test_day_totals_include_round_count(self):
-        # Suffix is "G:<submissions>, T: <total time>" — submissions
+        # Suffix is "T: <total time>, G:<submissions>" — submissions
         # is every individual round played (not distinct game types,
         # which top out at 7) and total time covers the time-based
         # games so the leaderboard surfaces the same fields the
-        # Fastest total time prize gates on.
+        # Fastest total time prize gates on. Time leads so the most
+        # eye-catching number lands first.
         scores = [
             _row(1, "Alice", "queens", 714, 10),
             _row(1, "Alice", "tango", 554, 20),
             _row(2, "Bob", "queens", 714, 20),
         ]
         out = daily_recap(TUE, scores, ENABLED)
-        assert "Alice: 10 pts (G:2, T: 0:30)" in out
-        assert "Bob: 4 pts (G:1, T: 0:20)" in out
+        assert "Alice: 10 pts (T: 0:30, G:2)" in out
+        assert "Bob: 4 pts (T: 0:20, G:1)" in out
 
     def test_disabled_game_excluded(self):
         scores = [
@@ -94,7 +95,7 @@ class TestDailyRecap:
         assert "Pinpoint" not in out
         # Totals should only count queens (G:1, the queens raw_score
         # of 10s as T) — if pinpoint had leaked through it would be G:2.
-        assert "G:1, T: 0:10" in out
+        assert "T: 0:10, G:1" in out
 
     def test_pinpoint_renders_as_guesses(self):
         scores = [_row(1, "Alice", "pinpoint", 714, 3)]
@@ -127,11 +128,11 @@ class TestDailyRecap:
         assert "1. Alice: 10 pts" in out
         assert "2. Bob: 8 pts" in out
 
-    def test_week_so_far_position_change_arrows(self):
+    def test_week_so_far_position_unchanged_has_no_marker(self):
         # Mon: Alice wins Queens (5), Bob second (4) → Alice 1st, Bob 2nd.
         # Tue: Bob wins Tango (5), Alice second (4) → Alice 9, Bob 9
         #      (tie, broken by player_id so Alice still 1st). Position
-        #      didn't change → both show "=".
+        #      didn't change → no marker (readers only care about changes).
         scores = [
             _row(1, "Alice", "queens", 713, 10, MON),
             _row(2, "Bob",   "queens", 713, 20, MON),
@@ -140,7 +141,9 @@ class TestDailyRecap:
         ]
         out = daily_recap(TUE, scores, ENABLED)
         assert "1. Alice" in out
-        assert "=" in out  # position unchanged for at least one row
+        # No change-of-position markers should appear.
+        for marker in (" =", "↑", "↓"):
+            assert marker not in out
 
     def test_week_so_far_position_change_swap(self):
         # Mon: Bob wins (5), Alice second (4) → Bob 1st, Alice 2nd.
@@ -163,7 +166,7 @@ class TestDailyRecap:
             _row(2, "Bob",   "queens", 713, 20, MON),
         ]
         out = daily_recap(MON, scores, ENABLED)
-        for marker in ("↑", "↓", " =", " NEW"):
+        for marker in ("↑", "↓", " NEW"):
             assert marker not in out
 
     def test_week_so_far_new_player_tagged(self):
@@ -379,7 +382,7 @@ class TestWeeklyWrap:
         out = weekly_wrap(MON, SUN, scores, enabled_no_pinpoint)
         assert "Pinpoint" not in out
         assert "1. Alice" in out
-        assert "(G:1, T: 0:10)" in out
+        assert "(T: 0:10, G:1)" in out
 
     def test_scores_outside_week_filtered(self):
         prev_sun = date(2026, 4, 12)
