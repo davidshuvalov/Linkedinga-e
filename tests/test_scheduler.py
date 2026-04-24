@@ -293,7 +293,9 @@ class TestPeriodTotalsInRecap:
     decides whether to pass them based on the calendar date."""
 
     def test_daily_recap_month_block_when_month_scores_passed(self):
-        # Tue recap — passing month_scores yields a "Month totals" block.
+        # Tue recap — passing month_scores yields a "Month totals"
+        # block. The block is a full period summary (leaderboard +
+        # game winners + prizes, when enough data qualifies).
         week = [_row(1, "Alice", "queens", 714, 10, TUE)]
         month = [
             _row(1, "Alice", "queens", 710, 20, date(2026, 4, 1)),
@@ -305,6 +307,8 @@ class TestPeriodTotalsInRecap:
         month_block = out.split("Month totals — Apr 2026")[1]
         assert "Alice" in month_block
         assert "G:2" in month_block
+        # Period summary includes Game winners block.
+        assert "Game winners:" in month_block
 
     def test_daily_recap_omits_month_block_when_none(self):
         week = [_row(1, "Alice", "queens", 714, 10, TUE)]

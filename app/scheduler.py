@@ -201,6 +201,103 @@ def _weekly_leaderboard_lines(
     return lines
 
 
+def _game_winners_lines(scores: Sequence[ScoreRow]) -> List[str]:
+    """Render the "Game winners" block for an arbitrary slice of
+    scores (a week, month, or year).
+
+    One line per game that had any submissions, showing the top
+    player + their per-game points, submission count, and cumulative
+    time (for time-based games). Pinpoint drops T: since it's a
+    guess count, not seconds.
+    """
+    leaders = game_leaders(scores)
+    if not leaders:
+        return []
+    lines: List[str] = ["Game winners:"]
+    for game in GAME_DISPLAY_ORDER:
+        gl = next((g for g in leaders if g.game == game), None)
+        if gl is None:
+            continue
+        g_subs, g_time = _player_game_totals(scores, gl.player_id, game)
+        if game in _NON_TIME_GAMES:
+            stats = f"G:{g_subs}"
+        else:
+            stats = f"T: {_format_seconds(g_time)}, G:{g_subs}"
+        lines.append(
+            f"  {GAME_DISPLAY[game]}: "
+            f"{gl.player_name} ({_pts(gl.total_points)}, {stats})"
+        )
+    return lines
+
+
+def _prize_lines(prizes) -> List[str]:
+    """Render the "Prizes" block from a :class:`Prizes` allocation.
+
+    Returns the complete block with header, or empty list when
+    nothing qualified (small rosters / sparse weeks can produce all
+    ``None``s).
+    """
+    body: List[str] = []
+    if prizes.most_firsts is not None:
+        firsts = prizes.most_firsts.first_places
+        firsts_word = "1 first" if firsts == 1 else f"{firsts} firsts"
+        body.append(
+            f"  Most firsts: {prizes.most_firsts.player_name} ({firsts_word})"
+        )
+    if prizes.most_lasts is not None:
+        lasts = prizes.most_lasts.last_places
+        lasts_word = "1 last" if lasts == 1 else f"{lasts} lasts"
+        body.append(
+            f"  Most lasts: {prizes.most_lasts.player_name} ({lasts_word})"
+        )
+    if prizes.best_average is not None:
+        ba = prizes.best_average
+        body.append(
+            f"  Best average: {ba.player_name} "
+            f"(avg {ba.average_points:.1f} pts/game, {ba.submissions} submissions)"
+        )
+    if prizes.fastest_total_time is not None:
+        ft = prizes.fastest_total_time
+        body.append(
+            f"  Fastest total time: {ft.player_name} "
+            f"({_format_seconds(ft.total_time)} across "
+            f"{ft.time_based_submissions} rounds)"
+        )
+    if not body:
+        return []
+    return ["Prizes:"] + body
+
+
+def period_summary(
+    title: str,
+    scores: Sequence[ScoreRow],
+    enabled_games: FrozenSet[str] = _ALL_GAMES,
+) -> List[str]:
+    """Render a full period summary — leaderboard + game winners +
+    prizes — as lines the caller joins.
+
+    Used for the ``month`` / ``year`` commands and the last-day-of-
+    period recap appendage so the monthly/yearly view mirrors the
+    weekly wrap's shape. Returns empty list when there are no scores
+    in the filtered period.
+    """
+    filtered = [s for s in scores if s.game in enabled_games]
+    lb = _weekly_leaderboard_lines(filtered, title=title)
+    if not lb:
+        return []
+    lines = list(lb)
+    winners = _game_winners_lines(filtered)
+    if winners:
+        lines.append("")
+        lines.extend(winners)
+    prizes = prize_allocations(weekly_leaderboard(filtered))
+    pl = _prize_lines(prizes)
+    if pl:
+        lines.append("")
+        lines.extend(pl)
+    return lines
+
+
 def _missing_today_line(
     day: date,
     week_scores: Sequence[ScoreRow],
@@ -394,19 +491,18 @@ def _period_totals_block(
     enabled_games: FrozenSet[str],
     title: str,
 ) -> List[str]:
-    """Render a period-totals block (Month / Year) or empty list.
+    """Render a period summary (Month / Year) — leaderboard + game
+    winners + prizes — or empty list.
 
     ``scores`` is the full period — callers pass the month or year's
     scores when they want the block rendered; passing ``None`` (or
-    an empty list) produces nothing. Disabled games are filtered out
-    for consistency with the weekly block.
+    an empty list) produces nothing. Delegates to
+    :func:`period_summary` so the monthly / yearly view matches the
+    weekly wrap's shape.
     """
     if not scores:
         return []
-    filtered = [s for s in scores if s.game in enabled_games]
-    if not filtered:
-        return []
-    return _weekly_leaderboard_lines(filtered, title=title)
+    return period_summary(title, scores, enabled_games)
 
 
 # ---------------------------------------------------------------------------
@@ -465,59 +561,15 @@ def weekly_wrap(
     lines.extend(_weekly_leaderboard_lines(week_filtered, title="Week totals"))
 
     # Per-game weekly winners
-    leaders = game_leaders(week_filtered)
-    if leaders:
+    winners = _game_winners_lines(week_filtered)
+    if winners:
         lines.append("")
-        lines.append("Game winners:")
-        for game in GAME_DISPLAY_ORDER:
-            gl = next((g for g in leaders if g.game == game), None)
-            if gl is not None:
-                g_subs, g_time = _player_game_totals(
-                    week_filtered, gl.player_id, game
-                )
-                # Pinpoint tracks guess counts, not seconds — the
-                # total would always render as 0:00, so drop T:.
-                if game in _NON_TIME_GAMES:
-                    stats = f"G:{g_subs}"
-                else:
-                    stats = f"T: {_format_seconds(g_time)}, G:{g_subs}"
-                lines.append(
-                    f"  {GAME_DISPLAY[game]}: "
-                    f"{gl.player_name} ({_pts(gl.total_points)}, {stats})"
-                )
+        lines.extend(winners)
 
     # Prizes
-    lb = weekly_leaderboard(week_filtered)
-    prizes = prize_allocations(lb)
-    prize_lines: List[str] = []
-    if prizes.most_firsts is not None:
-        firsts = prizes.most_firsts.first_places
-        firsts_word = "1 first" if firsts == 1 else f"{firsts} firsts"
-        prize_lines.append(
-            f"  Most firsts: {prizes.most_firsts.player_name} ({firsts_word})"
-        )
-    if prizes.most_lasts is not None:
-        lasts = prizes.most_lasts.last_places
-        lasts_word = "1 last" if lasts == 1 else f"{lasts} lasts"
-        prize_lines.append(
-            f"  Most lasts: {prizes.most_lasts.player_name} ({lasts_word})"
-        )
-    if prizes.best_average is not None:
-        ba = prizes.best_average
-        prize_lines.append(
-            f"  Best average: {ba.player_name} "
-            f"(avg {ba.average_points:.1f} pts/game, {ba.submissions} submissions)"
-        )
-    if prizes.fastest_total_time is not None:
-        ft = prizes.fastest_total_time
-        prize_lines.append(
-            f"  Fastest total time: {ft.player_name} "
-            f"({_format_seconds(ft.total_time)} across "
-            f"{ft.time_based_submissions} rounds)"
-        )
+    prize_lines = _prize_lines(prize_allocations(weekly_leaderboard(week_filtered)))
     if prize_lines:
         lines.append("")
-        lines.append("Prizes:")
         lines.extend(prize_lines)
 
     # Month / year totals — appended when the wrap's week_end also

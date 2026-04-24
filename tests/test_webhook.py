@@ -415,6 +415,88 @@ class TestPeriodLeaderboards:
             )
             assert "Month so far" in reply, f"keyword={keyword!r} failed"
 
+    def test_month_includes_prizes_and_game_winners(self, repo):
+        # Enough submissions across multiple days to trigger the
+        # Best average and Most firsts / Most lasts prizes.
+        from datetime import date as _date
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        for i, d in enumerate((
+            _date(2026, 4, 1), _date(2026, 4, 5), _date(2026, 4, 10),
+            _date(2026, 4, 12), _date(2026, 4, 14),
+        )):
+            repo.insert_score(
+                player_id=alice.id, game="queens", puzzle_no=700 + i,
+                puzzle_date=d, raw_score=20, share_text="x",
+            )
+            repo.insert_score(
+                player_id=bob.id, game="queens", puzzle_no=700 + i,
+                puzzle_date=d, raw_score=40, share_text="x",
+            )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="month",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        # Full summary shape: leaderboard + game winners + prizes.
+        assert "Month so far" in reply
+        assert "Game winners:" in reply
+        assert "Queens:" in reply
+        assert "Prizes:" in reply
+        # Alice swept so she should lead Most firsts.
+        assert "Most firsts: Alice" in reply
+
+    def test_month_with_game_filter(self, repo):
+        from datetime import date as _date
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=710,
+            puzzle_date=_date(2026, 4, 1), raw_score=20, share_text="x",
+        )
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=710,
+            puzzle_date=_date(2026, 4, 1), raw_score=40, share_text="x",
+        )
+        # Tango submission should NOT appear in "month queens" output.
+        repo.insert_score(
+            player_id=alice.id, game="tango", puzzle_no=554,
+            puzzle_date=_date(2026, 4, 14), raw_score=25, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="month queens",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Queens — month so far" in reply
+        assert "Alice" in reply
+        assert "Bob" in reply
+        # No Tango row or Prizes block — game-filtered view.
+        assert "Tango" not in reply
+        assert "Prizes:" not in reply
+        assert "Game winners:" not in reply
+
+    def test_year_with_game_filter(self, repo):
+        from datetime import date as _date
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=600,
+            puzzle_date=_date(2026, 1, 10), raw_score=20, share_text="x",
+        )
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=_date(2026, 4, 14), raw_score=25, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="year queens",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Queens — year so far" in reply
+        assert "Alice" in reply
+        # Two rows in the year; cumulative time = 45s.
+        assert "T: 0:45" in reply
+
 
 class TestTimesCommand:
     def test_times_lists_per_game_ranking_by_time(self, repo):

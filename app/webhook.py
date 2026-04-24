@@ -83,8 +83,8 @@ _HELP_TEXT = (
     "    leaderboard / standings (+ optional game, e.g. \"leaderboard queens\")\n"
     "    leaderboard yesterday / leaderboard YYYY-MM-DD — past standings\n"
     "    times — per-game time standings (fastest totals this week)\n"
-    "    month / mtd — month-to-date leaderboard\n"
-    "    year / ytd — year-to-date leaderboard\n"
+    "    month / mtd (+ optional game, e.g. \"month queens\") — MTD summary\n"
+    "    year / ytd (+ optional game, e.g. \"year queens\") — YTD summary\n"
     "    prizes — live prize snapshot\n"
     "    missing / who — who hasn't played today\n"
     "    games — which games are tracked\n"
@@ -409,6 +409,53 @@ def _week_filtered_scores(
     return filtered, today, monday, sunday
 
 
+def _render_per_game_leaderboard(
+    scores: List[ScoreRow], game: str, title: str
+) -> Optional[str]:
+    """Shared per-game leaderboard renderer. ``scores`` is the
+    filtered (enabled + in-scope) slice for the period — week,
+    month, or year. Returns ``None`` when no rows matched ``game``
+    so callers can emit their own "no scores" message."""
+    from .scheduler import _format_seconds
+    from .scoring import _NON_TIME_GAMES, assign_daily_points
+
+    groups: Dict[int, List[ScoreRow]] = {}
+    player_names: Dict[int, str] = {}
+    for s in scores:
+        if s.game != game:
+            continue
+        groups.setdefault(s.puzzle_no, []).append(s)
+        player_names[s.player_id] = s.player_name
+    if not groups:
+        return None
+
+    totals: Dict[int, float] = {}
+    submissions: Dict[int, int] = {}
+    time_total: Dict[int, int] = {}
+    for group_scores in groups.values():
+        for pid, pts in assign_daily_points(group_scores).items():
+            totals[pid] = totals.get(pid, 0.0) + pts
+        for s in group_scores:
+            submissions[s.player_id] = submissions.get(s.player_id, 0) + 1
+            if s.game not in _NON_TIME_GAMES:
+                time_total[s.player_id] = time_total.get(s.player_id, 0) + s.raw_score
+
+    ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+    is_time_game = game not in _NON_TIME_GAMES
+    lines = [title]
+    for i, (pid, pts) in enumerate(ranked, start=1):
+        subs = submissions.get(pid, 0)
+        if is_time_game:
+            stats = f"T: {_format_seconds(time_total.get(pid, 0))}, G:{subs}"
+        else:
+            stats = f"G:{subs}"
+        lines.append(
+            f"  {i}. {player_names[pid]}: "
+            f"{_fmt_pts(round(pts, 1))} pts ({stats})"
+        )
+    return "\n".join(lines)
+
+
 def _handle_leaderboard(
     repo: Repository,
     settings: Optional[Settings],
@@ -431,8 +478,7 @@ def _handle_leaderboard(
     """
     if settings is None:
         return "Leaderboard isn't available in this context."
-    from .scheduler import _weekly_leaderboard_lines, _format_seconds
-    from .scoring import _NON_TIME_GAMES, assign_daily_points
+    from .scheduler import _weekly_leaderboard_lines
 
     target_day = target_day or la_date(now)
     monday, sunday = week_bounds(target_day)
@@ -461,43 +507,12 @@ def _handle_leaderboard(
         )
         return "\n".join(lines)
 
-    # Per-game leaderboard — tally points + cumulative time per player.
-    groups: Dict[int, List[ScoreRow]] = {}
-    player_names: Dict[int, str] = {}
-    for s in filtered:
-        if s.game != game:
-            continue
-        groups.setdefault(s.puzzle_no, []).append(s)
-        player_names[s.player_id] = s.player_name
-
-    if not groups:
+    rendered = _render_per_game_leaderboard(
+        filtered, game, f"{GAME_DISPLAY[game]} — week so far ({header_date}):"
+    )
+    if rendered is None:
         return f"No {GAME_DISPLAY[game]} scores yet for week of {monday.strftime('%a %d %b %Y')}."
-
-    totals: Dict[int, float] = {}
-    submissions: Dict[int, int] = {}
-    time_total: Dict[int, int] = {}
-    for group_scores in groups.values():
-        for pid, pts in assign_daily_points(group_scores).items():
-            totals[pid] = totals.get(pid, 0.0) + pts
-        for s in group_scores:
-            submissions[s.player_id] = submissions.get(s.player_id, 0) + 1
-            if s.game not in _NON_TIME_GAMES:
-                time_total[s.player_id] = time_total.get(s.player_id, 0) + s.raw_score
-
-    ranked = sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
-    is_time_game = game not in _NON_TIME_GAMES
-    lines = [f"{GAME_DISPLAY[game]} — week so far ({header_date}):"]
-    for i, (pid, pts) in enumerate(ranked, start=1):
-        subs = submissions.get(pid, 0)
-        if is_time_game:
-            stats = f"T: {_format_seconds(time_total.get(pid, 0))}, G:{subs}"
-        else:
-            stats = f"G:{subs}"
-        lines.append(
-            f"  {i}. {player_names[pid]}: "
-            f"{_fmt_pts(round(pts, 1))} pts ({stats})"
-        )
-    return "\n".join(lines)
+    return rendered
 
 
 def _handle_times(
@@ -569,27 +584,29 @@ def _handle_period_leaderboard(
     now: datetime,
     *,
     period: str,
+    game: Optional[str] = None,
 ) -> str:
-    """Shared renderer for ``month`` and ``year`` commands.
+    """Shared renderer for ``month`` / ``year`` commands.
 
     ``period`` is ``"month"`` or ``"year"``. Aggregates every score
-    in the current LA month / year, filters to enabled games, and
-    renders with the shared leaderboard formatter so the format
-    matches the weekly board. Scope goes up to today only — future
-    days obviously have no scores, so the "to date" framing is
-    implicit.
+    in the current LA month / year up through today and renders the
+    full summary (leaderboard + game winners + prizes) when ``game``
+    is ``None``, or a per-game leaderboard when ``game`` is provided.
+
+    Scope goes up to today only — future days obviously have no
+    scores, so the "to date" framing is implicit.
     """
     if settings is None:
         return f"{period.title()}-to-date isn't available in this context."
-    from .scheduler import _weekly_leaderboard_lines
+    from .scheduler import period_summary
 
     today = la_date(now)
     if period == "month":
         start, _end = month_bounds(today)
-        title = f"Month so far — {today.strftime('%b %Y')}"
+        period_label = today.strftime("%b %Y")
     else:
         start, _end = year_bounds(today)
-        title = f"Year so far — {today.year}"
+        period_label = str(today.year)
 
     scores = repo.list_scores(date_from=start, date_to=today)
     filtered = [
@@ -597,9 +614,23 @@ def _handle_period_leaderboard(
         if s.game in settings.enabled_games and s.puzzle_date <= today
     ]
     if not filtered:
-        return f"No scores yet this {period}."
+        if game is None:
+            return f"No scores yet this {period}."
+        return f"No {GAME_DISPLAY[game]} scores yet this {period}."
 
-    lines = _weekly_leaderboard_lines(filtered, title=title)
+    if game is not None:
+        title = f"{GAME_DISPLAY[game]} — {period} so far ({period_label}):"
+        rendered = _render_per_game_leaderboard(filtered, game, title)
+        if rendered is None:
+            return f"No {GAME_DISPLAY[game]} scores yet this {period}."
+        return rendered
+
+    # Full summary: leaderboard + game winners + prizes.
+    lines = period_summary(
+        f"{period.title()} so far — {period_label}",
+        filtered,
+        settings.enabled_games,
+    )
     return "\n".join(lines)
 
 
@@ -1053,11 +1084,26 @@ def handle_inbound(
     # ``times`` — per-game cumulative time standings across time-based games.
     if lower in ("times", "game times", "time standings"):
         return _handle_times(repo, settings, now)
-    # ``month`` / ``year`` — month-to-date and year-to-date leaderboards.
+    # ``month`` / ``year`` — month-to-date and year-to-date summaries.
     if lower in ("month", "mtd", "month to date", "this month"):
         return _handle_period_leaderboard(repo, settings, now, period="month")
     if lower in ("year", "ytd", "year to date", "this year"):
         return _handle_period_leaderboard(repo, settings, now, period="year")
+    # ``month <game>`` / ``year <game>`` — per-game monthly / yearly leaderboard.
+    for period_key, period_aliases in (
+        ("month", ("month", "mtd")),
+        ("year", ("year", "ytd")),
+    ):
+        for game_key in GAMES:
+            display_lower = GAME_DISPLAY[game_key].lower()
+            if any(
+                lower == f"{alias} {name}"
+                for alias in period_aliases
+                for name in (game_key, display_lower)
+            ):
+                return _handle_period_leaderboard(
+                    repo, settings, now, period=period_key, game=game_key
+                )
     if lower in ("missing", "who", "ghosts"):
         return _handle_missing(repo, settings, now)
     if lower in ("games", "enabled"):
