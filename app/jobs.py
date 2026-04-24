@@ -433,67 +433,125 @@ def run_morning_nudge(
 
 
 # ---------------------------------------------------------------------------
-# 15-min final warning (cron)
+# Pre-reset escalating warnings (cron)
 # ---------------------------------------------------------------------------
 
 
-# Rotating rude templates for the last-call nag. Selection keys on
-# the LA date ordinal so every player hits the same flavour on the
-# same day but it rotates night-to-night. ``{name}`` / ``{missing}``
-# are format fields (missing = comma-separated game list).
-_FINAL_WARNING_TEMPLATES = (
-    "15 mins on the clock, {name}. Still haven't played: {missing}. "
-    "Don't be the one who fluffed the streak.",
-    "{name}. The day is about to flip. Missing: {missing}. "
-    "Move or be mocked in tomorrow's recap.",
-    "Last call, {name}. Games owed: {missing}. "
-    "Midnight doesn't wait and neither does your credibility.",
-    "{name}, you've got a quarter hour before LinkedIn eats these puzzles. "
-    "Outstanding: {missing}. Chop chop.",
-    "Tick tock {name}. Still MIA on: {missing}. "
-    "Your future self will thank you. Or roast you. Up to you.",
-    "{name}: 15 minutes to submit {missing}. "
-    "Or don't, and feature tomorrow in the hall of cowards.",
-)
+# Valid escalation stages, in order. Used for cron registration in
+# main.py and as the key into _PRE_RESET_TEMPLATES.
+PRE_RESET_STAGES: Tuple[str, ...] = ("2h", "1h", "30min", "5min")
 
 
-def _build_final_warning(
-    player_name: str, missing_games: List[str], today: date
+# Rotating templates per escalation stage. Tone climbs from a
+# friendly heads-up at 2h to all-caps panic at 5m. Same day-ordinal
+# rotation as the other nag jobs so every player sees the same
+# flavour on the same night, but it shuffles night-to-night.
+# ``{name}`` and ``{missing}`` are format fields (missing =
+# comma-separated game list).
+_PRE_RESET_TEMPLATES: dict = {
+    "2h": (
+        "Heads up {name} — 2 hours until LinkedIn flips the puzzles. "
+        "Still owed: {missing}. Plenty of time. Probably.",
+        "{name}, gentle nudge: 2 hours to reset. Outstanding: {missing}. "
+        "No pressure. Yet.",
+        "Two hours, {name}. {missing} still unplayed. "
+        "You've done harder things before lunch.",
+        "{name} — friendly ping. 2 hours until rollover. "
+        "Owed: {missing}. Knock 'em out before dinner gets cold.",
+    ),
+    "1h": (
+        "60 minutes, {name}. Outstanding: {missing}. "
+        "The leaderboard is watching. So am I.",
+        "{name} — one hour. {missing}. "
+        "Time to stop pretending you'll get to it later.",
+        "One hour to play {missing}, {name}. "
+        "Or be the first name on tomorrow's wall of shame. Your call.",
+        "{name}: 60 minutes left and still owe {missing}. "
+        "Whatever you're doing right now, the puzzles are more important. "
+        "Probably.",
+    ),
+    "30min": (
+        "Thirty minutes, {name}. Still mocking the streak: {missing}. "
+        "Get. In. There.",
+        "{name}, what are you DOING. Half an hour. Outstanding: {missing}. "
+        "The puzzles are RIGHT THERE.",
+        "30 mins, {name}. {missing} unplayed. "
+        "Embarrassing. For us. For you. For the bot.",
+        "{name} — half hour warning. Owed: {missing}. "
+        "Stop. Drop. Open LinkedIn. Solve. Repeat.",
+    ),
+    "5min": (
+        "FIVE MINUTES {name}. {missing}. "
+        "RUN. RUN NOW. WHY ARE YOU READING THIS. PLAY.",
+        "{name}. 5. Minutes. {missing}. "
+        "This is not a drill. This IS the drill. PLAY THEM.",
+        "EMERGENCY {name}: 5 minutes, {missing} unplayed. "
+        "Drop everything. Yes including dinner. "
+        "Yes including the baby. (Don't drop the baby.) PLAY.",
+        "{name} you absolute pillock — 5 minutes left. {missing}. "
+        "If midnight catches you with these undone you forfeit "
+        "all dignity, all rights, all my respect.",
+        "{name}: 300 seconds. {missing}. "
+        "GO GO GO GO GO. I will not be held responsible for "
+        "what tomorrow's recap says about you.",
+    ),
+}
+
+
+def _build_pre_reset_warning(
+    player_name: str,
+    missing_games: List[str],
+    today: date,
+    stage: str,
 ) -> str:
-    """Render the last-call DM body. Template choice rotates on the
+    """Render the per-stage nag body. Template choice rotates on the
     day's ordinal so the same player doesn't get the same zinger two
-    nights in a row."""
-    template = _FINAL_WARNING_TEMPLATES[
-        today.toordinal() % len(_FINAL_WARNING_TEMPLATES)
-    ]
+    nights in a row at the same stage."""
+    templates = _PRE_RESET_TEMPLATES[stage]
+    template = templates[today.toordinal() % len(templates)]
     return template.format(name=player_name, missing=", ".join(missing_games))
 
 
-def run_final_warning(
+def run_pre_reset_warning(
     repo: Repository,
     settings: Settings,
     *,
+    stage: str,
     now: Optional[datetime] = None,
 ) -> List[str]:
     """Cron entry point — DM each active player who hasn't completed
-    every enabled game, 15 minutes before the LA puzzle rollover.
+    every enabled game, with copy whose tone matches ``stage``.
 
-    Mirrors :func:`run_morning_nudge` in structure (same skip rules,
-    same "recent activity" window) but with rude copy fit for the
-    end-of-day crunch. Returns the ``whatsapp_id`` list that received
-    a nag — tested this way and useful for logging daily reach.
+    Wired up to four crons in :func:`app.main._setup_scheduler`,
+    firing 2h / 1h / 30m / 5m before the LA midnight rollover. Each
+    invocation re-checks who's still outstanding so a player who
+    finishes between stages stops getting pinged.
+
+    Same skip rules as :func:`run_morning_nudge`: opted-out players,
+    players who've already finished, and days with no enabled games
+    all bail silently. Returns the ``whatsapp_id`` list that received
+    the nag — useful for tests and reach logging.
     """
+    if stage not in _PRE_RESET_TEMPLATES:
+        raise ValueError(f"unknown pre-reset stage: {stage!r}")
+
     now = now or datetime.now(settings.tz)
     today = la_date(now)
     enabled = settings.enabled_games
     if not enabled:
-        logger.info("Final warning: no enabled games configured, skipping")
+        logger.info(
+            "Pre-reset warning [%s]: no enabled games configured, skipping",
+            stage,
+        )
         return []
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
     active_players = repo.list_players_active_since(since)
     if not active_players:
-        logger.info("Final warning: no recently active players, skipping")
+        logger.info(
+            "Pre-reset warning [%s]: no recently active players, skipping",
+            stage,
+        )
         return []
 
     today_scores = repo.list_scores(date_from=today, date_to=today)
@@ -507,18 +565,82 @@ def run_final_warning(
         if not player.notifications_enabled:
             continue
         played = games_by_player.get(player.id, set())
-        missing_ids = [g for g in GAME_DISPLAY_ORDER if g in enabled and g not in played]
+        missing_ids = [
+            g for g in GAME_DISPLAY_ORDER if g in enabled and g not in played
+        ]
         if not missing_ids:
             continue  # player is done — no warning needed
         missing_labels = [GAME_DISPLAY[g] for g in missing_ids]
-        body = _build_final_warning(player.display_name, missing_labels, today)
+        body = _build_pre_reset_warning(
+            player.display_name, missing_labels, today, stage
+        )
         if send_dm(settings, player.whatsapp_id, body):
             warned.append(player.whatsapp_id)
 
     logger.info(
-        "Final warning sent to %d/%d active players (LA day %s)",
+        "Pre-reset warning [%s] sent to %d/%d active players (LA day %s)",
+        stage,
         len(warned),
         len(active_players),
         today,
     )
     return warned
+
+
+# ---------------------------------------------------------------------------
+# New-games announcement (cron, 00:01 LA)
+# ---------------------------------------------------------------------------
+
+
+# Group-blast copy that fires the moment new puzzles are live. No
+# per-player check — purely a "go play" hype message. Ordinal rotation
+# keeps it from going stale.
+_NEW_GAMES_TEMPLATES: Tuple[str, ...] = (
+    "New games are LIVE. Today's LinkedIn puzzles just dropped. "
+    "Get in it. First share posted gets eternal glory (and zero prizes).",
+    "Fresh puzzles, fresh chance to embarrass everyone. "
+    "Today's games are out — get in it.",
+    "The board is reset. Yesterday is forgotten. New puzzles are LIVE. "
+    "First DM with a Queens share is the leader. Get in it.",
+    "New games available. Stop scrolling. Open LinkedIn. Crush them. "
+    "Get in it.",
+    "Day flipped. Puzzles flipped. Leaderboard flipped. "
+    "New games are out — get in it before someone else does.",
+)
+
+
+def run_new_games_announcement(
+    repo: Repository,
+    settings: Settings,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """Cron entry point — fire the "new games are live, get in it"
+    blast right after the daily rollover.
+
+    Group post via :func:`send_recap` (same fan-out used by the daily
+    recap), with the recently-active roster as the DM fallback so
+    nobody's missed when the group post fails. Bails silently when
+    no one's been active in the last week.
+
+    Returns the body that was sent, or ``None`` if no audience.
+    """
+    now = now or datetime.now(settings.tz)
+    today = la_date(now)
+
+    body = _NEW_GAMES_TEMPLATES[
+        today.toordinal() % len(_NEW_GAMES_TEMPLATES)
+    ]
+
+    since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
+    dm_targets = repo.list_active_whatsapp_ids(date_from=since, date_to=today)
+    if not dm_targets:
+        logger.info(
+            "New games announcement: no active players, skipping (LA day %s)",
+            today,
+        )
+        return None
+
+    send_recap(settings, body, dm_targets=dm_targets)
+    logger.info("New games announcement sent (LA day %s)", today)
+    return body

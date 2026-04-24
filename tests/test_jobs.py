@@ -19,12 +19,14 @@ from app.cli import _seed_demo
 from app.config import Settings
 from app.db import InMemoryRepository
 from app.jobs import (
+    PRE_RESET_STAGES,
     maybe_fire_early_recap,
     render_daily,
     render_wrap,
     run_daily_recap,
-    run_final_warning,
     run_morning_nudge,
+    run_new_games_announcement,
+    run_pre_reset_warning,
     send_champion_loser_dms,
 )
 
@@ -386,46 +388,52 @@ class TestMorningNudge:
 
 
 # ---------------------------------------------------------------------------
-# run_final_warning — 15 minutes before midnight LA
+# run_pre_reset_warning — escalating nags at 2h / 1h / 30min / 5min before
+# the LA midnight rollover
 # ---------------------------------------------------------------------------
 
 
-class TestFinalWarning:
-    """Cron at 23:45 LA. Mirrors morning nudge but with rude copy."""
+class TestPreResetWarning:
+    """Four crons at 22:00 / 23:00 / 23:30 / 23:55 LA. Same skip rules
+    as the morning nudge; tone climbs from heads-up to all-caps panic
+    as ``stage`` advances."""
 
+    @pytest.mark.parametrize("stage", PRE_RESET_STAGES)
     @patch("app.jobs.send_dm")
-    def test_no_active_players_does_nothing(self, mock_dm):
+    def test_no_active_players_does_nothing(self, mock_dm, stage):
         repo = InMemoryRepository()
         settings = _make_settings({"queens", "tango"})
-        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
-        warned = run_final_warning(repo, settings, now=now)
+        now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
+        warned = run_pre_reset_warning(repo, settings, stage=stage, now=now)
         assert warned == []
         mock_dm.assert_not_called()
 
+    @pytest.mark.parametrize("stage", PRE_RESET_STAGES)
     @patch("app.jobs.send_dm")
-    def test_skips_player_already_done(self, mock_dm):
+    def test_skips_player_already_done(self, mock_dm, stage):
         from app.puzzles import la_date
         repo = InMemoryRepository()
-        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
         today_la = la_date(now)
         _seed(repo, 1, "Alice", today_la, ["queens", "tango"])
         settings = _make_settings({"queens", "tango"})
-        warned = run_final_warning(repo, settings, now=now)
+        warned = run_pre_reset_warning(repo, settings, stage=stage, now=now)
         assert warned == []
         mock_dm.assert_not_called()
 
+    @pytest.mark.parametrize("stage", PRE_RESET_STAGES)
     @patch("app.jobs.send_dm")
-    def test_warns_player_with_outstanding_games(self, mock_dm):
+    def test_warns_player_with_outstanding_games(self, mock_dm, stage):
         from app.puzzles import la_date
         mock_dm.return_value = True
         repo = InMemoryRepository()
-        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
         today_la = la_date(now)
         prev_la = today_la - timedelta(days=1)
         # Bob is active (played yesterday) but hasn't played today.
         _seed(repo, 1, "Bob", prev_la, ["queens"])
         settings = _make_settings({"queens", "tango"})
-        warned = run_final_warning(repo, settings, now=now)
+        warned = run_pre_reset_warning(repo, settings, stage=stage, now=now)
         assert warned == ["whatsapp:+61400000001"]
         body = mock_dm.call_args[0][2]
         assert "Bob" in body
@@ -433,11 +441,12 @@ class TestFinalWarning:
         assert "Queens" in body
         assert "Tango" in body
 
+    @pytest.mark.parametrize("stage", PRE_RESET_STAGES)
     @patch("app.jobs.send_dm")
-    def test_skips_opted_out_players(self, mock_dm):
+    def test_skips_opted_out_players(self, mock_dm, stage):
         from app.puzzles import la_date
         repo = InMemoryRepository()
-        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
         prev_la = la_date(now) - timedelta(days=1)
         bob = repo.get_or_create_player("whatsapp:+61400000001", "Bob")
         repo.insert_score(
@@ -446,25 +455,125 @@ class TestFinalWarning:
         )
         repo.set_notifications_enabled(bob.id, False)
         settings = _make_settings({"queens", "tango"})
-        warned = run_final_warning(repo, settings, now=now)
+        warned = run_pre_reset_warning(repo, settings, stage=stage, now=now)
         assert warned == []
         mock_dm.assert_not_called()
 
+    @pytest.mark.parametrize("stage", PRE_RESET_STAGES)
     @patch("app.jobs.send_dm")
-    def test_lists_only_missing_games(self, mock_dm):
+    def test_lists_only_missing_games(self, mock_dm, stage):
         from app.puzzles import la_date
         mock_dm.return_value = True
         repo = InMemoryRepository()
-        now = datetime(2026, 4, 14, 23, 45, tzinfo=LA)
+        now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
         today_la = la_date(now)
         _seed(repo, 1, "Charlie", today_la, ["queens"])  # tango still owed
         settings = _make_settings({"queens", "tango"})
-        run_final_warning(repo, settings, now=now)
+        run_pre_reset_warning(repo, settings, stage=stage, now=now)
         body = mock_dm.call_args[0][2]
         # Message should name the owed game (Tango) but not the
         # already-completed one (Queens).
         assert "Tango" in body
         assert "Queens" not in body
+
+    def test_unknown_stage_raises(self):
+        repo = InMemoryRepository()
+        settings = _make_settings({"queens"})
+        with pytest.raises(ValueError):
+            run_pre_reset_warning(repo, settings, stage="bogus")
+
+    @patch("app.jobs.send_dm")
+    def test_each_stage_picks_distinct_copy(self, mock_dm):
+        """Sanity: at the same instant, the four stages pull from
+        their own template pools so a player at 5min gets harsher copy
+        than at 2h. Decoupled from exact wording — checks the bodies
+        differ across stages."""
+        from app.puzzles import la_date
+        mock_dm.return_value = True
+        now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
+        bodies: dict = {}
+        for stage in PRE_RESET_STAGES:
+            mock_dm.reset_mock()
+            repo = InMemoryRepository()
+            today_la = la_date(now)
+            _seed(repo, 1, "Bob", today_la - timedelta(days=1), ["queens"])
+            settings = _make_settings({"queens", "tango"})
+            run_pre_reset_warning(repo, settings, stage=stage, now=now)
+            bodies[stage] = mock_dm.call_args[0][2]
+        # All four bodies must be distinct — no accidental sharing of
+        # the template tuple between stages.
+        assert len(set(bodies.values())) == len(PRE_RESET_STAGES)
+
+
+# ---------------------------------------------------------------------------
+# run_new_games_announcement — group blast at 00:01 LA
+# ---------------------------------------------------------------------------
+
+
+class TestNewGamesAnnouncement:
+    """Cron at 00:01 LA. Group-broadcasts the "new games are live, get
+    in it" hype message right after the daily recap fires. Doesn't
+    care whether the recap was sent — purely a hype follow-up."""
+
+    @patch("app.jobs.send_recap")
+    def test_no_active_players_does_nothing(self, mock_recap):
+        repo = InMemoryRepository()
+        settings = _make_settings({"queens", "tango"})
+        now = datetime(2026, 4, 15, 0, 1, tzinfo=LA)
+        body = run_new_games_announcement(repo, settings, now=now)
+        assert body is None
+        mock_recap.assert_not_called()
+
+    @patch("app.jobs.send_recap")
+    def test_blasts_group_when_players_active(self, mock_recap):
+        from app.puzzles import la_date
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 15, 0, 1, tzinfo=LA)
+        today_la = la_date(now)
+        _seed(repo, 1, "Bob", today_la - timedelta(days=1), ["queens"])
+        settings = _make_settings({"queens", "tango"})
+        body = run_new_games_announcement(repo, settings, now=now)
+        assert body is not None
+        # Core hook the user asked for must be in the copy.
+        assert "get in it" in body.lower()
+        mock_recap.assert_called_once()
+        # send_recap signature: (settings, body, *, dm_targets=...)
+        call_args = mock_recap.call_args
+        assert call_args[0][1] == body
+        assert call_args[1]["dm_targets"] == ["whatsapp:+61400000001"]
+
+    @patch("app.jobs.send_recap")
+    def test_fires_even_when_everyone_is_done(self, mock_recap):
+        """Unlike the nag jobs, the new-games hype fires regardless
+        of completion state — it announces the new puzzle drop, not
+        the old day's outstanding work."""
+        from app.puzzles import la_date
+        repo = InMemoryRepository()
+        now = datetime(2026, 4, 15, 0, 1, tzinfo=LA)
+        today_la = la_date(now)
+        _seed(repo, 1, "Alice", today_la, ["queens", "tango"])
+        settings = _make_settings({"queens", "tango"})
+        body = run_new_games_announcement(repo, settings, now=now)
+        assert body is not None
+        mock_recap.assert_called_once()
+
+    @patch("app.jobs.send_recap")
+    def test_copy_rotates_day_to_day(self, mock_recap):
+        """Two consecutive LA days should hit different templates so
+        the group doesn't get the exact same blast every morning."""
+        from app.puzzles import la_date
+        repo = InMemoryRepository()
+        settings = _make_settings({"queens"})
+        # Seed two players on different days so each LA day has
+        # someone in the active window.
+        now1 = datetime(2026, 4, 15, 0, 1, tzinfo=LA)
+        now2 = datetime(2026, 4, 16, 0, 1, tzinfo=LA)
+        _seed(repo, 1, "Alice", la_date(now1) - timedelta(days=1), ["queens"])
+        _seed(repo, 2, "Bob", la_date(now2) - timedelta(days=1), ["queens"])
+        body1 = run_new_games_announcement(repo, settings, now=now1)
+        body2 = run_new_games_announcement(repo, settings, now=now2)
+        assert body1 is not None and body2 is not None
+        assert body1 != body2
 
 
 # ---------------------------------------------------------------------------

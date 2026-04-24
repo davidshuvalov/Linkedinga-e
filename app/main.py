@@ -113,7 +113,13 @@ def _setup_scheduler() -> None:
     from apscheduler.schedulers.background import BackgroundScheduler
     from apscheduler.triggers.cron import CronTrigger
 
-    from .jobs import run_daily_recap, run_final_warning, run_morning_nudge
+    from .jobs import (
+        PRE_RESET_STAGES,
+        run_daily_recap,
+        run_morning_nudge,
+        run_new_games_announcement,
+        run_pre_reset_warning,
+    )
 
     settings = load_settings()
     recap_tz = "America/Los_Angeles"
@@ -127,8 +133,26 @@ def _setup_scheduler() -> None:
     def _morning():
         run_morning_nudge(get_repository(), settings)
 
-    def _final_warning():
-        run_final_warning(get_repository(), settings)
+    def _new_games():
+        run_new_games_announcement(get_repository(), settings)
+
+    # Each stage gets its own closure so APScheduler can hold a
+    # distinct callable per cron job. A loop with late-binding
+    # would have every job firing the last stage instead.
+    def _make_warning(stage: str):
+        def _warning():
+            run_pre_reset_warning(get_repository(), settings, stage=stage)
+        return _warning
+
+    # Stage → minutes-before-LA-midnight. Drives the four escalating
+    # nag crons; tone climbs with each one (see _PRE_RESET_TEMPLATES).
+    pre_reset_schedule = {
+        "2h":    (22, 0),
+        "1h":    (23, 0),
+        "30min": (23, 30),
+        "5min":  (23, 55),
+    }
+    assert set(pre_reset_schedule) == set(PRE_RESET_STAGES)
 
     scheduler.add_job(
         _daily,
@@ -142,22 +166,35 @@ def _setup_scheduler() -> None:
         id="morning_nudge",
         replace_existing=True,
     )
+    for stage, (hour, minute) in pre_reset_schedule.items():
+        scheduler.add_job(
+            _make_warning(stage),
+            CronTrigger(hour=hour, minute=minute, timezone=recap_tz),
+            id=f"pre_reset_warning_{stage}",
+            replace_existing=True,
+        )
     scheduler.add_job(
-        _final_warning,
-        # 15 minutes before the LA midnight rollover — the last
-        # realistic moment to nag someone into finishing.
-        CronTrigger(hour=23, minute=45, timezone=recap_tz),
-        id="final_warning",
+        _new_games,
+        # One minute after the daily recap so the recap lands first
+        # and this fires as the "and now go play" hype follow-up.
+        CronTrigger(hour=0, minute=1, timezone=recap_tz),
+        id="new_games_announcement",
         replace_existing=True,
     )
 
     scheduler.start()
     logger.info(
         "Scheduler started: daily_recap at 00:00 %s, "
+        "new_games_announcement at 00:01 %s, "
         "morning_nudge at 08:30 %s, "
-        "final_warning at 23:45 %s",
+        "pre_reset_warning at %s %s",
+        recap_tz,
         recap_tz,
         nudge_tz,
+        ", ".join(
+            f"{h:02d}:{m:02d} ({stage})"
+            for stage, (h, m) in pre_reset_schedule.items()
+        ),
         recap_tz,
     )
     return scheduler
