@@ -312,6 +312,249 @@ class TestLeaderboardCommand:
         # "leaderboard widgets" isn't a known command; treated as chatter.
         assert "didn't understand" in reply.lower()
 
+    def test_leaderboard_with_iso_date(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+        today = la_date(NOW)
+        two_ago = today - timedelta(days=2)
+        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=712,
+            puzzle_date=two_ago, raw_score=10, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001",
+            body=f"leaderboard {two_ago.isoformat()}",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Week so far" in reply
+        assert "1. Alice" in reply
+
+
+class TestPeriodLeaderboards:
+    """``month`` / ``mtd`` and ``year`` / ``ytd`` — month-to-date and
+    year-to-date leaderboards. Aggregate across the period up through
+    the current LA day, rendered with the weekly formatter so the
+    shape matches the other leaderboards."""
+
+    def test_month_to_date_aggregates_month(self, repo):
+        from datetime import date as _date, timedelta
+        # NOW is Tue Apr 14 2026 Sydney (→ LA day 14 Apr). Seed
+        # scores earlier in April and one in March so we can see
+        # the filter in action.
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob   = repo.get_or_create_player("whatsapp:+2", "Bob")
+        # March (prior month) — should NOT appear
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=700,
+                          puzzle_date=_date(2026, 3, 30), raw_score=10, share_text="x")
+        # April
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=710,
+                          puzzle_date=_date(2026, 4, 1), raw_score=20, share_text="x")
+        repo.insert_score(player_id=bob.id,   game="queens", puzzle_no=710,
+                          puzzle_date=_date(2026, 4, 1), raw_score=40, share_text="x")
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=714,
+                          puzzle_date=_date(2026, 4, 14), raw_score=30, share_text="x")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="mtd",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Month so far" in reply
+        assert "Apr 2026" in reply
+        assert "1. Alice" in reply
+        assert "2. Bob" in reply
+        # Alice: 2 April rows (Apr 1 + Apr 14); her March row is excluded.
+        # Bob: 1 April row.
+        assert "G:2" in reply
+        assert "G:1" in reply
+
+    def test_year_to_date_aggregates_year(self, repo):
+        from datetime import date as _date
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        # Prior year — should NOT appear
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=600,
+                          puzzle_date=_date(2025, 12, 31), raw_score=10, share_text="x")
+        # Current year
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=601,
+                          puzzle_date=_date(2026, 1, 2), raw_score=20, share_text="x")
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=714,
+                          puzzle_date=_date(2026, 4, 14), raw_score=30, share_text="x")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="ytd",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Year so far" in reply
+        assert "2026" in reply
+        # Two 2026 rows; 2025 row should be filtered out.
+        assert "G:2" in reply
+
+    def test_month_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="month",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No scores yet" in reply
+
+    def test_month_to_date_aliases(self, repo):
+        # "month", "mtd", "month to date", "this month" all dispatch
+        # to the same handler.
+        from datetime import date as _date
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=1, game="queens", puzzle_no=714,
+            puzzle_date=_date(2026, 4, 14), raw_score=30, share_text="x",
+        )
+        for keyword in ("month", "mtd", "month to date", "this month"):
+            reply = handle_inbound(
+                repo, from_="whatsapp:+1", body=keyword,
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+            assert "Month so far" in reply, f"keyword={keyword!r} failed"
+
+    def test_month_includes_prizes_and_game_winners(self, repo):
+        # Enough submissions across multiple days to trigger the
+        # Best average and Most firsts / Most lasts prizes.
+        from datetime import date as _date
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        for i, d in enumerate((
+            _date(2026, 4, 1), _date(2026, 4, 5), _date(2026, 4, 10),
+            _date(2026, 4, 12), _date(2026, 4, 14),
+        )):
+            repo.insert_score(
+                player_id=alice.id, game="queens", puzzle_no=700 + i,
+                puzzle_date=d, raw_score=20, share_text="x",
+            )
+            repo.insert_score(
+                player_id=bob.id, game="queens", puzzle_no=700 + i,
+                puzzle_date=d, raw_score=40, share_text="x",
+            )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="month",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        # Full summary shape: leaderboard + game winners + prizes.
+        assert "Month so far" in reply
+        assert "Game winners:" in reply
+        assert "Queens:" in reply
+        assert "Prizes:" in reply
+        # Alice swept so she should lead Most firsts.
+        assert "Most firsts: Alice" in reply
+
+    def test_month_with_game_filter(self, repo):
+        from datetime import date as _date
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=710,
+            puzzle_date=_date(2026, 4, 1), raw_score=20, share_text="x",
+        )
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=710,
+            puzzle_date=_date(2026, 4, 1), raw_score=40, share_text="x",
+        )
+        # Tango submission should NOT appear in "month queens" output.
+        repo.insert_score(
+            player_id=alice.id, game="tango", puzzle_no=554,
+            puzzle_date=_date(2026, 4, 14), raw_score=25, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="month queens",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Queens — month so far" in reply
+        assert "Alice" in reply
+        assert "Bob" in reply
+        # No Tango row or Prizes block — game-filtered view.
+        assert "Tango" not in reply
+        assert "Prizes:" not in reply
+        assert "Game winners:" not in reply
+
+    def test_year_with_game_filter(self, repo):
+        from datetime import date as _date
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=600,
+            puzzle_date=_date(2026, 1, 10), raw_score=20, share_text="x",
+        )
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=_date(2026, 4, 14), raw_score=25, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="year queens",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Queens — year so far" in reply
+        assert "Alice" in reply
+        # Two rows in the year; cumulative time = 45s.
+        assert "T: 0:45" in reply
+
+
+class TestTimesCommand:
+    def test_times_lists_per_game_ranking_by_time(self, repo):
+        from app.puzzles import la_date
+        today = la_date(NOW)
+        alice = repo.get_or_create_player("whatsapp:+6140000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+6140000002", "Bob")
+        # Queens: Alice 30s, Bob 40s
+        repo.insert_score(player_id=alice.id, game="queens", puzzle_no=714,
+                          puzzle_date=today, raw_score=30, share_text="x")
+        repo.insert_score(player_id=bob.id,   game="queens", puzzle_no=714,
+                          puzzle_date=today, raw_score=40, share_text="x")
+        # Tango: Bob 20s, Alice 25s
+        repo.insert_score(player_id=alice.id, game="tango", puzzle_no=554,
+                          puzzle_date=today, raw_score=25, share_text="x")
+        repo.insert_score(player_id=bob.id,   game="tango", puzzle_no=554,
+                          puzzle_date=today, raw_score=20, share_text="x")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+6140000001", body="times",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Game times" in reply
+        assert "Queens:" in reply
+        assert "Tango:" in reply
+        # Queens ascending: Alice first (0:30), Bob second (0:40).
+        # Tango ascending: Bob first (0:20), Alice second (0:25).
+        queens_block = reply.split("Queens:")[1].split("Tango:")[0]
+        tango_block = reply.split("Tango:")[1]
+        assert "1. Alice" in queens_block
+        assert "2. Bob" in queens_block
+        assert "1. Bob" in tango_block
+        assert "2. Alice" in tango_block
+
+    def test_times_skips_pinpoint(self, repo):
+        from app.puzzles import la_date
+        today = la_date(NOW)
+        repo.get_or_create_player("whatsapp:+6140000001", "Alice")
+        repo.insert_score(
+            player_id=1, game="pinpoint", puzzle_no=714,
+            puzzle_date=today, raw_score=3, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+6140000001", body="times",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        # Pinpoint stores guess counts, not seconds; times command skips it.
+        assert "Pinpoint" not in reply
+
+    def test_times_with_no_scores(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+6140000001", body="times",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No scores" in reply
+
 
 class TestMissingCommand:
     def test_missing_when_full_turnout(self, repo):
@@ -1012,9 +1255,11 @@ class TestWrapCommand:
 
 
 class TestHistoricalRecapCommands:
-    """``yesterday`` / ``N days ago`` / ``recap YYYY-MM-DD`` — pull
-    prior-day recaps so a midweek user can check what happened without
-    scrolling back through old DMs."""
+    """Date-scoped queries. Bare date keywords (``yesterday``, ``N days
+    ago``) return just the leaderboard as of that day — the common ask
+    is "what were the standings?". ``recap yesterday`` / ``recap N days
+    ago`` / ``recap YYYY-MM-DD`` return the full daily recap for
+    someone who actually wants the per-game breakdown."""
 
     def _seed_day(self, repo, day, player_id, name, raw, puzzle_no=714):
         repo.get_or_create_player(f"whatsapp:+6140000000{player_id}", name)
@@ -1027,7 +1272,7 @@ class TestHistoricalRecapCommands:
             share_text=f"Queens #{puzzle_no} seeded",
         )
 
-    def test_yesterday_pulls_previous_la_day(self, repo):
+    def test_yesterday_returns_leaderboard_as_of_yesterday(self, repo):
         from datetime import timedelta
         from app.puzzles import la_date
 
@@ -1044,11 +1289,15 @@ class TestHistoricalRecapCommands:
             settings=_settings_with_default_games(),
         )
         assert reply is not None
-        assert "Daily recap" in reply
+        # Leaderboard header, not a recap header.
+        assert "Week so far" in reply
         assert yesterday.strftime("%a %d %b") in reply
-        assert "Queens #713" in reply
+        assert "1. Alice" in reply
+        # The per-game "Queens #713" section only shows up in the full
+        # recap, not the leaderboard-only response.
+        assert "Queens #713" not in reply
 
-    def test_n_days_ago_pulls_that_day(self, repo):
+    def test_n_days_ago_returns_leaderboard_for_that_day(self, repo):
         from datetime import timedelta
         from app.puzzles import la_date
 
@@ -1066,7 +1315,71 @@ class TestHistoricalRecapCommands:
         )
         assert reply is not None
         assert three_ago.strftime("%a %d %b") in reply
+        assert "1. Alice" in reply
+        # Leaderboard-only — no per-game block.
+        assert "Queens #711" not in reply
+
+    def test_recap_yesterday_returns_full_recap(self, repo):
+        # Explicit ``recap yesterday`` still yields the per-game
+        # breakdown — different command, different intent.
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        self._seed_day(repo, yesterday, 1, "Alice", 10, puzzle_no=713)
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="recap yesterday",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Daily recap" in reply
+        assert "Queens #713" in reply
+
+    def test_recap_n_days_ago_returns_full_recap(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        three_ago = today - timedelta(days=3)
+        self._seed_day(repo, three_ago, 1, "Alice", 15, puzzle_no=711)
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="recap 3 days ago",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Daily recap" in reply
         assert "Queens #711" in reply
+
+    def test_leaderboard_yesterday_alias_works(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        self._seed_day(repo, yesterday, 1, "Alice", 10, puzzle_no=713)
+
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="leaderboard yesterday",
+            profile_name="Alice",
+            now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Week so far" in reply
+        assert "1. Alice" in reply
 
     def test_n_days_ago_out_of_range_replies_with_hint(self, repo):
         reply = handle_inbound(

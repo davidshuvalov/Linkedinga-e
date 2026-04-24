@@ -73,3 +73,36 @@ def week_bounds(day: date) -> Tuple[date, date]:
     monday = day - timedelta(days=day.weekday())
     sunday = monday + timedelta(days=6)
     return monday, sunday
+
+
+def month_bounds(day: date) -> Tuple[date, date]:
+    """Return ``(first_of_month, last_of_month)`` for ``day``.
+
+    ``last_of_month`` is resolved by stepping forward to the 1st of
+    the next month and back one day — handles variable month lengths
+    and February leap years without extra logic.
+    """
+    first = day.replace(day=1)
+    if first.month == 12:
+        next_first = first.replace(year=first.year + 1, month=1)
+    else:
+        next_first = first.replace(month=first.month + 1)
+    last = next_first - timedelta(days=1)
+    return first, last
+
+
+def year_bounds(day: date) -> Tuple[date, date]:
+    """Return ``(Jan 1, Dec 31)`` of the year containing ``day``."""
+    return date(day.year, 1, 1), date(day.year, 12, 31)
+
+
+def is_last_day_of_month(day: date) -> bool:
+    """True on the 28th/29th/30th/31st when the next day rolls to the
+    first. Used to decide whether to append the month-totals block to
+    the daily recap."""
+    return (day + timedelta(days=1)).day == 1
+
+
+def is_last_day_of_year(day: date) -> bool:
+    """True on Dec 31."""
+    return day.month == 12 and day.day == 31
