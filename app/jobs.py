@@ -215,6 +215,16 @@ _CHAMPION_TEMPLATES = (
     "Wear it like you mean it.",
     "{name} took week {iso} like it was personal. {points}. "
     "Maybe it was. Who knows. Champion regardless.",
+    "{name}: week {iso}, {points}, undisputed. "
+    "We came, we saw, you conquered. Mostly the last one.",
+    "Big news, {name}: you won. The whole week. {points}. "
+    "Everybody else? Spectators. You? CHAMPION.",
+    "{name} — week {iso} closes with you on top. {points}. "
+    "Bask. You earned it. Briefly.",
+    "Officially the best of week {iso}: {name}. {points}. "
+    "Print this DM. Frame this DM. Show the children.",
+    "{name}, look at you. CHAMPION of week {iso} with {points}. "
+    "Don't peak now. Or do. Either's fine.",
 )
 _LOSER_TEMPLATES = (
     "{name} — wooden spoon this week with {points}. "
@@ -238,6 +248,16 @@ _LOSER_TEMPLATES = (
     "Tactical retreat. Regroup. Avenge.",
     "{name}, you ended week {iso} with {points}. "
     "On the bright side: you can only improve. On the other bright side: easily.",
+    "Drum roll for last place, week {iso}: {name}, {points}. "
+    "We did the drum roll. It was sad. Get 'em next week.",
+    "{name} — wooden spoon awarded with {points}. "
+    "Comes engraved with the words \"better luck Monday.\"",
+    "{name} brought up the rear of week {iso} with {points}. "
+    "Somebody's gotta hold the floor up. Today: you.",
+    "{name}, the leaderboard is shaped a bit like a hill, and you are very much the bottom of it. "
+    "{points}. Climb back up.",
+    "{name} closed week {iso} on {points}. Last. "
+    "Tomorrow's a new week. Tomorrow's also Monday. Brace.",
 )
 
 
@@ -386,6 +406,14 @@ _MORNING_OPENERS_NO_PROGRESS = (
     "Morning {name} — the games are out there, mocking your absence.",
     "{name}, day's on. Puzzles untouched. Reputation: pending.",
     "Rise and grind, {name}. The puzzles aren't grinding themselves.",
+    "Morning {name}! The puzzles are sitting there, untouched, judging.",
+    "{name}, gentle reminder: the day is happening WITH or without you. With is better.",
+    "Hello {name}. The leaderboard has a {name}-shaped gap in it. Fill it.",
+    "Bright and early, {name}. Bright and unplayed.",
+    "{name} — the early-bird recap window is open. Be the early bird.",
+    "Morning {name}. Five tiny puzzles stand between you and bragging rights.",
+    "{name}, today's slate: blank. Today's potential: high. Today's actual: tbd.",
+    "Up and at 'em, {name}. The puzzles are at 'em already.",
 )
 
 _MORNING_OPENERS_PARTIAL = (
@@ -399,6 +427,13 @@ _MORNING_OPENERS_PARTIAL = (
     "Morning {name}. On the board with: {played}.",
     "{name} — the early bird, etc. So far: {played}.",
     "{name}, look at you go. Done: {played}.",
+    "Cracking start, {name}. Bagged: {played}.",
+    "{name}, momentum spotted. Cleared: {played}.",
+    "Morning {name}. Already in the books: {played}. Don't stop now.",
+    "{name} — partial credit on the board: {played}. Finish the homework.",
+    "Halfway clever, {name}. Finished: {played}.",
+    "{name}, you didn't even need the nudge for: {played}. Showoff.",
+    "Morning {name} — {played} done, leaderboard already noticing.",
 )
 
 _MORNING_SIGN_OFFS = (
@@ -409,6 +444,12 @@ _MORNING_SIGN_OFFS = (
     "Shares to me when complete. Easy.",
     "Drop the shares in here as you go.",
     "DM me your shares when each one's done — that's how you make it onto the board.",
+    "Each share -> me. Standard procedure.",
+    "Forward shares my way as you finish. I'll do the maths.",
+    "Done a puzzle? Share it here. Repeat as needed.",
+    "Shares incoming -> here. The leaderboard will reward your effort. Modestly.",
+    "Send shares this way as you go. Don't make me chase them down.",
+    "Share each one back here. Quietly. Loudly. Smugly. Up to you.",
 )
 
 
@@ -557,6 +598,14 @@ _PRE_RESET_TEMPLATES: dict = {
         "You've still got time to look smart on the leaderboard.",
         "{name} — 2h until midnight (LA). {missing} on the to-do list. "
         "Lots of runway. Fly the plane.",
+        "{name}, 2 hours and {missing} unplayed. "
+        "Plenty of time to do it. Plenty of time to procrastinate. Choose.",
+        "T-minus 120 minutes, {name}. {missing} on standby. "
+        "Tap the puzzle. Solve the puzzle. Repeat.",
+        "{name} — early warning system: 2h. {missing} pending. "
+        "All systems go. Pilot is you. Plane is the puzzles. Move.",
+        "{name}, 2-hour heads-up. {missing}. "
+        "You can do this in 15 minutes flat. The other 1h45 is yours.",
     ),
     "1h": (
         "60 minutes, {name}. Outstanding: {missing}. "
@@ -574,6 +623,16 @@ _PRE_RESET_TEMPLATES: dict = {
         "The window is closing. The puzzles are not. Yet.",
         "{name} — 60 to go, {missing} on the slate. "
         "You said \"in a sec\" four hours ago. The sec is now.",
+        "Single hour left, {name}. {missing}. "
+        "We can do this the easy way (now) or the embarrassing way (in tomorrow's recap).",
+        "{name}: 60. Minutes. {missing} undone. "
+        "The puzzles aren't long. The night is. Maths it.",
+        "{name} — last hour. {missing}. "
+        "I've seen you do harder things during meetings. Pretend this is a meeting.",
+        "Hour to go, {name}. {missing}. "
+        "Quick reminder: glory does not wait. Glory specifically does not wait.",
+        "{name}: 1h, {missing}. "
+        "This is your sign. This is THE sign. Go.",
     ),
     "30min": (
         "Thirty minutes, {name}. Still mocking the streak: {missing}. "
@@ -592,6 +651,14 @@ _PRE_RESET_TEMPLATES: dict = {
         "This is the part of the movie where the hero finally does the thing.",
         "Thirty. Minutes. {name}. {missing}. "
         "The clock is doing its job. Are you?",
+        "{name}, half hour. {missing}. "
+        "I'm not begging. I'm pre-begging. Save us both the begging.",
+        "30, {name}. {missing}. "
+        "If you're driving: pull over. If you're cooking: turn off the stove. If you're scrolling: STOP.",
+        "{name} — 30. {missing}. "
+        "Pretend midnight is 11:30. Solve them. Surprise yourself.",
+        "Half hour, {name}. {missing}. "
+        "The window for dignified completion is narrowing.",
     ),
     "5min": (
         "FIVE MINUTES {name}. {missing}. "
@@ -613,6 +680,15 @@ _PRE_RESET_TEMPLATES: dict = {
         "I have begged. I have pleaded. I am now SHOUTING. PLAY.",
         "{name} this is the LAST PING. 5 minutes. {missing}. "
         "Tomorrow's recap is being written and it does NOT flatter you.",
+        "{name}!! 5 MINUTES!! {missing}!! "
+        "I CAN'T BE MORE EXPLICIT THAN THIS WITHOUT TRIGGERING SPAM FILTERS!!",
+        "{name}, 300 seconds. {missing}. "
+        "PUT. DOWN. THE PHONE. (Wait. Pick it up. Open LinkedIn. PLAY.)",
+        "{name} the puzzles are about to expire and so is my patience. 5 min. {missing}. GO.",
+        "{name}, this is your final boss fight. 5 minutes. {missing}. "
+        "Win it. Lose it. Just don't ignore it.",
+        "{name}: 5 minutes, {missing}. "
+        "If you don't play these I will personally bring it up at every future recap until the heat death of the universe.",
     ),
 }
 
@@ -739,6 +815,14 @@ _NEW_GAMES_TEMPLATES: Tuple[str, ...] = (
     "Reset complete. The leaderboard has been wiped of yesterday's sins. "
     "New games are LIVE — get in it.",
     "Morning. Puzzles dropped. The clock is running. Get in it.",
+    "Today's puzzles: out. Today's leaderboard: empty. Today's vibe: opportunity. Get in it.",
+    "The board has been wiped clean and the puzzles are warm. Get in it.",
+    "Open. The. Puzzles. (Get in it.)",
+    "Yesterday's standings have been carbon-dated. New games are LIVE. Get in it.",
+    "Drumroll please — new puzzles. No drumroll? Fine. New puzzles anyway. Get in it.",
+    "Daybreak. Puzzles up. Honour available in limited quantities. Get in it.",
+    "The puzzles are out. Your move. Get in it.",
+    "Today's games are LIVE and they are deeply judgmental. Get in it.",
 )
 
 

@@ -55,7 +55,48 @@ _MISSING_TODAY_SINGULAR_TEMPLATES = (
     "{names}, the puzzles called. They want a swing.",
     "One name on today's wall of shame: {names}. Lonely up there.",
     "{names} ghosted today's drop. Bold strategy.",
+    "Roll call. {names}? Anyone? Bueller? The leaderboard's waiting.",
+    "{names} chose violence today: zero submissions. Striking.",
+    "Quietly skipped today: {names}. Loudly judged: also {names}.",
+    "{names}, your puzzles are getting cold. They were never warm.",
+    "Today's mystery: where did {names} go? Today's answer: nowhere good.",
+    "Notable abstainer: {names}. Shame. So much shame.",
+    "{names}, did your phone break? Or just your dignity? Either works.",
+    "The day went by, the puzzles went by, {names} went by. Smooth.",
+    "{names} appears to have outsourced their honour today. Refund pending.",
+    "Roster of the missing: {names}. That is the entire roster.",
 )
+
+# Rotating fillers for the days nobody played a single round. Same
+# day-ordinal selection — keeps the empty-state from being a flat
+# "No scores yet." every quiet Tuesday. The literal phrase
+# "No scores yet" is preserved in every variant so external assertions
+# (and the test suite) can still recognise the empty-state output.
+_NO_SCORES_TODAY_TEMPLATES = (
+    "No scores yet.",
+    "No scores yet. Eerie. Slightly suspenseful.",
+    "No scores yet. The puzzles are out there, undefeated.",
+    "No scores yet — tumbleweeds, honestly.",
+    "No scores yet today. The leaderboard is meditating.",
+    "No scores yet. Wide open. First share posted writes the day's history.",
+    "No scores yet. The day is young. The judgement is patient.",
+    "No scores yet. Crickets. Honest, audible crickets.",
+)
+
+# Rotating fillers for weeks that closed with zero scores. Niche but
+# real (post-launch quiet weeks, holidays, group went outside).
+# Same rule — keep the literal phrase "No scores this week" in every
+# variant so the empty-state is still recognisable to tests / readers
+# scanning quickly.
+_NO_SCORES_THIS_WEEK_TEMPLATES = (
+    "No scores this week.",
+    "No scores this week. Bold. Coordinated. Concerning.",
+    "No scores this week. Quiet one. The puzzles will remember.",
+    "No scores this week — seven days, zero submissions. The streak of doing nothing is intact.",
+    "No scores this week. Nothing to wrap. Wrapped it anyway.",
+    "No scores this week. Take it as a warm-up. The next one starts soon.",
+)
+
 
 _MISSING_TODAY_PLURAL_TEMPLATES = (
     "Still MIA today: {names}. The puzzles aren't going to solve themselves.",
@@ -70,6 +111,16 @@ _MISSING_TODAY_PLURAL_TEMPLATES = (
     "{names} — the puzzles called. They want a swing.",
     "Today's wall of shame, populated by: {names}. Cosy in there?",
     "{names} ghosted today's drop. Coordinated. Suspicious.",
+    "Roll call: {names}. Roll answer: silence. Concerning.",
+    "{names} formed an impromptu union today: the Refusal to Play. Solidarity.",
+    "Quietly skipped today: {names}. Loudly judged: same names.",
+    "Today's mystery group: {names}. Today's group activity: not the puzzles.",
+    "Group photo of the missing: {names}. Pretty crowded shot.",
+    "{names} appear to have a standing arrangement to no-show. Fascinating.",
+    "{names}, your puzzles are getting cold. They were never warm.",
+    "The day went by, the puzzles went by, {names} all went by. Smooth.",
+    "Notable abstainers: {names}. The list is long. The judgement is longer.",
+    "Roster of the missing: {names}. That's quite the roster.",
 )
 
 
@@ -458,7 +509,10 @@ def daily_recap(
     day_scores = [s for s in week_filtered if s.puzzle_date == day]
 
     if not day_scores:
-        return f"{header}\n\nNo scores yet.\n"
+        filler = _NO_SCORES_TODAY_TEMPLATES[
+            day.toordinal() % len(_NO_SCORES_TODAY_TEMPLATES)
+        ]
+        return f"{header}\n\n{filler}\n"
 
     lines: List[str] = [header, ""]
     lines.extend(_per_game_sections(day, day_scores))
@@ -569,7 +623,10 @@ def weekly_wrap(
     ]
 
     if not week_filtered:
-        return f"{header}\n\nNo scores this week.\n"
+        filler = _NO_SCORES_THIS_WEEK_TEMPLATES[
+            week_end.toordinal() % len(_NO_SCORES_THIS_WEEK_TEMPLATES)
+        ]
+        return f"{header}\n\n{filler}\n"
 
     lines: List[str] = [header, ""]
 
