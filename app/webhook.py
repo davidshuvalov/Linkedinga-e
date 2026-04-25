@@ -104,6 +104,7 @@ _HELP_TEXT = (
     "  Easter eggs (once each per day):\n"
     "    brag / flex — taunt the group that you're crushing it\n"
     "    gripe / whinge — taunt the group that today's a write-off\n"
+    "    nag / blast / poke — DM everyone who hasn't played today\n"
     "\n"
     "Submit a score by pasting the LinkedIn share text, e.g.:\n"
     "  Queens #714\n"
@@ -1032,6 +1033,45 @@ def _handle_notify(
     return "Notifications off — you won't get the daily recap. Submit scores anytime."
 
 
+def _handle_nag(
+    repo: Repository,
+    settings: Optional[Settings],
+    from_: str,
+    profile_name: str,
+    now: datetime,
+) -> str:
+    """On-demand version of the morning nudge. The sender DMs
+    ``nag`` / ``blast`` / ``poke`` and the bot fan-outs the standard
+    "you still have these games to play" body to every active
+    player who hasn't finished today, excluding the sender. Per-day
+    per-sender cooldown stops one bored player from spamming the
+    group fifty times.
+
+    ``settings`` is required (for Twilio creds + tz). When missing,
+    we tell the user instead of silently no-op'ing — the only people
+    hitting this in a settings-less local run are developers."""
+    if settings is None:
+        return "`nag` needs Twilio configured. Bot's not set up to send right now."
+    from .jobs import run_nag  # local import — keeps webhook import graph thin
+
+    display_name = (profile_name or "").strip() or from_
+    sender = repo.get_or_create_player(from_, display_name)
+    sent, names, on_cooldown = run_nag(
+        repo,
+        settings,
+        sender_id=sender.id,
+        sender_whatsapp_id=from_,
+        now=now,
+    )
+    if on_cooldown:
+        return "You've already nagged today. Try again tomorrow."
+    if sent == 0:
+        return "Everyone's already played today — nothing to nag about."
+    plural = "s" if sent != 1 else ""
+    name_list = ", ".join(names)
+    return f"Nudged {sent} player{plural}: {name_list}."
+
+
 def _handle_taunt(
     repo: Repository,
     settings: Optional[Settings],
@@ -1069,7 +1109,11 @@ def _handle_taunt(
     if sent == 0:
         return "Nobody else is in the active window — taunt unsent."
     suffix = "Consequences pending." if kind == "brag" else "Sympathy optional."
-    return f"Sent `{kind}` to {sent} player{'s' if sent != 1 else ''}. {suffix}"
+    plural = "s" if sent != 1 else ""
+    return (
+        f"Sent `{kind}` to {sent} player{plural}. {suffix}\n\n"
+        f"They got:\n> {body}"
+    )
 
 
 def handle_inbound(
@@ -1178,6 +1222,10 @@ def handle_inbound(
     # competitive nudge admitting today's a write-off.
     if lower in ("gripe", "whinge"):
         return _handle_taunt(repo, settings, from_, profile_name, now, kind="gripe")
+    # ``nag`` / ``blast`` / ``poke`` — manual fan-out of the morning
+    # nudge body to anyone who hasn't finished today's games yet.
+    if lower in ("nag", "blast", "poke"):
+        return _handle_nag(repo, settings, from_, profile_name, now)
 
     # ``vs <name>`` — all-time head-to-head against a named opponent.
     opp = _parse_vs_command(lower)

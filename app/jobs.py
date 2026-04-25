@@ -775,36 +775,32 @@ def _build_morning_nudge(
     return "\n".join(lines)
 
 
-def run_morning_nudge(
+def _send_nudges_to_lagging_players(
     repo: Repository,
     settings: Settings,
     *,
-    now: Optional[datetime] = None,
-) -> List[str]:
-    """Cron entry point — DM each active player a list of games they
-    haven't played today.
+    now: datetime,
+    exclude_whatsapp_id: Optional[str] = None,
+) -> Tuple[List[Tuple[str, str]], int]:
+    """Shared core for the morning cron nudge and the on-demand `nag`
+    command. DMs every recently-active player who hasn't finished
+    today's enabled games yet, optionally skipping a single
+    whatsapp_id (used to keep the nag sender from nudging themself).
 
-    Skips:
-    - players with ``notifications_enabled = False``
-    - players who've already played every enabled game today (no
-      point nudging someone who's done)
-    - days when no enabled games are configured
-
-    Returns the list of whatsapp_ids that received a nudge — handy for
-    tests and for logging the daily reach.
+    Returns ``(nudged, active_count)`` where ``nudged`` is a list of
+    ``(whatsapp_id, display_name)`` tuples for successful sends and
+    ``active_count`` is the size of the active-player pool that was
+    considered (handy for the cron log line's "X / Y" ratio).
     """
-    now = now or datetime.now(settings.tz)
     today = la_date(now)
     enabled = settings.enabled_games
     if not enabled:
-        logger.info("Morning nudge: no enabled games configured, skipping")
-        return []
+        return [], 0
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
     active_players = repo.list_players_active_since(since)
     if not active_players:
-        logger.info("Morning nudge: no recently active players, skipping")
-        return []
+        return [], 0
 
     today_scores = repo.list_scores(date_from=today, date_to=today)
     games_by_player: dict[int, set[str]] = {}
@@ -828,8 +824,10 @@ def run_morning_nudge(
         if s.game in enabled
     ]
 
-    nudged: List[str] = []
+    nudged: List[Tuple[str, str]] = []
     for player in active_players:
+        if exclude_whatsapp_id and player.whatsapp_id == exclude_whatsapp_id:
+            continue
         if not player.notifications_enabled:
             continue
         played = games_by_player.get(player.id, set())
@@ -852,7 +850,7 @@ def run_morning_nudge(
                 )
         except Exception:
             logger.exception(
-                "Morning nudge context-trigger gathering failed for player %s",
+                "Nudge context-trigger gathering failed for player %s",
                 player.id,
             )
 
@@ -862,15 +860,91 @@ def run_morning_nudge(
             context_line=context_line,
         )
         if send_dm(settings, player.whatsapp_id, body):
-            nudged.append(player.whatsapp_id)
+            nudged.append((player.whatsapp_id, player.display_name))
+
+    return nudged, len(active_players)
+
+
+def run_morning_nudge(
+    repo: Repository,
+    settings: Settings,
+    *,
+    now: Optional[datetime] = None,
+) -> List[str]:
+    """Cron entry point — DM each active player a list of games they
+    haven't played today.
+
+    Skips:
+    - players with ``notifications_enabled = False``
+    - players who've already played every enabled game today (no
+      point nudging someone who's done)
+    - days when no enabled games are configured
+
+    Returns the list of whatsapp_ids that received a nudge — handy for
+    tests and for logging the daily reach.
+    """
+    now = now or datetime.now(settings.tz)
+    today = la_date(now)
+    if not settings.enabled_games:
+        logger.info("Morning nudge: no enabled games configured, skipping")
+        return []
+
+    nudged, active_count = _send_nudges_to_lagging_players(
+        repo, settings, now=now
+    )
+    if active_count == 0:
+        logger.info("Morning nudge: no recently active players, skipping")
+        return []
 
     logger.info(
         "Morning nudge sent to %d/%d active players (LA day %s)",
         len(nudged),
-        len(active_players),
+        active_count,
         today,
     )
-    return nudged
+    return [wid for wid, _ in nudged]
+
+
+def run_nag(
+    repo: Repository,
+    settings: Settings,
+    *,
+    sender_id: int,
+    sender_whatsapp_id: str,
+    now: Optional[datetime] = None,
+) -> Tuple[int, List[str], bool]:
+    """On-demand sibling of :func:`run_morning_nudge`, triggered by a
+    player DMing ``nag`` / ``blast`` / ``poke``. Same nudge body, just
+    fired off-cron, and the sender is excluded from the recipient
+    list (no nudging yourself). 1/day per-sender cooldown stored in
+    ``recap_log`` (key ``taunt:nag:<sender_id>``) keeps a bored
+    player from spamming the group.
+
+    Returns ``(count_sent, recipient_names, on_cooldown)``. Cooldown
+    is only burned when at least one DM goes out — if everyone's
+    already played, the sender keeps their daily token.
+    """
+    now = now or datetime.now(settings.tz)
+    today = la_date(now)
+
+    if repo.has_taunted_today(sender_id, "nag", today):
+        return 0, [], True
+
+    nudged, _ = _send_nudges_to_lagging_players(
+        repo, settings, now=now, exclude_whatsapp_id=sender_whatsapp_id
+    )
+    names = [name for _, name in nudged]
+
+    if names:
+        repo.record_taunt(sender_id, "nag", today)
+
+    logger.info(
+        "Nag from player_id=%s reached %d players (LA day %s)",
+        sender_id,
+        len(names),
+        today,
+    )
+    return len(names), names, False
 
 
 # ---------------------------------------------------------------------------

@@ -1862,3 +1862,195 @@ class TestTauntCommands:
         # would have produced the same template-text for both).
         assert alice_body != bob_body
         assert alice_body.replace("Alice", "X") != bob_body.replace("Bob", "X")
+
+
+# ---------------------------------------------------------------------------
+# nag / blast / poke — manual fan-out of the morning nudge
+# ---------------------------------------------------------------------------
+
+
+class TestNagCommand:
+    """``nag`` (aliases ``blast``, ``poke``) is the on-demand version of
+    the 08:30 Sydney morning nudge: DMs every active player who hasn't
+    finished today's games, excluding the sender themself. 1/day per-
+    sender cooldown."""
+
+    @staticmethod
+    def _seed_active_with_no_scores_today(repo, *names_phones, today):
+        """Seed each (whatsapp_id, display_name) with a score yesterday
+        (so they count as active) and nothing today (so they're behind
+        on every enabled game)."""
+        from app.puzzles import la_date
+        from datetime import timedelta as _td
+        ref = la_date(today) - _td(days=1)
+        pno = 700
+        for wid, name in names_phones:
+            p = repo.get_or_create_player(wid, name)
+            repo.insert_score(
+                player_id=p.id, game="queens", puzzle_no=pno,
+                puzzle_date=ref, raw_score=10, share_text="x",
+            )
+            pno += 1
+
+    def test_nag_dms_active_players_who_havent_played_today(self, repo):
+        from unittest.mock import patch
+        self._seed_active_with_no_scores_today(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            ("whatsapp:+61400000003", "Charlie"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            reply = handle_inbound(
+                repo,
+                from_="whatsapp:+61400000001",
+                body="nag",
+                profile_name="Alice",
+                now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        recipients = [c.args[1] for c in mock_dm.call_args_list]
+        # Sender excluded; Bob and Charlie nudged.
+        assert set(recipients) == {
+            "whatsapp:+61400000002",
+            "whatsapp:+61400000003",
+        }
+        assert "whatsapp:+61400000001" not in recipients
+        assert reply is not None
+        assert "Nudged 2 players" in reply
+        assert "Bob" in reply and "Charlie" in reply
+
+    def test_nag_skips_player_already_done_today(self, repo):
+        from unittest.mock import patch
+        from app.puzzles import la_date
+        self._seed_active_with_no_scores_today(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        # Bob has played every enabled game today — should NOT be nudged.
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        today_la = la_date(NOW)
+        pno = 800
+        for game in {"queens", "tango", "zip", "patches", "mini_sudoku"}:
+            repo.insert_score(
+                player_id=bob.id, game=game, puzzle_no=pno,
+                puzzle_date=today_la, raw_score=10, share_text="x",
+            )
+            pno += 1
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            reply = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="nag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        mock_dm.assert_not_called()
+        assert reply is not None
+        assert "nothing to nag about" in reply
+
+    def test_nag_cooldown_blocks_second_use_same_day(self, repo):
+        from unittest.mock import patch
+        self._seed_active_with_no_scores_today(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True):
+            first = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="nag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        assert first is not None and "Nudged 1 player" in first
+
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            second = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="nag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        assert second is not None
+        assert "already nagged" in second
+        mock_dm.assert_not_called()
+
+    def test_nag_no_targets_keeps_cooldown_unburned(self, repo):
+        from unittest.mock import patch
+        from app.puzzles import la_date
+        # Only the sender exists in the active window — nobody else
+        # to nag. Cooldown must NOT be burned.
+        self._seed_active_with_no_scores_today(
+            repo, ("whatsapp:+61400000001", "Alice"), today=NOW,
+        )
+        with patch("app.jobs.send_dm") as mock_dm:
+            reply = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="nag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        mock_dm.assert_not_called()
+        assert reply is not None and "nothing to nag about" in reply
+        assert not repo.has_taunted_today(1, "nag", la_date(NOW))
+
+    def test_blast_alias_works(self, repo):
+        from unittest.mock import patch
+        self._seed_active_with_no_scores_today(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            reply = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="blast",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        mock_dm.assert_called_once()
+        assert reply is not None and "Nudged 1 player" in reply
+
+    def test_poke_alias_works(self, repo):
+        from unittest.mock import patch
+        self._seed_active_with_no_scores_today(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            reply = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="poke",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        mock_dm.assert_called_once()
+        assert reply is not None and "Nudged 1 player" in reply
+
+    def test_nag_skips_opted_out_players(self, repo):
+        from unittest.mock import patch
+        self._seed_active_with_no_scores_today(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.set_notifications_enabled(bob.id, False)
+        with patch("app.jobs.send_dm") as mock_dm:
+            reply = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="nag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        mock_dm.assert_not_called()
+        assert reply is not None and "nothing to nag about" in reply
+
+    def test_nag_no_settings_returns_helpful_message(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="nag",
+            profile_name="Alice", now=NOW, settings=None,
+        )
+        assert reply is not None
+        assert "Twilio" in reply
