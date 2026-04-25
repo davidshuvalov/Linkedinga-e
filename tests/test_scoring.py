@@ -212,7 +212,11 @@ class TestAssignDailyPoints:
         r = assign_daily_points(scores)
         assert r[1] == r[2] == r[3]
         assert r[1] > r[4]
-        assert abs(sum(r.values()) - 14.0) < 0.05
+        # Total tolerance is loose because this round hits the
+        # documented floor-clamp drift: the cluster debit drives 4th
+        # to exactly 0, the rounding residue can't be absorbed there
+        # without violating the floor, so the sum can drift by ~0.1.
+        assert abs(sum(r.values()) - 14.0) < 0.15
 
     def test_tied_1st_2nd_share_4_5_each(self):
         # 3 players, tied 1st/2nd, 3rd close behind. Tight regime
@@ -734,36 +738,69 @@ class TestCompetitiveScore:
         assert scores == sorted(scores, reverse=True)
         assert abs(sum(scores) - 15.0) < 0.05
 
-    def test_top_two_cluster_pool_smaller_than_top_three(self):
-        # Same first two times in two rounds; only the rest changes.
-        # The top-2 cluster pool (1.0) should yield a smaller bonus
-        # to 1st than the top-3 cluster pool (1.5) does.
-        top_two = competitive_score([
+    def test_cluster_pool_scales_with_drop_size(self):
+        # Same top-2 shape, two different drop sizes. The bigger drop
+        # earns a bigger pool, so the front of the field walks away
+        # with more points and the stragglers absorb a heavier debit.
+        # Drop ~1.5 (just above the 1.3 minimum, knee is 1.6):
+        small_drop = competitive_score([
+            {"name": "A", "time": 10},
+            {"name": "B", "time": 11},
+            # r23 = 16.5 / 11 = 1.5 → small pool (~1.0)
+            {"name": "C", "time": 16.5},
+            {"name": "D", "time": 17.5},
+            {"name": "E", "time": 18.5},
+        ])
+        # Drop ~6 (well past the 2.0 cap):
+        big_drop = competitive_score([
             {"name": "A", "time": 6},
             {"name": "B", "time": 7},
-            # Big drop at r23 → top-2 cluster
+            # r23 = 6.0 → max pool 2.0
             {"name": "C", "time": 42},
             {"name": "D", "time": 68},
             {"name": "E", "time": 97},
         ])
-        top_three = competitive_score([
-            {"name": "A", "time": 6},
-            {"name": "B", "time": 7},
-            # Tight to 3rd, then big drop → top-3 cluster
-            {"name": "C", "time": 8},
-            {"name": "D", "time": 68},
-            {"name": "E", "time": 97},
+        # 1st place earns more under the bigger drop.
+        assert big_drop[0]["final_score"] > small_drop[0]["final_score"]
+        # Last place absorbs more debit under the bigger drop.
+        assert big_drop[-1]["final_score"] < small_drop[-1]["final_score"]
+
+    def test_cluster_fires_at_lowered_threshold(self):
+        # Drop of 1.4 — past the new 1.3 threshold but well below the
+        # old 1.6. Used to fall through to "tight" with flat ranks;
+        # should now trigger a small top-2 cluster bonus.
+        out = competitive_score([
+            {"name": "A", "time": 10},
+            {"name": "B", "time": 11},
+            # r23 = 15.4 / 11 = 1.4 (just above 1.3) → small pool
+            {"name": "C", "time": 15.4},
+            {"name": "D", "time": 16},
+            {"name": "E", "time": 17},
         ])
-        # Top-2 pool is 1.0 split between 2 winners; top-3 pool is
-        # 1.5 split between 3 winners. Per-winner share is similar
-        # but the *total* bonus pumped into the front of the field
-        # differs. Comparing 1st-place values directly:
-        #   top-2: 5 + 1.0 * w1   (where w1 ~ 7/(6+7) ≈ 0.538)
-        #   top-3: 5 + 1.5 * w1'  (where w1' ~ (1/6)/(1/6+1/7+1/8))
-        # The top-2 1st-place gets a smaller absolute bonus (~0.54
-        # vs ~0.57). Asserting the looser invariant: 1st in top-2
-        # is no greater than 1st in top-3.
-        assert top_two[0]["final_score"] <= top_three[0]["final_score"] + 0.05
+        scores = self._scores(out)
+        # Top 2 above their base, bottom 3 below.
+        assert scores[0] > 5.0
+        assert scores[1] > 4.0
+        assert scores[2] < 3.0
+        # Total still preserved.
+        assert abs(sum(scores) - 15.0) < 0.05
+
+    def test_cluster_pool_capped_at_two(self):
+        # Massive drop (r23 ≈ 50x) should NOT pump more than 2.0 pts
+        # into the cluster — the formula caps at 2.0 above drop=2.0.
+        out = competitive_score([
+            {"name": "A", "time": 1},
+            {"name": "B", "time": 1.1},
+            {"name": "C", "time": 60},
+            {"name": "D", "time": 70},
+            {"name": "E", "time": 80},
+        ])
+        scores = self._scores(out)
+        # 1st place gets at most ~5 + 2.0 * (max time-weight) = ~6.0+.
+        # Asserting the loose ceiling: 1st no greater than 7.0 (which
+        # would require an unbounded pool).
+        assert scores[0] < 7.0
+        assert abs(sum(scores) - 15.0) < 0.05
 
     def test_top_four_cluster_boosts_top_four(self):
         # Top 4 are all close (30/32/35/37), 5th is a clear drop (90).

@@ -422,26 +422,59 @@ def prize_allocations(leaderboard: Sequence[PlayerWeeklyStats]) -> Prizes:
 # Spec thresholds. Named constants so the classification reads like the spec.
 _TIGHT_SPREAD_THRESHOLD = 0.5        # Case A: spread < this
 _CLUSTER_TOP_RATIO = 1.4             # All in-cluster consecutive ratios <
-_CLUSTER_DROP_RATIO = 1.6            # Drop ratio after cluster >
-_CLEAR_WINNER_RATIO = 1.5            # Case C: r12 > this
+_CLUSTER_DROP_RATIO = 1.3            # Drop ratio after cluster > this fires
+                                     # any cluster bonus at all
+_CLEAR_WINNER_RATIO = 1.3            # Case C: r12 > this  (lowered from
+                                     # 1.5 so a clear-but-not-runaway
+                                     # leader — Mini-Sudoku-shaped 1.35x
+                                     # gaps — still earns a bonus instead
+                                     # of falling through to flat ranks)
 _CLEAR_WINNER_MAX_BONUS = 2.0        # hard cap in Case C
 _MIN_SCORE = 0.0                     # floor for any player — only
                                      # prevents negatives from debits;
                                      # positions 6+ naturally stay at 0
                                      # unless they tie with 5th place
 
-# Bonus pool size by cluster size. Top-3 keeps its historical 1.5
-# (the original Case B). Top-2 gets a smaller pool (fewer winners,
-# stays below the +2 clear-winner ceiling so a "two close at the top"
-# round doesn't out-reward a "one runaway" round). Top-4 reuses 1.5
-# — the same total pot split four ways = smaller per-winner bonus,
-# but the lone bottom player absorbs the entire debit, which feels
-# right for a "one clear loser" round.
-_CLUSTER_BONUS_POOL_BY_SIZE = {
-    2: 1.0,
-    3: 1.5,
-    4: 1.5,
-}
+# Cluster bonus pool scales piecewise-linearly with the drop ratio
+# (the gap between the last in-cluster player and the first
+# straggler). The shape was tuned to give modest drops a token
+# bonus and runaway blowouts the full pool:
+#
+#   drop ≤ 1.3  → no cluster fires (handled by _detect_cluster)
+#   drop = 1.3  → pool 0.5  (smallest meaningful bonus)
+#   drop = 1.6  → pool 1.5  (matches the historical fixed pool)
+#   drop ≥ 2.0  → pool 2.0  (cap; runaway blowouts can't grow further)
+#
+# Same formula applies to top-2, top-3, and top-4 clusters; with
+# more winners each one's per-player share is smaller, but the
+# punch on the stragglers stays meaningful because the debit per
+# straggler is pool / (n - k).
+_CLUSTER_POOL_DROP_MIN = 1.3
+_CLUSTER_POOL_DROP_KNEE = 1.6
+_CLUSTER_POOL_DROP_MAX = 2.0
+_CLUSTER_POOL_AT_MIN = 0.5
+_CLUSTER_POOL_AT_KNEE = 1.5
+_CLUSTER_POOL_AT_MAX = 2.0
+
+
+def _scaled_cluster_pool(drop_ratio: float) -> float:
+    """Map the post-cluster drop ratio to its bonus pool size.
+
+    Piecewise-linear: 0.5 pts at drop=1.3, 1.5 pts at drop=1.6,
+    2.0 pts at drop=2.0+. Caller must already have confirmed the
+    drop is past :data:`_CLUSTER_DROP_RATIO`.
+    """
+    if drop_ratio >= _CLUSTER_POOL_DROP_MAX:
+        return _CLUSTER_POOL_AT_MAX
+    if drop_ratio >= _CLUSTER_POOL_DROP_KNEE:
+        # Knee → max segment.
+        span = _CLUSTER_POOL_DROP_MAX - _CLUSTER_POOL_DROP_KNEE
+        rise = _CLUSTER_POOL_AT_MAX - _CLUSTER_POOL_AT_KNEE
+        return _CLUSTER_POOL_AT_KNEE + (drop_ratio - _CLUSTER_POOL_DROP_KNEE) * (rise / span)
+    # Min → knee segment.
+    span = _CLUSTER_POOL_DROP_KNEE - _CLUSTER_POOL_DROP_MIN
+    rise = _CLUSTER_POOL_AT_KNEE - _CLUSTER_POOL_AT_MIN
+    return _CLUSTER_POOL_AT_MIN + (drop_ratio - _CLUSTER_POOL_DROP_MIN) * (rise / span)
 
 
 def _base_points_for_size(n: int) -> List[int]:
@@ -458,8 +491,10 @@ def _base_points_for_size(n: int) -> List[int]:
     return [_POSITION_POINTS.get(rank, 0) for rank in range(1, n + 1)]
 
 
-def _detect_cluster(ratios: Sequence[float], n: int) -> Optional[int]:
-    """Return the cluster size ``k`` (4, 3, or 2) when the round has a
+def _detect_cluster(
+    ratios: Sequence[float], n: int
+) -> Optional[Tuple[int, float]]:
+    """Return ``(cluster_size, drop_ratio)`` when the round has a
     "top-k tight pack with a clear drop to position k+1" shape, else
     ``None``.
 
@@ -471,10 +506,12 @@ def _detect_cluster(ratios: Sequence[float], n: int) -> Optional[int]:
     A cluster of size ``k`` requires:
 
     * All ``k - 1`` in-cluster ratios are tight (``< 1.4``)
-    * The ``k``-to-``k+1`` ratio is a clear drop (``> 1.6``)
+    * The ``k``-to-``k+1`` ratio is a clear drop (``> 1.3``)
     * The round has at least one player past the cluster (so the
       drop position exists)
 
+    The drop ratio is returned alongside the size so the caller can
+    look up the scaled bonus pool — bigger drops earn bigger pools.
     Returns ``None`` for any round that doesn't fit.
     """
     for k in (4, 3, 2):
@@ -485,41 +522,46 @@ def _detect_cluster(ratios: Sequence[float], n: int) -> Optional[int]:
         in_cluster_tight = all(
             ratios[i] < _CLUSTER_TOP_RATIO for i in range(k - 1)
         )
-        drop_after = ratios[k - 1] > _CLUSTER_DROP_RATIO
-        if in_cluster_tight and drop_after:
-            return k
+        drop_ratio = ratios[k - 1]
+        if in_cluster_tight and drop_ratio > _CLUSTER_DROP_RATIO:
+            return k, drop_ratio
     return None
 
 
 def _classify_round(
     n: int, spread: float, ratios: Sequence[float]
-) -> Tuple[str, Optional[int]]:
+) -> Tuple[str, Optional[int], Optional[float]]:
     """Decide which adjustment regime applies.
 
-    Returns ``(regime, cluster_size)`` where ``regime`` is one of
-    ``"tight"`` / ``"cluster"`` / ``"winner"``. ``cluster_size`` is
-    the ``k`` (2, 3, or 4) only when ``regime == "cluster"``, else
-    ``None``.
+    Returns ``(regime, cluster_size, drop_ratio)`` where ``regime``
+    is one of ``"tight"`` / ``"cluster"`` / ``"winner"``. The
+    ``cluster_size`` and ``drop_ratio`` are populated only when
+    ``regime == "cluster"``; otherwise both are ``None``.
 
     Order of precedence (largest cluster wins, then clear-winner,
     then tight). Tight short-circuits on a small overall spread —
     the spec's "only adjust in clear cases" rule.
     """
     if spread < _TIGHT_SPREAD_THRESHOLD:
-        return "tight", None
+        return "tight", None, None
 
-    cluster_size = _detect_cluster(ratios, n)
-    if cluster_size is not None:
-        return "cluster", cluster_size
+    detected = _detect_cluster(ratios, n)
+    if detected is not None:
+        cluster_size, drop_ratio = detected
+        return "cluster", cluster_size, drop_ratio
 
     if ratios[0] > _CLEAR_WINNER_RATIO:
-        return "winner", None
+        return "winner", None, None
 
-    return "tight", None
+    return "tight", None, None
 
 
 def _apply_cluster_bonus(
-    scores: List[float], times: Sequence[float], n: int, top_k: int
+    scores: List[float],
+    times: Sequence[float],
+    n: int,
+    top_k: int,
+    pool: float,
 ) -> None:
     """Boost the front ``top_k`` cluster, debit the stragglers.
 
@@ -527,11 +569,10 @@ def _apply_cluster_bonus(
     (``1/time_i``, normalised) so the fastest of the cluster gets the
     biggest share. The full bonus pool is then subtracted evenly from
     the players past the cluster, keeping the running total equal to
-    the base. Pool size depends on ``top_k`` —
-    :data:`_CLUSTER_BONUS_POOL_BY_SIZE` maps each supported cluster
-    size to its pool.
+    the base. ``pool`` is computed by :func:`_scaled_cluster_pool`
+    from the post-cluster drop ratio — modest drops earn small pools,
+    runaway blowouts earn the full 2.0.
     """
-    pool = _CLUSTER_BONUS_POOL_BY_SIZE[top_k]
     weights = [1.0 / times[i] for i in range(top_k)]
     wsum = sum(weights)
     for i in range(top_k):
@@ -679,12 +720,14 @@ def competitive_score(
        ``spread = (tn - t1) / t1``.
     4. Classify the round:
          * **Tight** (``spread < 0.5``) — leave base points alone.
-         * **Front cluster** (top ``k`` are tight + big drop to
+         * **Front cluster** (top ``k`` tight + drop > 1.3 to
            position ``k+1``) for ``k`` in 4, 3, 2 (largest first):
            redistribute a bonus pool across the top ``k`` by
            ``1/time`` weights and debit bottom players evenly.
-           Pool: 1.5 / 1.5 / 1.0 for ``k`` of 4 / 3 / 2.
-         * **Clear winner** (``r12 > 1.5`` and no cluster matched) —
+           Pool size scales with the drop: 0.5 pts at drop=1.3,
+           1.5 pts at drop=1.6, 2.0 pts at drop≥2.0 — bigger
+           blowouts earn bigger pools.
+         * **Clear winner** (``r12 > 1.3`` and no cluster matched) —
            award 1st a ``min(2, 2*(r12-1))`` bonus, debit the rest
            proportional to base.
          * Otherwise — no adjustment.
@@ -728,11 +771,13 @@ def competitive_score(
 
     # Step 4 — classify and apply at most one adjustment block. The
     # classifier picks the largest cluster that fits, falling back to
-    # clear-winner and finally tight.
-    regime, cluster_size = _classify_round(n, spread, ratios)
+    # clear-winner and finally tight. Cluster bonus pool scales with
+    # the size of the post-cluster drop.
+    regime, cluster_size, drop_ratio = _classify_round(n, spread, ratios)
     if regime == "cluster":
-        assert cluster_size is not None
-        _apply_cluster_bonus(scores, times, n, cluster_size)
+        assert cluster_size is not None and drop_ratio is not None
+        pool = _scaled_cluster_pool(drop_ratio)
+        _apply_cluster_bonus(scores, times, n, cluster_size, pool)
     elif regime == "winner":
         _apply_clear_winner_bonus(scores, base_points, times, ratios[0], n)
     # regime == "tight": fall through with base points intact.
