@@ -102,6 +102,10 @@ _HELP_TEXT = (
     "    notify on / notify off — toggle daily recap DMs\n"
     "    help / ? — show this list\n"
     "\n"
+    "  Easter eggs (once each per day):\n"
+    "    brag / flex — taunt the group that you're crushing it\n"
+    "    gripe / whinge — taunt the group that today's a write-off\n"
+    "\n"
     "Submit a score by pasting the LinkedIn share text, e.g.:\n"
     "  Queens #714\n"
     "  0:10"
@@ -1022,6 +1026,46 @@ def _handle_notify(
     return "Notifications off — you won't get the daily recap. Submit scores anytime."
 
 
+def _handle_taunt(
+    repo: Repository,
+    settings: Optional[Settings],
+    from_: str,
+    profile_name: str,
+    now: datetime,
+    *,
+    kind: str,
+) -> str:
+    """Easter-egg broadcast: the sender DMs ``brag`` or ``gripe``, the
+    bot fan-outs a competitive nudge to every other recently-active
+    player. Per-day per-command cooldown stops one bored player from
+    spamming the group fifty times.
+
+    ``settings`` is required (for Twilio creds + tz). When missing,
+    we tell the user instead of silently no-op'ing — the only people
+    hitting this in a settings-less local run are developers."""
+    if settings is None:
+        return f"`{kind}` needs Twilio configured. Bot's not set up to send right now."
+    from .jobs import run_taunt  # local import — keeps webhook import graph thin
+
+    display_name = (profile_name or "").strip() or from_
+    sender = repo.get_or_create_player(from_, display_name)
+    sent, body = run_taunt(
+        repo,
+        settings,
+        kind=kind,
+        sender_id=sender.id,
+        sender_name=sender.display_name,
+        sender_whatsapp_id=from_,
+        now=now,
+    )
+    if body is None:
+        return f"You've already used `{kind}` today. Try again tomorrow."
+    if sent == 0:
+        return "Nobody else is in the active window — taunt unsent."
+    suffix = "Consequences pending." if kind == "brag" else "Sympathy optional."
+    return f"Sent `{kind}` to {sent} player{'s' if sent != 1 else ''}. {suffix}"
+
+
 def handle_inbound(
     repo: Repository,
     *,
@@ -1120,6 +1164,14 @@ def handle_inbound(
         return _handle_notify(repo, from_, profile_name, enabled=True)
     if lower in ("notify off", "notifications off"):
         return _handle_notify(repo, from_, profile_name, enabled=False)
+    # ``brag`` / ``flex`` — broadcast a competitive nudge to the
+    # group telling them you're crushing today.
+    if lower in ("brag", "flex"):
+        return _handle_taunt(repo, settings, from_, profile_name, now, kind="brag")
+    # ``gripe`` / ``whinge`` — broadcast a self-deprecating-but-
+    # competitive nudge admitting today's a write-off.
+    if lower in ("gripe", "whinge"):
+        return _handle_taunt(repo, settings, from_, profile_name, now, kind="gripe")
 
     # ``vs <name>`` — all-time head-to-head against a named opponent.
     opp = _parse_vs_command(lower)

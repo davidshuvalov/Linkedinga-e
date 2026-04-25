@@ -861,3 +861,113 @@ def run_new_games_announcement(
     send_recap(settings, body, dm_targets=dm_targets)
     logger.info("New games announcement sent (LA day %s)", today)
     return body
+
+
+# ---------------------------------------------------------------------------
+# Easter egg: brag / gripe broadcasts (webhook-triggered)
+# ---------------------------------------------------------------------------
+
+
+# User-triggered broadcasts. ``brag`` for "I'm having a great day, let
+# everybody know"; ``gripe`` for "I'm having a stinker, drag the group
+# in with me". Per-player per-day cooldown lives in the repo so the
+# same person can't spam the same prompt fifty times in a row.
+TAUNT_KINDS: Tuple[str, ...] = ("brag", "gripe")
+
+_BRAG_TEMPLATES: Tuple[str, ...] = (
+    "{sender} is in form today and wanted you to know. Try to keep up.",
+    "Public service announcement: {sender} is cooking. "
+    "Maybe respond with scores. Maybe just suffer in silence.",
+    "{sender} just hit the brag button. Translation: they're winning, "
+    "they're insufferable, they want company.",
+    "{sender} is having a moment and wants witnesses. Bear witness.",
+    "Heads up — {sender} smells blood. The leaderboard is the blood.",
+    "{sender} would like a small parade in their honour. "
+    "Today's puzzles, apparently, were not for the weak.",
+    "{sender} has typed `brag` into a chat bot. We are obligated to relay it. "
+    "They're crushing it.",
+    "Ding ding — {sender} is on a tear. Catch up or get used to second.",
+    "{sender}: \"I'm having a great day.\" Bot: \"OK\". Group: forced to listen.",
+    "{sender} is feeling themselves today. Admittedly, the data agrees.",
+    "{sender} sent the bot an unsolicited flex. We are passing it on at retail.",
+    "Notice: {sender} is undefeated in their own head right now. "
+    "Provide receipts or accept defeat.",
+)
+
+_GRIPE_TEMPLATES: Tuple[str, ...] = (
+    "{sender} bombed today and wants the group to feel it. "
+    "Solidarity. Or mockery. Dealer's choice.",
+    "{sender} is having a stinker. The bot is contractually obligated to tell you.",
+    "{sender} requests recognition for the absolute mess they've made of today's puzzles.",
+    "Heads up: {sender} is publicly admitting defeat. Use this information wisely.",
+    "{sender} would like to file a complaint about today's puzzles. "
+    "Complaint: they were too hard. Mostly for {sender}.",
+    "{sender} is unwell (psychologically, at the puzzles). Send thoughts. "
+    "Or send your scores so they can feel worse.",
+    "{sender} has typed `gripe`. The bot dutifully relays: it's been a day. "
+    "And not in the good way.",
+    "Today defeated {sender} comprehensively, and they want everyone to know. "
+    "Honesty appreciated.",
+    "{sender} is having the kind of day where the puzzles are winning. "
+    "By a lot. Comfort or mock at your discretion.",
+    "Newsflash: {sender} is on the floor. Today did not go to plan. "
+    "Tomorrow's revenge tour starts at midnight.",
+    "{sender} sent the bot a distress signal. Roughly translated: \"I am bad at puzzles today.\" "
+    "Group is invited to commiserate.",
+    "{sender}: today's score was a personal worst. {sender}: needed you to know. "
+    "{sender}: regrets nothing.",
+)
+
+
+def run_taunt(
+    repo: Repository,
+    settings: Settings,
+    *,
+    kind: str,
+    sender_id: int,
+    sender_name: str,
+    sender_whatsapp_id: str,
+    now: Optional[datetime] = None,
+) -> Tuple[int, Optional[str]]:
+    """Broadcast a ``brag`` or ``gripe`` to every recently-active
+    player except the sender.
+
+    Returns ``(count_sent, body)`` where ``count_sent`` is the number
+    of recipients Twilio accepted and ``body`` is the rendered text
+    (handy for tests / logs). Returns ``(0, None)`` when the sender
+    is on cooldown for ``kind`` today, and ``(0, body)`` when nobody
+    else is in the active window.
+
+    Cooldown is recorded **only** when the broadcast actually goes
+    out — if there's no audience, the sender doesn't burn their
+    daily token.
+    """
+    if kind not in TAUNT_KINDS:
+        raise ValueError(f"unknown taunt kind: {kind!r}")
+    now = now or datetime.now(settings.tz)
+    today = la_date(now)
+
+    if repo.has_taunted_today(sender_id, kind, today):
+        return 0, None
+
+    pool = _BRAG_TEMPLATES if kind == "brag" else _GRIPE_TEMPLATES
+    body = pool[today.toordinal() % len(pool)].format(sender=sender_name)
+
+    since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
+    targets = [
+        wid for wid in repo.list_active_whatsapp_ids(date_from=since, date_to=today)
+        if wid != sender_whatsapp_id
+    ]
+    if not targets:
+        return 0, body
+
+    sent = 0
+    for wid in targets:
+        if send_dm(settings, wid, body):
+            sent += 1
+    repo.record_taunt(sender_id, kind, today)
+    logger.info(
+        "Taunt [%s] from player_id=%s reached %d/%d recipients (LA day %s)",
+        kind, sender_id, sent, len(targets), today,
+    )
+    return sent, body
