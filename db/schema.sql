@@ -70,17 +70,35 @@ create index if not exists unparsed_messages_created_at_idx
     on unparsed_messages (created_at desc);
 
 -- ---------- recap_log ----------
--- Records each recap/wrap that's been sent, so the bot can fire the
--- daily recap early (the moment everyone's played all their games)
--- and the scheduled end-of-day cron knows to skip rather than
--- double-send. Unique constraint on (recap_date, recap_type) makes
--- "has this been sent?" a simple lookup.
+-- Records each recap/wrap that's been sent, plus per-player per-day
+-- cooldown markers for the brag/gripe Easter-egg broadcasts. Unique
+-- constraint on (recap_date, recap_type) makes "has this fired?" a
+-- single-row lookup.
+--
+-- The original schema gated ``recap_type`` to ('daily', 'weekly')
+-- via a CHECK constraint. The taunt cooldown keys (``taunt:brag:42``
+-- etc.) reuse this table to avoid creating a sibling table for what
+-- amounts to "did this thing fire today?", so the constraint is
+-- loosened to free-text. The comment below documents the value
+-- vocabulary so old keys aren't surprising readers.
+--
+-- recap_type values currently in use:
+--   'daily'                - scheduled daily recap (cron)
+--   'weekly'               - scheduled weekly wrap (cron)
+--   'taunt:brag:<id>'      - player <id> used `brag` today (cooldown)
+--   'taunt:gripe:<id>'     - player <id> used `gripe` today (cooldown)
 create table if not exists recap_log (
     id          bigserial primary key,
     recap_date  date not null,
-    recap_type  text not null check (recap_type in ('daily', 'weekly')),
+    recap_type  text not null,
     sent_at     timestamptz not null default now(),
     unique (recap_date, recap_type)
 );
+
+-- Drop the legacy ``recap_type in ('daily','weekly')`` CHECK so
+-- existing databases accept the new taunt cooldown keys. Idempotent:
+-- IF EXISTS guards against rerunning on a fresh DB that never had
+-- the constraint.
+alter table recap_log drop constraint if exists recap_log_recap_type_check;
 
 create index if not exists recap_log_date_idx on recap_log (recap_date);
