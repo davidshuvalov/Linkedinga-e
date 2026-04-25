@@ -279,31 +279,53 @@ missing entirely (local dev), the recap is printed to stdout instead.
 
 ## Onboarding your friends
 
-The Twilio WhatsApp sandbox is strict: each person who wants to play
-must join the sandbox from their own phone once. The bot sends score
-confirmations, error messages, and daily/weekly recaps as **direct
-messages** — not posts into your group. (Posting into a WhatsApp group
-requires a Meta-approved Business sender, which isn't worth the
-business-verification hassle for a friend bot.)
+The bot sends score confirmations, error messages, and daily/weekly
+recaps as **direct messages** — not posts into your group. (Posting
+into a WhatsApp group requires a real group JID; DM-only is simpler
+and is what the rest of this section assumes.)
 
-### The one-time join (each friend does this)
+### The one-time setup (each friend does this, business sender)
 
-1. Each friend saves your **Twilio sandbox number** (shown in Twilio
-   Console → Messaging → Try it out → Send a WhatsApp message) as a
-   contact on their phone.
-2. From WhatsApp, they send the sandbox **join phrase** (two words
-   unique to your Twilio account, something like `join cozy-otter`) to
-   the sandbox number.
-3. Twilio replies "Connected to sandbox." They're in.
-4. From now on they DM their LinkedIn share text to that number —
+1. Each friend saves your **business WhatsApp number** as a contact on
+   their phone.
+2. From WhatsApp, they send any message to that number — even just
+   `hi`. This opens WhatsApp's 24-hour customer-care window so the bot
+   can reply with free-form text.
+3. From now on they DM their LinkedIn share text to that number —
    **not** into the friends' group chat. Example share:
    ```
    Queens #722
    1:05
    ```
-5. Sandbox connections expire after 72 hours of silence. If a friend
-   goes a full weekend without submitting, they'll need to re-send the
-   join phrase before their next share works.
+
+No join phrase, no 72-hour expiry — those are sandbox-only quirks (see
+below). Each friend just needs to message the bot first.
+
+### Heads up: WhatsApp's 24-hour window
+
+WhatsApp only lets a business send free-form messages to a user within
+24 hours of that user's last inbound message. After that window
+closes, only **pre-approved templates** can go out. In practice:
+
+- **Score confirmations** — always fine; the friend just messaged you.
+- **Daily recap / weekly wrap / morning nudge** — fine for anyone who
+  submitted a score in the last 24h. Friends who skip a day will
+  silently miss that day's recap. If that matters, register an
+  approved template in Twilio Console and route the recap through it;
+  if not (people who play daily stay in the window), ignore it.
+
+### Sandbox onboarding (development only)
+
+If you're testing against the Twilio WhatsApp sandbox instead of a
+production business sender, the flow is stricter:
+
+1. Each friend saves the **Twilio sandbox number** (Twilio Console →
+   Messaging → Try it out → Send a WhatsApp message) as a contact.
+2. They DM the **join phrase** (two words unique to your Twilio
+   account, e.g. `join cozy-otter`) once. Twilio replies "Connected to
+   sandbox."
+3. Sandbox connections expire after 72 hours of silence — they'll need
+   to re-send the join phrase if they go quiet for a weekend.
 
 ### What the friends see in practice
 
@@ -324,12 +346,11 @@ Paste something like this into your group chat so friends know the
 drill:
 
 > **LinkedIn Games bot setup** 🎯
-> 1. Save this number: *\<your Twilio sandbox number\>*
-> 2. DM `join \<your-two-word-phrase\>` to that number once.
+> 1. Save this number: *\<your business WhatsApp number\>*
+> 2. Send it any message once (e.g. `hi`) to start.
 > 3. After each game, DM your share text to the bot — don't post it in
 >    this group.
 > 4. You'll get a daily recap in your DM each evening.
-> 5. If you skip a weekend, you may need to `join` again.
 
 ## Bot commands
 
