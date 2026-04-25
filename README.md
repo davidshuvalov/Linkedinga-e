@@ -392,6 +392,14 @@ Players can DM the bot (case-insensitive) with these keywords:
 | `help` / `?`       | Show the full command list. |
 | `unparsed`         | Last 10 unparsed messages (admin debugging). |
 
+**Easter eggs** (once each per day per sender)
+
+| Command                  | Response |
+| ------------------------ | -------- |
+| `brag` / `flex`          | DM every other recently-active player a "crushing it" line, and reply to you with the count + a preview of what got sent. |
+| `gripe` / `whinge`       | Same shape as `brag` but a self-deprecating "today's a write-off" line. |
+| `nag` / `blast` / `poke` | Manual fan-out of the morning nudge — DMs every active player who hasn't finished today's games, excluding you. Reply lists who got nudged. |
+
 **Unrecognised messages** (anything that isn't a command and isn't a
 score share) now get a "I didn't understand that" reply plus the help
 blurb. The bot operates in 1:1 DMs so silence was leaving users
