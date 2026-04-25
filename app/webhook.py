@@ -1299,6 +1299,7 @@ def handle_inbound(
             player=player,
             game=parsed.game,
             new_raw=parsed.raw_score,
+            today=puzzle_date,
         )
     except Exception:
         import logging

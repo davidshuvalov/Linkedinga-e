@@ -1,7 +1,7 @@
-"""Unit tests for ``app.notifications`` — PB / worst-ever DM logic
-and the "day complete" personal summary.
+"""Unit tests for ``app.notifications`` — submission triggers, the
+PB / worst-ever DM body, and the "day complete" personal summary.
 
-Focuses on the pure-function cores (``_classify``,
+Focuses on the pure-function cores (the trigger detectors,
 ``render_personal_best_message``, ``render_day_complete_summary``,
 ``maybe_notify_day_complete``) so tests don't need to stub the
 Twilio sender.
@@ -13,8 +13,10 @@ from datetime import date
 
 from app.db import InMemoryRepository, Player, ScoreRow
 from app.notifications import (
-    _classify,
+    _detect_personal_history_trigger,
+    gather_submission_triggers,
     maybe_notify_day_complete,
+    maybe_notify_personal_best,
     render_day_complete_summary,
     render_personal_best_message,
 )
@@ -23,31 +25,42 @@ MON = date(2026, 4, 13)
 TUE = date(2026, 4, 14)
 
 
-class TestClassify:
+class TestPersonalHistoryTriggerDetection:
+    """``_detect_personal_history_trigger`` is the pure-function core
+    of the PB / tied-PB / personal-worst / tied-worst classification.
+    Returns a :class:`Trigger` whose ``kind`` slots into the template
+    pools, or ``None`` for middling scores with nothing to celebrate
+    or roast."""
+
     def test_no_history_returns_none(self):
-        assert _classify([], 30) is None
+        assert _detect_personal_history_trigger([], 30) is None
 
     def test_strict_new_pb(self):
-        assert _classify([30, 40, 50], 25) == "new_pb"
+        t = _detect_personal_history_trigger([30, 40, 50], 25)
+        assert t is not None and t.kind == "new_pb"
 
     def test_tied_pb(self):
-        assert _classify([30, 40, 50], 30) == "tied_pb"
+        t = _detect_personal_history_trigger([30, 40, 50], 30)
+        assert t is not None and t.kind == "tied_pb"
 
     def test_strict_new_worst(self):
-        assert _classify([30, 40, 50], 60) == "new_worst"
+        t = _detect_personal_history_trigger([30, 40, 50], 60)
+        assert t is not None and t.kind == "new_worst"
 
     def test_tied_worst(self):
-        assert _classify([30, 40, 50], 50) == "tied_worst"
+        t = _detect_personal_history_trigger([30, 40, 50], 50)
+        assert t is not None and t.kind == "tied_worst"
 
     def test_middling_returns_none(self):
         # Between best (20) and worst (60), not matching either.
-        assert _classify([20, 40, 60], 35) is None
+        assert _detect_personal_history_trigger([20, 40, 60], 35) is None
 
     def test_all_identical_history_reads_as_tied_pb(self):
         # When every prior submission is the same, best == worst.
         # We lean positive and call a match a tied PB instead of a
         # tied worst so we don't mock a consistently-fine player.
-        assert _classify([30, 30, 30], 30) == "tied_pb"
+        t = _detect_personal_history_trigger([30, 30, 30], 30)
+        assert t is not None and t.kind == "tied_pb"
 
 
 class TestRenderMessage:
@@ -122,6 +135,182 @@ class TestRenderMessage:
         )
         assert body is not None
         assert "1 guess" in body
+
+
+class TestGatherSubmissionTriggers:
+    """``gather_submission_triggers`` runs every detector against the
+    just-inserted submission and returns the union of triggers that
+    fired. Caller is responsible for picking one (random or otherwise).
+    Tests use the in-memory repo so the queries are deterministic."""
+
+    def _seed(self, repo, player_id, name, game, puzzle_no, raw, day=TUE):
+        # ``player_id`` is the suffix on the synthetic whatsapp_id so
+        # the same name keeps the same identity across calls; the
+        # actual repo-assigned id comes back from get_or_create_player.
+        player = repo.get_or_create_player(
+            f"whatsapp:+6140000000{player_id}", name
+        )
+        repo.insert_score(
+            player_id=player.id, game=game, puzzle_no=puzzle_no,
+            puzzle_date=day, raw_score=raw, share_text="x",
+        )
+        return player.id
+
+    def test_first_submission_only_fires_no_triggers(self):
+        # Solo player, first-ever submission. No prior history to
+        # compare against, no field for "best of today", no record
+        # to break (record needs a runner-up). All detectors should
+        # bow out cleanly.
+        repo = InMemoryRepository()
+        alice_id = self._seed(repo, 1, "Alice", "queens", 714, 30)
+        triggers = gather_submission_triggers(
+            repo, player_id=alice_id, game="queens",
+            new_raw=30, today=TUE, prior_raws=[],
+        )
+        assert triggers == []
+
+    def test_personal_pb_fires(self):
+        repo = InMemoryRepository()
+        alice_id = self._seed(repo, 1, "Alice", "queens", 713, 25, day=MON)
+        self._seed(repo, 1, "Alice", "queens", 714, 20)
+        triggers = gather_submission_triggers(
+            repo, player_id=alice_id, game="queens",
+            new_raw=20, today=TUE, prior_raws=[25],
+        )
+        kinds = {t.kind for t in triggers}
+        assert "new_pb" in kinds
+
+    def test_best_of_day_fires_when_player_beats_field(self):
+        # Bob already played today (30s), Alice just put down 20s.
+        # Alice's submission is best of today.
+        repo = InMemoryRepository()
+        self._seed(repo, 2, "Bob", "queens", 714, 30)
+        alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20)
+        triggers = gather_submission_triggers(
+            repo, player_id=alice_id, game="queens",
+            new_raw=20, today=TUE, prior_raws=[],
+        )
+        kinds = {t.kind for t in triggers}
+        assert "best_of_day" in kinds
+
+    def test_worst_of_day_fires_when_player_lags_field(self):
+        repo = InMemoryRepository()
+        self._seed(repo, 2, "Bob", "queens", 714, 30)
+        alice_id = self._seed(repo, 1, "Alice", "queens", 714, 90)
+        triggers = gather_submission_triggers(
+            repo, player_id=alice_id, game="queens",
+            new_raw=90, today=TUE, prior_raws=[],
+        )
+        kinds = {t.kind for t in triggers}
+        assert "worst_of_day" in kinds
+
+    def test_no_today_extreme_when_alone(self):
+        # Only Alice has played queens today; "best of day" doesn't
+        # fire because there's no field to beat.
+        repo = InMemoryRepository()
+        alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20)
+        triggers = gather_submission_triggers(
+            repo, player_id=alice_id, game="queens",
+            new_raw=20, today=TUE, prior_raws=[],
+        )
+        kinds = {t.kind for t in triggers}
+        assert "best_of_day" not in kinds
+        assert "worst_of_day" not in kinds
+
+    def test_all_time_record_fires_when_runner_up_exists(self):
+        # Bob held the all-time record at 30s; Alice just hit 20s.
+        # Alice's submission is the new all-time record; Bob's 30s
+        # is the runner-up that gets credited as the prior holder.
+        repo = InMemoryRepository()
+        self._seed(repo, 2, "Bob", "queens", 700, 30, day=MON)
+        alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20)
+        triggers = gather_submission_triggers(
+            repo, player_id=alice_id, game="queens",
+            new_raw=20, today=TUE, prior_raws=[],
+        )
+        kinds = {t.kind for t in triggers}
+        assert "all_time_record" in kinds
+        record = next(t for t in triggers if t.kind == "all_time_record")
+        assert record.format_data["prior_holder"] == "Bob"
+
+    def test_all_time_anti_record_fires(self):
+        # Bob's 30s was the all-time worst; Alice now puts up 90s.
+        repo = InMemoryRepository()
+        self._seed(repo, 2, "Bob", "queens", 700, 30, day=MON)
+        alice_id = self._seed(repo, 1, "Alice", "queens", 714, 90)
+        triggers = gather_submission_triggers(
+            repo, player_id=alice_id, game="queens",
+            new_raw=90, today=TUE, prior_raws=[],
+        )
+        kinds = {t.kind for t in triggers}
+        assert "all_time_anti_record" in kinds
+
+    def test_multiple_triggers_can_fire_simultaneously(self):
+        # Alice's 20s is BOTH her PB AND best of today AND a new
+        # all-time record. The gatherer should return all three,
+        # leaving the random pick to the caller.
+        repo = InMemoryRepository()
+        alice_id = self._seed(
+            repo, 1, "Alice", "queens", 700, 30, day=MON
+        )  # Alice's old PB
+        self._seed(repo, 2, "Bob", "queens", 714, 25)  # today's prior leader
+        self._seed(repo, 1, "Alice", "queens", 714, 20)
+        triggers = gather_submission_triggers(
+            repo, player_id=alice_id, game="queens",
+            new_raw=20, today=TUE, prior_raws=[30],
+        )
+        kinds = {t.kind for t in triggers}
+        assert "new_pb" in kinds
+        assert "best_of_day" in kinds
+        assert "all_time_record" in kinds
+
+
+class TestMaybeNotifyPersonalBestIntegration:
+    """End-to-end smoke test for the orchestration entry point: it
+    should pick one trigger at random and return its rendered body
+    when at least one fires."""
+
+    def test_returns_body_when_any_trigger_fires(self):
+        repo = InMemoryRepository()
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        # Bob's 30s is the prior all-time fastest; Alice just hit 20s.
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=700,
+            puzzle_date=MON, raw_score=30, share_text="x",
+        )
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=TUE, raw_score=20, share_text="x",
+        )
+        body = maybe_notify_personal_best(
+            repo, None,
+            player=alice,
+            game="queens",
+            new_raw=20,
+            today=TUE,
+        )
+        assert body is not None
+        assert "Alice" in body
+        assert "Queens" in body
+
+    def test_returns_none_when_no_triggers_fire(self):
+        # Player's first submission of a game with no field around —
+        # no triggers should fire.
+        repo = InMemoryRepository()
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=TUE, raw_score=30, share_text="x",
+        )
+        body = maybe_notify_personal_best(
+            repo, None,
+            player=alice,
+            game="queens",
+            new_raw=30,
+            today=TUE,
+        )
+        assert body is None
 
 
 # ---------------------------------------------------------------------------

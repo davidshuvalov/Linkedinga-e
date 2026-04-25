@@ -8,9 +8,26 @@ acknowledgment of a valid submission.
 
 Public entry points:
 
-- :func:`maybe_notify_personal_best` — compares a just-submitted raw
-  score against the player's history for that game and DMs a
-  congrats (new/tied PB) or a roast (new/tied worst-ever).
+- :func:`maybe_notify_personal_best` — runs every detector below
+  against the just-inserted submission and DMs a single line drawn
+  from whichever trigger fired. When more than one trigger fires
+  (e.g. a personal best that's ALSO the best of today), one is
+  picked at random — there's no priority order, all triggers are
+  equally valid headlines.
+
+  Trigger kinds currently detected:
+    * ``new_pb``        — beats the player's prior best for this game
+    * ``tied_pb``       — equals the player's prior best
+    * ``new_worst``     — beats the player's prior worst (slowest)
+    * ``tied_worst``    — equals the player's prior worst
+    * ``best_of_day``   — fastest score for this game today
+                          across every player who's submitted
+    * ``worst_of_day``  — slowest score for this game today
+    * ``all_time_record``      — fastest score for this game ever
+                                 (across every player, all time)
+    * ``all_time_anti_record`` — slowest score for this game ever
+                                 ("longest LinkedIn game ever")
+
 - :func:`maybe_notify_day_complete` — when the submission means the
   player has now played every enabled game for the LA day, DM a
   personal summary with per-game score + rank and their current
@@ -20,8 +37,10 @@ Public entry points:
 from __future__ import annotations
 
 import logging
+import random
+from dataclasses import dataclass, field
 from datetime import date
-from typing import Dict, FrozenSet, List, Optional, Sequence
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .config import Settings
 from .db import Player, Repository, ScoreRow
@@ -33,64 +52,386 @@ from .sender import send_dm
 logger = logging.getLogger(__name__)
 
 
-# Rotated deterministically on raw_score so repeat PBs don't always
-# get the same line. No emojis — matches the project's no-emoji
-# convention. Keep short: WhatsApp DMs read better as one punchy line.
+# Templates by trigger kind. Each pool gets randomly sampled when the
+# trigger fires — no day-ordinal rotation here because submissions
+# happen at any time and need to feel fresh per submission. WhatsApp
+# DMs read best as one punchy line; keep them short.
 _NEW_PB_TEMPLATES = (
     "PERSONAL BEST on {game}: {new}. Previous best {prior}. Absolute scenes.",
     "New PB, {name}. {game} in {new} (was {prior}). Frame it.",
     "{name} just cooked {game}: {new}. Old PB {prior}. Victory lap allowed.",
     "Big dog alert: {name} clocked a new {game} PB of {new} (was {prior}).",
+    "{game} bowed to you, {name}. New PB {new}, smashed your old {prior}.",
+    "Ding ding — new {game} PB for {name}: {new}. Yesterday's {prior} is now history.",
+    "{name}, that's a fresh personal best on {game} ({new}). Old PB: {prior}. Yum.",
+    "Stop the press — {name} hit {new} on {game} (PB, was {prior}).",
+    "Cooking with gas, {name}. New {game} PB {new}, beating your own {prior}.",
+    "{name} just rewrote their {game} record book. {new} (PB, was {prior}).",
+    "Personal {game} record for {name}: {new}. Down from {prior}. Big day.",
+    "{name}, a thing of beauty: {new} on {game}, your fastest ever (was {prior}).",
+    "New PB unlocked, {name}. {game} in {new}. Old shame: {prior}.",
+    "Tape measure out — {name} stretched their own {game} record to {new} (was {prior}).",
 )
 _TIED_PB_TEMPLATES = (
     "Matched your {game} PB ({new}). Consistency is a skill.",
     "Tied your {game} best ({new}). Annoyingly reliable.",
     "{name}, you equalled your own {game} record ({new}). Do it again and it's a trend.",
+    "{name}, that's a PB tie on {game} ({new}). Inches from breaking it.",
+    "Same as your {game} best, {name}: {new}. Steady as she goes.",
+    "{name} matched their {game} PB ({new}). Twin peaks.",
+    "Equal PB on {game}, {name}: {new}. Watch out for the next one.",
+    "{name}, you tied your {game} record ({new}). The universe is consistent.",
+    "Mirror match — {name}'s {game} in {new} ties their own personal best.",
+    "{name}: {new} on {game}, dead level with your PB. Repeatable.",
 )
 _NEW_WORST_TEMPLATES = (
     "Yikes. Worst-ever {game} ({new}). Previous low was {prior}. Wasn't your day.",
     "{name} put up a new personal-worst {game}: {new}. The old shame was {prior}.",
     "Oof. {game} in {new} — your new bottom of the barrel (was {prior}). We've all been there. Some of us more than others.",
+    "New basement, {name}. {game} in {new}. Old basement: {prior}. Renovation pending.",
+    "{name}, that's your slowest-ever {game}: {new} (worst was {prior}). Brutal.",
+    "Tough one, {name}. {game} in {new} — new personal worst (was {prior}).",
+    "{name} just bottomed out on {game}: {new}. Old low: {prior}. Recovery starts now.",
+    "Big sigh. {name}'s {game} in {new} — slowest you've ever managed (was {prior}).",
+    "{name}, the bot is contractually obliged to mention: {new} on {game} is your new worst (was {prior}).",
+    "Personal worst on {game}, {name}: {new}. Your old low was {prior}. We've all been there.",
+    "{name} wrote a new chapter — \"{game} in {new}\". Old worst: {prior}. Ouch.",
+    "{name}, {game} in {new} is officially your slowest. Beats {prior} for the wrong reason.",
+    "{name}, the floor moved: {new} on {game} is your new bottom (was {prior}).",
+    "Worst-ever {game} for {name}: {new}. The previous {prior} looks fast now.",
 )
 _TIED_WORST_TEMPLATES = (
     "Tied your worst-ever {game} ({new}). At least you're predictable.",
     "{name}, you equalled your personal-worst {game} ({new}). Consistency is still technically a skill.",
+    "{name}, {new} on {game} — joint-worst with yourself. The dread tier.",
+    "Match made in misery — {name}'s {game} in {new} ties your personal worst.",
+    "Mirror-match, but the bad version. {name}'s {new} on {game} ties your worst.",
+    "{name}, you tied your slowest-ever {game} ({new}). Reliable, just at the wrong end.",
+    "Equal worst on {game} for {name}: {new}. The streak of disappointment continues.",
+    "{name}, that's a tied personal worst on {game} ({new}). At least it can't get any worse. Probably.",
+)
+
+# "Best of today" — fastest score on this game for the current LA day
+# across every player who's submitted. Implies a real beat, not a
+# trivial first-of-the-day lonely-win. ``{margin}`` is filled in as
+# a pretty time gap (e.g. "by 8 seconds" or "by 0:08") when there's
+# a previous best to beat; templates that don't use {margin} are
+# fine for the no-margin (first-to-beat) case.
+_BEST_OF_DAY_TEMPLATES = (
+    "{name}, that {game} run ({new}) is the fastest of the day. Top of the pile.",
+    "Best {game} of the day so far, {name}: {new}. Currently uncatchable.",
+    "{name} sets the {game} pace at {new}. Everyone else is now playing for second.",
+    "{game} in {new} — fastest of the day, {name}. Pole position.",
+    "{name}, you just leapfrogged the field on {game} ({new}). The board is yours for now.",
+    "Sole proprietor of today's fastest {game}, {name}: {new}.",
+    "{name}: {new} on {game}, fastest in the group today. Insufferable allowed.",
+    "Today's {game} crown goes to {name}: {new}. Wear it loudly.",
+    "{name} just clipped {game} in {new} — fastest of the day. Celebrate appropriately.",
+    "Quick maths: {new} > everyone else's {game} today. {name}, you absolute legend.",
+    "{name} drops {game} in {new} — currently the day's fastest. Hold steady.",
+    "Number one on the {game} board today, {name}: {new}. Lap of honour begins.",
+    "{name}: {new} on {game}, eclipsing the field. For now.",
+    "Fastest {game} of the day stamped at {new}, {name}. Rest of the pack: catch up.",
+    "{name}, you just bumped everyone off the top of {game} today: {new}.",
+)
+
+_WORST_OF_DAY_TEMPLATES = (
+    "{name}, {new} on {game} is currently the slowest of the day. Floor is yours.",
+    "Today's {game} wooden spoon: {name} with {new}. So far. There's still time. For others.",
+    "{name} pulls up the rear on {game} today: {new}. Everyone else has set faster.",
+    "Slowest {game} of the day belongs to {name}: {new}. Embrace the basement.",
+    "{name}, your {game} in {new} is dead last on today's board. You did show up though.",
+    "Bottom of today's {game} pile, {name}: {new}. The puzzle won that round.",
+    "{name} clocks {game} in {new} — currently the day's worst. Could get worse if the day's not done.",
+    "{game} in {new} — last of the day so far, {name}. Floor's not lava.",
+    "{name}: {new} on {game}, dragging the average down today. We see you.",
+    "Today's {game} basement: {name}, {new}. We're all friends here.",
+    "{name}, the puzzle didn't blink: {new} on {game}, slowest of the day.",
+    "Currently last on today's {game}, {name}: {new}. Tomorrow's a new day.",
+)
+
+# All-time record — fastest score for this game across all players,
+# all time. Single message; no margin needed (the previous record is
+# in {prior_holder} / {prior}).
+_ALL_TIME_RECORD_TEMPLATES = (
+    "{name} just set the ALL-TIME {game} record: {new}. {prior_holder}'s {prior} is now history.",
+    "STOP THE SHOW. {name} hit {new} on {game} — fastest in this group's recorded history. Old record: {prior_holder}'s {prior}.",
+    "Ladies and gentlemen, the new {game} world record holder is {name}: {new}. (Previous: {prior_holder}, {prior}.)",
+    "{name} broke the {game} all-time record. {new} beats {prior_holder}'s {prior}. Plaque coming.",
+    "Records exist to be broken, and {name} just broke the {game} one: {new}. {prior_holder}'s old {prior} is officially yesterday.",
+    "{name}: {new} on {game}. New all-time record. The previous holder ({prior_holder}, {prior}) sends their regards.",
+    "All-time {game} record falls to {name}: {new}. {prior_holder}'s {prior} held for as long as it could.",
+    "{name} is the new {game} GOAT. {new}, beating {prior_holder}'s {prior}. Engrave it.",
+    "History was made, {name}: {new} on {game} — the fastest this group has ever logged. {prior_holder}'s {prior} stood until now.",
+    "The book is rewritten. {name} took {game}'s all-time record with {new}. (Was {prior_holder}, {prior}.)",
+    "{name}, that's not just a PB — it's the {game} ALL-TIME record. {new}. Trophy room only just big enough.",
+    "{name} just etched their name into the {game} hall of fame: {new}, eclipsing {prior_holder}'s {prior}.",
+)
+
+# All-time anti-record — slowest score for this game ever recorded.
+# Lighter touch than a personal worst — this is rare and notable.
+_ALL_TIME_ANTI_RECORD_TEMPLATES = (
+    "{name}, that {game} run ({new}) is the slowest score this group has ever logged. Genuinely impressive.",
+    "Notable achievement, {name}: {new} on {game} is the slowest ever recorded here. {prior_holder}'s {prior} is now legendary in a different way.",
+    "{name} just claimed the all-time {game} anti-record: {new}. {prior_holder}'s {prior} has been usurped.",
+    "Hall of mediocrity update, {name}: {new} on {game} is the slowest score this group has ever seen. (Previous low: {prior_holder}, {prior}.)",
+    "{name}: {new}. That's the slowest {game} this bot has ever processed. {prior_holder}'s {prior} held the title until now.",
+    "Brand new all-time worst for {game}: {name} with {new}. Beats {prior_holder}'s old {prior} for sheer endurance.",
+    "{name}, that's officially the longest {game} anyone in this group has ever played: {new}. Take a bow. Or a nap.",
+    "Records can go either way — {name}'s {new} on {game} is now the all-time slowest. ({prior_holder}, {prior}, finally relieved.)",
+    "{name} just set a new bar — and lowered the floor. {game} in {new} is the group's all-time worst (was {prior_holder}, {prior}).",
+    "{name}, {new} on {game} is the slowest score in this group's history. Unique distinction. Sort of.",
+    "All-time anti-record alert: {name}'s {game} in {new} eclipses {prior_holder}'s {prior} for sheer footdragging.",
+    "{name} just made history (the wrong kind): {new} on {game}, slowest ever in this group.",
 )
 
 
-def _pick(templates: tuple, key: int) -> str:
-    """Deterministic template selection so reruns are idempotent."""
-    return templates[key % len(templates)]
+_TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
+    "new_pb": _NEW_PB_TEMPLATES,
+    "tied_pb": _TIED_PB_TEMPLATES,
+    "new_worst": _NEW_WORST_TEMPLATES,
+    "tied_worst": _TIED_WORST_TEMPLATES,
+    "best_of_day": _BEST_OF_DAY_TEMPLATES,
+    "worst_of_day": _WORST_OF_DAY_TEMPLATES,
+    "all_time_record": _ALL_TIME_RECORD_TEMPLATES,
+    "all_time_anti_record": _ALL_TIME_ANTI_RECORD_TEMPLATES,
+}
 
 
-def _classify(
-    prior_raws: list[int], new_raw: int
-) -> Optional[str]:
-    """Return ``"new_pb"`` / ``"tied_pb"`` / ``"new_worst"`` /
-    ``"tied_worst"`` based on how ``new_raw`` compares to
-    ``prior_raws`` (the player's other submissions for the same game,
-    excluding the just-inserted row). Returns ``None`` when the new
-    score is middling or there's no history to compare against.
+@dataclass
+class Trigger:
+    """One matched trigger plus the data its templates need to render.
 
-    Lower raw_score always means "better" — seconds for time games,
-    guess count for pinpoint — so the direction is the same for both.
+    ``kind`` keys into :data:`_TEMPLATES_BY_KIND`. ``format_data`` is
+    a dict of fields the templates can interpolate (``{name}``,
+    ``{game}``, ``{new}``, ``{prior}``, ``{prior_holder}``…). Detector
+    functions only need to populate the fields their pool actually
+    uses — extra fields are ignored, missing ones raise at
+    render-time which is loud and easy to fix.
     """
+
+    kind: str
+    format_data: Dict[str, str] = field(default_factory=dict)
+
+
+def _detect_personal_history_trigger(
+    prior_raws: List[int], new_raw: int
+) -> Optional[Trigger]:
+    """Existing PB / tied-PB / worst / tied-worst detection. Returns
+    a :class:`Trigger` whose ``format_data`` already has ``new`` and
+    (where applicable) ``prior`` populated as raw integers — caller
+    formats them to display strings."""
     if not prior_raws:
         return None
     best_before = min(prior_raws)
     worst_before = max(prior_raws)
     if new_raw < best_before:
-        return "new_pb"
+        return Trigger(
+            kind="new_pb",
+            format_data={"_new_raw": str(new_raw), "_prior_raw": str(best_before)},
+        )
     if new_raw == best_before:
-        # Guard against the degenerate case where best == worst
-        # (all prior scores identical): treat it as a tied PB so
-        # we lean positive rather than mocking a consistent player.
-        return "tied_pb"
+        return Trigger(
+            kind="tied_pb",
+            format_data={"_new_raw": str(new_raw)},
+        )
     if new_raw > worst_before:
-        return "new_worst"
+        return Trigger(
+            kind="new_worst",
+            format_data={"_new_raw": str(new_raw), "_prior_raw": str(worst_before)},
+        )
     if new_raw == worst_before:
-        return "tied_worst"
+        return Trigger(
+            kind="tied_worst",
+            format_data={"_new_raw": str(new_raw)},
+        )
     return None
+
+
+def _detect_today_extreme_trigger(
+    today_scores: Sequence[ScoreRow], new_raw: int, player_id: int
+) -> Optional[Trigger]:
+    """If the just-inserted score is currently the best (or worst) of
+    the day across all players, return the appropriate trigger.
+
+    Requires at least two distinct players for the day so a "first
+    submission of the day, trivially best" doesn't fire — the trigger
+    only feels earned when there's a field to beat.
+    """
+    distinct_players = {s.player_id for s in today_scores}
+    if len(distinct_players) < 2:
+        return None
+
+    raws = [s.raw_score for s in today_scores]
+    fastest = min(raws)
+    slowest = max(raws)
+
+    # The just-inserted row is in today_scores; ``new_raw`` is the
+    # caller's score. We treat ties for fastest/slowest cleanly: only
+    # claim the trigger when this player's score is strictly the
+    # extreme, OR tied at the extreme with no one currently above
+    # them. The simplest safe check: this player's row matches the
+    # extreme and nobody else with a strictly more-extreme score
+    # exists in the field.
+    others_below = [s.raw_score for s in today_scores if s.player_id != player_id]
+    if not others_below:
+        return None
+
+    if new_raw < min(others_below):
+        return Trigger(
+            kind="best_of_day",
+            format_data={"_new_raw": str(new_raw)},
+        )
+    if new_raw > max(others_below):
+        return Trigger(
+            kind="worst_of_day",
+            format_data={"_new_raw": str(new_raw)},
+        )
+    return None
+
+
+def _detect_all_time_record_trigger(
+    fastest_top: List[ScoreRow],
+    slowest_top: List[ScoreRow],
+    new_raw: int,
+    player_id: int,
+) -> Optional[Trigger]:
+    """Return a record / anti-record trigger when the just-inserted
+    row is the all-time fastest or slowest for the game.
+
+    ``fastest_top`` and ``slowest_top`` come from
+    :meth:`Repository.get_top_extremes_for_game` (top-N each side,
+    most-extreme first). The just-inserted row is already in the DB
+    when this runs, so ``fastest_top[0]`` either IS this player's
+    submission (record!) or someone else's (no record).
+
+    The "previous holder" for the message is the runner-up — i.e.
+    ``fastest_top[1]`` when [0] is the just-inserted row. We only
+    fire the trigger when there's a real previous holder to name,
+    avoiding the awkward "first-ever submission ⇒ trivially the
+    record" case.
+    """
+    record_trigger = _make_extreme_trigger(
+        kind="all_time_record",
+        top=fastest_top,
+        new_raw=new_raw,
+        player_id=player_id,
+    )
+    if record_trigger is not None:
+        return record_trigger
+    return _make_extreme_trigger(
+        kind="all_time_anti_record",
+        top=slowest_top,
+        new_raw=new_raw,
+        player_id=player_id,
+    )
+
+
+def _make_extreme_trigger(
+    *,
+    kind: str,
+    top: List[ScoreRow],
+    new_raw: int,
+    player_id: int,
+) -> Optional[Trigger]:
+    """Helper: turn a top-N list (fastest or slowest) into a Trigger
+    when the leader IS the just-inserted row and there's a runner-up
+    to credit as the prior holder."""
+    if len(top) < 2:
+        return None  # need a runner-up to name as the previous holder
+    leader, runner_up = top[0], top[1]
+    if leader.raw_score != new_raw or leader.player_id != player_id:
+        return None
+    if runner_up.player_id == player_id:
+        # The just-inserted player held BOTH first AND second place
+        # already. Awkward to phrase; skip rather than mislead.
+        return None
+    return Trigger(
+        kind=kind,
+        format_data={
+            "_new_raw": str(new_raw),
+            "_prior_raw": str(runner_up.raw_score),
+            "prior_holder": runner_up.player_name or "—",
+        },
+    )
+
+
+def gather_submission_triggers(
+    repo: Repository,
+    *,
+    player_id: int,
+    game: str,
+    new_raw: int,
+    today: date,
+    prior_raws: List[int],
+) -> List[Trigger]:
+    """Run every detector against the just-inserted submission and
+    return the list of triggers that fired. Caller picks one (at
+    random or by some other strategy).
+
+    Detectors are independent — a single submission can fire
+    multiple triggers (e.g. a personal best AND best of today).
+    Order in the returned list is stable but irrelevant; callers
+    that want randomness should use :func:`random.choice`.
+    """
+    triggers: List[Trigger] = []
+
+    personal = _detect_personal_history_trigger(prior_raws, new_raw)
+    if personal is not None:
+        triggers.append(personal)
+
+    try:
+        today_scores = repo.list_today_for_game(game=game, day=today)
+    except Exception:
+        logger.exception(
+            "list_today_for_game failed (game=%s, day=%s) — skipping today triggers",
+            game,
+            today,
+        )
+        today_scores = []
+    today_extreme = _detect_today_extreme_trigger(today_scores, new_raw, player_id)
+    if today_extreme is not None:
+        triggers.append(today_extreme)
+
+    try:
+        fastest_top, slowest_top = repo.get_top_extremes_for_game(game=game, n=2)
+    except Exception:
+        logger.exception(
+            "get_top_extremes_for_game failed (game=%s) — skipping all-time triggers",
+            game,
+        )
+        fastest_top, slowest_top = [], []
+    record = _detect_all_time_record_trigger(
+        fastest_top, slowest_top, new_raw, player_id
+    )
+    if record is not None:
+        triggers.append(record)
+
+    return triggers
+
+
+def render_trigger(trigger: Trigger, *, player_name: str, game: str) -> str:
+    """Format ``trigger`` into the DM body. Pulls a random template
+    from the trigger's pool and resolves ``{name}`` / ``{game}`` /
+    ``{new}`` / ``{prior}`` / ``{prior_holder}`` from the format
+    data and the caller-supplied identity bits.
+    """
+    pool = _TEMPLATES_BY_KIND[trigger.kind]
+    template = random.choice(pool)
+    game_label = GAME_DISPLAY.get(game, game)
+
+    fd = trigger.format_data
+    subs: Dict[str, Any] = {
+        "name": player_name,
+        "game": game_label,
+    }
+    if "_new_raw" in fd:
+        subs["new"] = format_raw_score(game, int(fd["_new_raw"]))
+    if "_prior_raw" in fd:
+        subs["prior"] = format_raw_score(game, int(fd["_prior_raw"]))
+    if "prior_holder" in fd:
+        subs["prior_holder"] = fd["prior_holder"]
+    return template.format(**subs)
 
 
 def render_personal_best_message(
@@ -100,35 +441,13 @@ def render_personal_best_message(
     new_raw: int,
     prior_raws: list[int],
 ) -> Optional[str]:
-    """Pure-function core of :func:`maybe_notify_personal_best` —
-    returns the DM body to send, or ``None`` if the score isn't
-    notable. Exposed separately so tests can assert on the text
-    without stubbing the Twilio sender."""
-    verdict = _classify(prior_raws, new_raw)
-    if verdict is None:
+    """Pure-function core preserved for the personal-history-only
+    path. Used by tests that don't want to stub a repo. The full
+    multi-trigger entry point is :func:`maybe_notify_personal_best`."""
+    trigger = _detect_personal_history_trigger(prior_raws, new_raw)
+    if trigger is None:
         return None
-
-    game_label = GAME_DISPLAY.get(game, game)
-    new_str = format_raw_score(game, new_raw)
-
-    if verdict == "new_pb":
-        prior_str = format_raw_score(game, min(prior_raws))
-        return _pick(_NEW_PB_TEMPLATES, new_raw).format(
-            name=player_name, game=game_label, new=new_str, prior=prior_str
-        )
-    if verdict == "tied_pb":
-        return _pick(_TIED_PB_TEMPLATES, new_raw).format(
-            name=player_name, game=game_label, new=new_str
-        )
-    if verdict == "new_worst":
-        prior_str = format_raw_score(game, max(prior_raws))
-        return _pick(_NEW_WORST_TEMPLATES, new_raw).format(
-            name=player_name, game=game_label, new=new_str, prior=prior_str
-        )
-    # tied_worst
-    return _pick(_TIED_WORST_TEMPLATES, new_raw).format(
-        name=player_name, game=game_label, new=new_str
-    )
+    return render_trigger(trigger, player_name=player_name, game=game)
 
 
 def maybe_notify_personal_best(
@@ -138,12 +457,18 @@ def maybe_notify_personal_best(
     player: Player,
     game: str,
     new_raw: int,
+    today: Optional[date] = None,
 ) -> Optional[str]:
-    """DM ``player`` a congrats or roast if ``new_raw`` is a new/tied
-    best or worst for this game. Returns the DM body sent, or
-    ``None`` when the score isn't notable (or ``settings`` is
-    ``None``, which is the in-webhook fallback when Twilio isn't
-    configured — tests exercise this path).
+    """DM ``player`` a one-line zinger when the just-inserted submission
+    fires any of the trigger detectors (PB, tied PB, personal worst,
+    tied worst, best of today, worst of today, all-time record,
+    all-time anti-record).
+
+    When more than one trigger fires, picks one at random — there's
+    no priority order, all triggers are equally valid headlines.
+    Returns the DM body sent, or ``None`` when no triggers fired (or
+    ``settings`` is ``None``, the in-webhook fallback when Twilio
+    isn't configured — tests exercise this path).
 
     Exceptions are caught and logged so a notification failure can't
     sink the webhook reply to the original submission.
@@ -152,7 +477,7 @@ def maybe_notify_personal_best(
         all_scores = repo.list_player_scores(player.id)
     except Exception:
         logger.exception(
-            "Failed to load player history for PB check (player=%s)", player.id
+            "Failed to load player history for trigger check (player=%s)", player.id
         )
         return None
 
@@ -168,21 +493,34 @@ def maybe_notify_personal_best(
         # rather than risk a false PB on inconsistent state.
         logger.warning(
             "Just-inserted %s %s not found in player %s history — "
-            "skipping PB check",
+            "skipping trigger check",
             game,
             new_raw,
             player.id,
         )
         return None
 
-    body = render_personal_best_message(
-        player_name=player.display_name,
+    # Resolve today's puzzle date for the today-extreme trigger.
+    # Caller can pass it explicitly (the webhook already has it as
+    # ``puzzle_date``); fall back to ``date.today()`` for ad-hoc
+    # invocations and tests.
+    today = today or date.today()
+
+    triggers = gather_submission_triggers(
+        repo,
+        player_id=player.id,
         game=game,
         new_raw=new_raw,
+        today=today,
         prior_raws=game_raws,
     )
-    if body is None:
+    if not triggers:
         return None
+
+    # When multiple triggers fire (e.g. a personal best that's also
+    # the best of the day), pick one at random — no priority order.
+    chosen = random.choice(triggers)
+    body = render_trigger(chosen, player_name=player.display_name, game=game)
 
     if settings is None:
         # Local / test path where Twilio isn't configured. Still
