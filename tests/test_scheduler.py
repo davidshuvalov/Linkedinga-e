@@ -332,6 +332,75 @@ class TestPeriodTotalsInRecap:
         assert "Month totals — Apr 2026" in out
 
 
+class TestPastDayRecapLeaderboard:
+    """Past-day recaps must show the standings as they stood at the
+    end of that day — NOT the standings as of when the recap is
+    rendered. Without this, a Tuesday recap rendered on Friday would
+    fold Wed/Thu/Fri scores into the "Week so far" block, lying about
+    what Tuesday's board actually looked like."""
+
+    WED = date(2026, 4, 15)
+    THU = date(2026, 4, 16)
+
+    def test_week_so_far_excludes_scores_after_target_day(self):
+        # Alice DOMINATES Tuesday (40 pts of headroom) but BOMBS later
+        # in the week. Bob is the inverse.
+        scores = [
+            # Tuesday — Alice crushes a 5-player round.
+            _row(1, "Alice",   "queens", 714, 6,  TUE),
+            _row(2, "Bob",     "queens", 714, 50, TUE),
+            _row(3, "Charlie", "queens", 714, 60, TUE),
+            _row(4, "Dee",     "queens", 714, 70, TUE),
+            _row(5, "Evan",    "queens", 714, 80, TUE),
+            # Wednesday — Bob crushes the same shape.
+            _row(2, "Bob",     "tango", 554, 6,  self.WED),
+            _row(1, "Alice",   "tango", 554, 50, self.WED),
+            _row(3, "Charlie", "tango", 554, 60, self.WED),
+            _row(4, "Dee",     "tango", 554, 70, self.WED),
+            _row(5, "Evan",    "tango", 554, 80, self.WED),
+        ]
+        # Render Tuesday's recap. Even though Wed scores exist in the
+        # data set, they must NOT appear in Tuesday's "Week so far".
+        out = daily_recap(TUE, scores, ENABLED)
+
+        # The Tango block is Wednesday — must not appear in Tuesday's
+        # per-game rankings.
+        assert "Tango #554" not in out
+
+        # In the "Week so far" block, Alice (Tuesday's winner) must
+        # outrank Bob (Wednesday's winner) — Wednesday hasn't
+        # "happened yet" from Tuesday's POV.
+        wsf = out.split("Week so far:")[-1]
+        alice_pos = wsf.find("Alice")
+        bob_pos = wsf.find("Bob")
+        assert alice_pos != -1 and bob_pos != -1
+        assert alice_pos < bob_pos
+
+        # And the "Game standings (week)" block must show only Queens
+        # — Tango played on Wednesday hasn't happened yet.
+        gs_section = out.split("Game standings (week):")[-1].split(
+            "Week so far:"
+        )[0]
+        assert "Queens:" in gs_section
+        assert "Tango:" not in gs_section
+
+    def test_today_recap_unchanged_by_filter(self):
+        # Sanity: when ``day`` is the latest day with scores, the
+        # filter is a no-op and the recap looks the same as before.
+        scores = [
+            _row(1, "Alice", "queens", 713, 10, MON),
+            _row(2, "Bob",   "queens", 713, 20, MON),
+            _row(1, "Alice", "queens", 714, 10, TUE),
+            _row(2, "Bob",   "queens", 714, 20, TUE),
+        ]
+        out = daily_recap(TUE, scores, ENABLED)
+        # Both days' worth of points feed into the leaderboard.
+        wsf = out.split("Week so far:")[-1]
+        # Alice played both days, so her G:2 (two rounds) should show
+        # up — proving the filter included Tuesday's scores.
+        assert "G:2" in wsf
+
+
 class TestWeeklyWrap:
     def test_no_scores(self):
         out = weekly_wrap(MON, SUN, [], ENABLED)
