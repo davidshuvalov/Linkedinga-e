@@ -273,6 +273,24 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
 }
 
 
+# PB-trigger DMs are capped to ``_PB_DM_DAILY_CAP`` per player per
+# day so an active player isn't drowned in DMs. SPECIAL_TRIGGER_KINDS
+# bypass the cap — they're rare and worth surfacing every time. The
+# cap counts BOTH special and non-special DMs (so a player who's
+# already had two specials still gets a third special, but won't get
+# any non-special on top); the cap is "non-special never exceeds 2".
+_PB_DM_DAILY_CAP = 2
+
+SPECIAL_TRIGGER_KINDS: frozenset = frozenset({
+    "new_pb",                # personal best for this game
+    "tied_pb",               # equalled personal best
+    "all_time_record",       # all-time fastest across the group
+    "all_time_anti_record",  # all-time slowest across the group
+    "dow_pb",                # best on this game on this weekday
+    "year_pb",               # fastest of the calendar year
+})
+
+
 @dataclass
 class Trigger:
     """One matched trigger plus the data its templates need to render.
@@ -738,10 +756,50 @@ def maybe_notify_personal_best(
     if not triggers:
         return None
 
-    # When multiple triggers fire (e.g. a personal best that's also
-    # the best of the day), pick one at random — no priority order.
-    chosen = random.choice(triggers)
+    # Cap enforcement: an active player can fire several triggers a
+    # day (best-of-day on each game, first-today, etc.). To stop the
+    # bot from drowning them in DMs we cap non-special triggers at
+    # _PB_DM_DAILY_CAP per player per day. Special triggers (real
+    # PBs, all-time records, day-of-week PBs, year PBs) bypass the
+    # cap — they're rare and earned.
+    try:
+        already_sent = repo.count_pb_dms_today(player.id, today)
+    except Exception:
+        logger.exception(
+            "count_pb_dms_today failed (player=%s) — defaulting to 0",
+            player.id,
+        )
+        already_sent = 0
+
+    if already_sent >= _PB_DM_DAILY_CAP:
+        # Above the cap → only specials can still go through.
+        special = [t for t in triggers if t.kind in SPECIAL_TRIGGER_KINDS]
+        if not special:
+            logger.info(
+                "PB DM suppressed for player %s — daily cap reached "
+                "and no special trigger fired (kinds=%s)",
+                player.id, [t.kind for t in triggers],
+            )
+            return None
+        chosen = random.choice(special)
+    else:
+        # Under the cap → random pick from any matching trigger.
+        chosen = random.choice(triggers)
+
     body = render_trigger(chosen, player_name=player.display_name, game=game)
+
+    # Bump the per-day counter regardless of whether Twilio is
+    # configured — tests + dry-run callers should see the cap take
+    # effect just like production. The counter only tracks "we
+    # decided to send a DM"; if Twilio fails afterwards that's a
+    # separate concern (the player still notionally got their slot).
+    try:
+        repo.record_pb_dm(player.id, today)
+    except Exception:
+        logger.exception(
+            "record_pb_dm failed (player=%s, day=%s) — DM still sent",
+            player.id, today,
+        )
 
     if settings is None:
         # Local / test path where Twilio isn't configured. Still

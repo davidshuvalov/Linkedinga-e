@@ -184,6 +184,21 @@ class Repository(Protocol):
         ``day``. Idempotent."""
         ...
 
+    def count_pb_dms_today(self, player_id: int, day: date) -> int:
+        """How many PB-trigger DMs have already been sent to
+        ``player_id`` on ``day``? Used to enforce the per-day cap on
+        non-special triggers (best-of-day, worst-of-day, first-today
+        etc.) so a hyper-active player isn't spammed. Special
+        triggers (real PBs, all-time records, day-of-week PBs)
+        bypass the cap."""
+        ...
+
+    def record_pb_dm(self, player_id: int, day: date) -> None:
+        """Increment the per-day PB-DM count for ``player_id`` on
+        ``day``. Each call adds one to the count read by
+        :func:`count_pb_dms_today`."""
+        ...
+
     def list_today_for_game(
         self, *, game: str, day: date
     ) -> List[ScoreRow]:
@@ -227,6 +242,9 @@ class InMemoryRepository:
     # (player_id, kind, day) → recorded. Drives the per-day
     # per-command cooldown for the brag/gripe Easter eggs.
     _taunt_log: set = field(default_factory=set)
+    # (player_id, day) → int. Counts PB-trigger DMs sent today so the
+    # per-day cap (2 non-special DMs) can be enforced.
+    _pb_dm_counts: Dict[Tuple[int, date], int] = field(default_factory=dict)
 
     def get_or_create_player(
         self, whatsapp_id: str, display_name: str
@@ -433,6 +451,13 @@ class InMemoryRepository:
         self, player_id: int, kind: str, day: date
     ) -> None:
         self._taunt_log.add((player_id, kind, day))
+
+    def count_pb_dms_today(self, player_id: int, day: date) -> int:
+        return self._pb_dm_counts.get((player_id, day), 0)
+
+    def record_pb_dm(self, player_id: int, day: date) -> None:
+        key = (player_id, day)
+        self._pb_dm_counts[key] = self._pb_dm_counts.get(key, 0) + 1
 
     def list_today_for_game(
         self, *, game: str, day: date
@@ -864,6 +889,55 @@ class SupabaseRepository:
         self, player_id: int, kind: str, day: date
     ) -> None:
         self.mark_recap_sent(day, self._taunt_key(player_id, kind))
+
+    # PB-DM count piggy-backs on recap_log too. Unlike taunts (one
+    # row per kind per day per player), the PB-DM counter needs to
+    # support multiple rows per (player, day), so each row gets a
+    # unique suffix. PostgREST's count="exact" returns the matching
+    # row count without pulling the rows themselves.
+    @staticmethod
+    def _pb_dm_key_prefix(player_id: int) -> str:
+        return f"pb_dm:{player_id}:"
+
+    def count_pb_dms_today(self, player_id: int, day: date) -> int:
+        try:
+            resp = (
+                self._client.table("recap_log")
+                .select("id", count="exact")
+                .eq("recap_date", day.isoformat())
+                .like("recap_type", f"{self._pb_dm_key_prefix(player_id)}%")
+                .execute()
+            )
+            return resp.count or 0
+        except Exception:
+            # If the count query fails for any reason (RLS, missing
+            # table, network blip), err on the side of letting the DM
+            # through rather than silencing the player.
+            return 0
+
+    def record_pb_dm(self, player_id: int, day: date) -> None:
+        # Suffix with monotonic ns timestamp so each row has a unique
+        # recap_type and the (recap_date, recap_type) unique
+        # constraint holds.
+        import time
+        key = f"{self._pb_dm_key_prefix(player_id)}{time.time_ns()}"
+        try:
+            (
+                self._client.table("recap_log")
+                .insert({
+                    "recap_date": day.isoformat(),
+                    "recap_type": key,
+                })
+                .execute()
+            )
+        except Exception:
+            # Logging the count-write failure rather than raising; the
+            # DM was already sent successfully and we don't want to
+            # crash the webhook on a counter-write hiccup.
+            import logging
+            logging.getLogger(__name__).exception(
+                "record_pb_dm insert failed (player=%s day=%s)", player_id, day,
+            )
 
     def list_today_for_game(
         self, *, game: str, day: date

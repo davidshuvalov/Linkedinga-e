@@ -191,6 +191,48 @@ def run_daily_recap(
     return body
 
 
+def run_weekly_wrap_early(
+    repo: Repository,
+    settings: Settings,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """Cron entry point — fire the Sunday weekly wrap at 23:59 LA,
+    one minute before the new puzzle drop.
+
+    The original Mon 00:00 LA recap cron *also* fires the wrap when
+    closing Sunday, but firing it 1 minute earlier (still on the LA
+    Sunday) lands it before LinkedIn rolls — the wrap arrives in
+    Sydney at 16:59 Mon, and the new-games message follows at 17:01,
+    so the closing-out and the kicking-off don't collide.
+
+    Idempotent via ``recap_log`` (uses the same ``"weekly"`` key the
+    Mon 00:00 cron checks). Bails silently if it's not actually
+    Sunday LA — guards against accidental triggering.
+    """
+    now = now or datetime.now(settings.tz)
+    target_day = la_date(now)
+    if not _is_sunday(target_day):
+        logger.info(
+            "weekly_wrap_early called on a non-Sunday LA day (%s) — skipping",
+            target_day,
+        )
+        return None
+    if repo.has_recap_been_sent(target_day, "weekly"):
+        logger.info(
+            "Skipping early weekly wrap for LA Sun %s — already sent",
+            target_day,
+        )
+        return None
+    logger.info("Running early weekly wrap for LA Sun %s", target_day)
+
+    body, dm_targets = render_daily(repo, settings, target_day)
+    send_recap(settings, body, dm_targets=dm_targets)
+    repo.mark_recap_sent(target_day, "weekly")
+    send_champion_loser_dms(repo, settings, target_day)
+    return body
+
+
 # ---------------------------------------------------------------------------
 # Champion / wooden-spoon personal DMs (Sunday LA only)
 # ---------------------------------------------------------------------------

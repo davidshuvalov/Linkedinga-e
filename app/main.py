@@ -119,6 +119,7 @@ def _setup_scheduler() -> None:
         run_morning_nudge,
         run_new_games_announcement,
         run_pre_reset_warning,
+        run_weekly_wrap_early,
     )
 
     settings = load_settings()
@@ -135,6 +136,9 @@ def _setup_scheduler() -> None:
 
     def _new_games():
         run_new_games_announcement(get_repository(), settings)
+
+    def _weekly_wrap():
+        run_weekly_wrap_early(get_repository(), settings)
 
     # Each stage gets its own closure so APScheduler can hold a
     # distinct callable per cron job. A loop with late-binding
@@ -181,13 +185,28 @@ def _setup_scheduler() -> None:
         id="new_games_announcement",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _weekly_wrap,
+        # Sunday 23:59 LA — one minute BEFORE the new puzzle drop so
+        # the wrap closes out the week before the next one starts.
+        # = 16:59 Sydney Monday (PDT) / 18:59 Sydney Monday (PST).
+        # The Mon 00:00 LA daily_recap cron above sees the wrap is
+        # already marked sent and skips silently.
+        CronTrigger(
+            day_of_week="sun", hour=23, minute=59, timezone=recap_tz,
+        ),
+        id="weekly_wrap_early",
+        replace_existing=True,
+    )
 
     scheduler.start()
     logger.info(
         "Scheduler started: daily_recap at 00:00 %s, "
+        "weekly_wrap_early at Sun 23:59 %s, "
         "new_games_announcement at 00:01 %s, "
         "morning_nudge at 08:30 %s, "
         "pre_reset_warning at %s %s",
+        recap_tz,
         recap_tz,
         recap_tz,
         nudge_tz,
