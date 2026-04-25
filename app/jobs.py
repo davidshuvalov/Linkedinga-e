@@ -69,6 +69,8 @@ def render_daily(
     repo: Repository,
     settings: Settings,
     target_day: date,
+    *,
+    include_missing_today_nag: bool = True,
 ) -> Tuple[str, List[str]]:
     """Build the daily-recap body + DM target list for ``target_day``.
 
@@ -76,6 +78,12 @@ def render_daily(
     (Mon–Sat LA) or a weekly wrap (Sun LA) — the logic lives here so
     both the scheduled job and the on-demand ``recap`` command pick up
     the same shape automatically.
+
+    ``include_missing_today_nag`` controls the passive-aggressive
+    "Haven't heard from X today" footer. The scheduled cron leaves
+    this on (the nag is the whole point of an active-day recap);
+    on-demand recaps for *past* days drop it because the nag doesn't
+    apply retroactively.
     """
     monday, sunday = week_bounds(target_day)
     week_scores = repo.list_scores(date_from=monday, date_to=sunday)
@@ -106,6 +114,7 @@ def render_daily(
             enabled_games=settings.enabled_games,
             month_scores=month_scores,
             year_scores=year_scores,
+            include_missing_today_nag=include_missing_today_nag,
         )
 
     dm_targets = repo.list_active_whatsapp_ids(

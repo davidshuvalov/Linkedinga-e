@@ -1256,10 +1256,14 @@ class TestWrapCommand:
 
 class TestHistoricalRecapCommands:
     """Date-scoped queries. Bare date keywords (``yesterday``, ``N days
-    ago``) return just the leaderboard as of that day — the common ask
-    is "what were the standings?". ``recap yesterday`` / ``recap N days
-    ago`` / ``recap YYYY-MM-DD`` return the full daily recap for
-    someone who actually wants the per-game breakdown."""
+    ago``) return the full daily recap as of that day — the common ask
+    is "what happened yesterday?". The compact leaderboard view is
+    still available behind the explicit ``leaderboard …`` /
+    ``standings …`` prefix for callers who want just the standings.
+
+    Past-day recaps drop the "Haven't heard from X today" nag at the
+    bottom — that footer only makes sense for the current in-progress
+    day."""
 
     def _seed_day(self, repo, day, player_id, name, raw, puzzle_no=714):
         repo.get_or_create_player(f"whatsapp:+6140000000{player_id}", name)
@@ -1272,7 +1276,7 @@ class TestHistoricalRecapCommands:
             share_text=f"Queens #{puzzle_no} seeded",
         )
 
-    def test_yesterday_returns_leaderboard_as_of_yesterday(self, repo):
+    def test_yesterday_returns_full_recap_for_yesterday(self, repo):
         from datetime import timedelta
         from app.puzzles import la_date
 
@@ -1289,15 +1293,14 @@ class TestHistoricalRecapCommands:
             settings=_settings_with_default_games(),
         )
         assert reply is not None
-        # Leaderboard header, not a recap header.
-        assert "Week so far" in reply
+        # Full recap shape: per-game header AND the running leaderboard.
+        assert "Daily recap" in reply
         assert yesterday.strftime("%a %d %b") in reply
+        assert "Queens #713" in reply
+        assert "Week so far" in reply
         assert "1. Alice" in reply
-        # The per-game "Queens #713" section only shows up in the full
-        # recap, not the leaderboard-only response.
-        assert "Queens #713" not in reply
 
-    def test_n_days_ago_returns_leaderboard_for_that_day(self, repo):
+    def test_n_days_ago_returns_full_recap_for_that_day(self, repo):
         from datetime import timedelta
         from app.puzzles import la_date
 
@@ -1314,10 +1317,70 @@ class TestHistoricalRecapCommands:
             settings=_settings_with_default_games(),
         )
         assert reply is not None
+        assert "Daily recap" in reply
         assert three_ago.strftime("%a %d %b") in reply
+        assert "Queens #711" in reply
         assert "1. Alice" in reply
-        # Leaderboard-only — no per-game block.
-        assert "Queens #711" not in reply
+
+    def test_past_day_recap_omits_missing_today_nag(self, repo):
+        # Two players, only Bob played the day we're asking about.
+        # Today's Bob-played-but-Alice-skipped recap would normally
+        # nag about Alice. Past-day recaps must drop that footer.
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        two_days_ago = today - timedelta(days=2)
+        # Alice played 2 days ago, Bob played yesterday → Alice is
+        # "missing" for yesterday's recap under the live-day rules.
+        self._seed_day(repo, two_days_ago, 1, "Alice", 10, puzzle_no=712)
+        self._seed_day(repo, yesterday, 2, "Bob", 12, puzzle_no=713)
+
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001",
+            body="yesterday",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        # The body of the recap is intact — Bob is in the leaderboard.
+        assert "Daily recap" in reply
+        assert "Bob" in reply
+        # The passive-aggressive "missing today" line MUST be absent.
+        for phrase in (
+            "MIA today",
+            "Still MIA",
+            "no-shows",
+            "Haven't heard",
+            "Where art thou",
+            "Benched today",
+            "ghosted today's drop",
+            "wall of shame",
+            "abstainer",
+        ):
+            assert phrase not in reply
+
+    def test_today_recap_keeps_missing_today_nag(self, repo):
+        # Counter-test: when the recap IS for today, the nag returns.
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        # Alice played yesterday but skipped today → nag fires.
+        self._seed_day(repo, yesterday, 1, "Alice", 10, puzzle_no=713)
+        self._seed_day(repo, today, 2, "Bob", 12, puzzle_no=714)
+
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001",
+            body="recap",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        # Alice's name appears somewhere in the bottom nag block.
+        assert "Alice" in reply.split("Week so far")[-1]
 
     def test_recap_yesterday_returns_full_recap(self, repo):
         # Explicit ``recap yesterday`` still yields the per-game
