@@ -387,6 +387,156 @@ class TestMorningNudge:
         assert "Tango" in body.split("Still to play:")[1]
 
 
+class TestMorningNudgeContextTriggers:
+    """The morning nudge can prepend a contextual riff before the
+    rotating opener — leaderboard leader, last day of period, active
+    win streak. Tests target the gather + render layer; the cron
+    integration tests above cover the wiring."""
+
+    def test_no_triggers_returns_empty_list(self):
+        from app.db import Player
+        from app.jobs import _gather_nudge_context_triggers
+
+        player = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
+        triggers = _gather_nudge_context_triggers(
+            player=player,
+            today=date(2026, 4, 14),  # Tue, mid-week
+            week_scores=[],
+            recent_scores=[],
+            enabled_games=frozenset({"queens"}),
+        )
+        assert triggers == []
+
+    def test_leader_trigger_fires_when_player_is_first(self):
+        from app.db import Player, ScoreRow
+        from app.jobs import _gather_nudge_context_triggers
+
+        # 5-player Queens round; Alice (id=1) wins.
+        week = [
+            ScoreRow(1, "Alice",   "queens", 700, date(2026, 4, 13), 10),
+            ScoreRow(2, "Bob",     "queens", 700, date(2026, 4, 13), 30),
+            ScoreRow(3, "Charlie", "queens", 700, date(2026, 4, 13), 40),
+        ]
+        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
+        triggers = _gather_nudge_context_triggers(
+            player=alice,
+            today=date(2026, 4, 14),
+            week_scores=week,
+            recent_scores=[],
+            enabled_games=frozenset({"queens"}),
+        )
+        kinds = {t.kind for t in triggers}
+        assert "leader" in kinds
+
+    def test_leader_trigger_silent_when_player_is_not_first(self):
+        from app.db import Player, ScoreRow
+        from app.jobs import _gather_nudge_context_triggers
+
+        week = [
+            ScoreRow(1, "Alice",   "queens", 700, date(2026, 4, 13), 30),
+            ScoreRow(2, "Bob",     "queens", 700, date(2026, 4, 13), 10),
+        ]
+        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
+        triggers = _gather_nudge_context_triggers(
+            player=alice,
+            today=date(2026, 4, 14),
+            week_scores=week,
+            recent_scores=[],
+            enabled_games=frozenset({"queens"}),
+        )
+        kinds = {t.kind for t in triggers}
+        assert "leader" not in kinds
+
+    def test_last_day_of_week_fires_on_sunday(self):
+        from app.jobs import _detect_last_day_trigger
+
+        sun = date(2026, 4, 19)  # Sunday
+        ctx = _detect_last_day_trigger(sun)
+        assert ctx is not None
+        assert ctx.format_data["period"] == "week"
+
+    def test_last_day_of_month_fires_on_30th_april(self):
+        from app.jobs import _detect_last_day_trigger
+
+        ctx = _detect_last_day_trigger(date(2026, 4, 30))
+        assert ctx is not None
+        # 30 April 2026 is a Thursday — month closes today, week
+        # doesn't, so we headline month.
+        assert ctx.format_data["period"] == "month"
+
+    def test_last_day_does_not_fire_mid_week_mid_month(self):
+        from app.jobs import _detect_last_day_trigger
+
+        # Tue 14 Apr 2026 — nothing closes.
+        assert _detect_last_day_trigger(date(2026, 4, 14)) is None
+
+    def test_streak_trigger_fires_after_two_consecutive_wins(self):
+        from app.db import Player, ScoreRow
+        from app.jobs import _gather_nudge_context_triggers
+
+        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
+        # Alice wins Queens on Mon and Tue; today is Wed.
+        recent = [
+            ScoreRow(1, "Alice", "queens", 700, date(2026, 4, 13), 10),
+            ScoreRow(2, "Bob",   "queens", 700, date(2026, 4, 13), 30),
+            ScoreRow(1, "Alice", "queens", 701, date(2026, 4, 14), 10),
+            ScoreRow(2, "Bob",   "queens", 701, date(2026, 4, 14), 30),
+        ]
+        triggers = _gather_nudge_context_triggers(
+            player=alice,
+            today=date(2026, 4, 15),
+            week_scores=[],
+            recent_scores=recent,
+            enabled_games=frozenset({"queens"}),
+        )
+        streak_triggers = [t for t in triggers if t.kind == "streak"]
+        assert len(streak_triggers) == 1
+        assert streak_triggers[0].format_data["streak"] == "2"
+
+    def test_streak_trigger_silent_when_only_one_win(self):
+        from app.db import Player, ScoreRow
+        from app.jobs import _gather_nudge_context_triggers
+
+        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
+        # Alice won Queens yesterday only — single-day streak doesn't
+        # qualify (threshold is 2+ to be worth a callout).
+        recent = [
+            ScoreRow(1, "Alice", "queens", 700, date(2026, 4, 14), 10),
+            ScoreRow(2, "Bob",   "queens", 700, date(2026, 4, 14), 30),
+        ]
+        triggers = _gather_nudge_context_triggers(
+            player=alice,
+            today=date(2026, 4, 15),
+            week_scores=[],
+            recent_scores=recent,
+            enabled_games=frozenset({"queens"}),
+        )
+        kinds = {t.kind for t in triggers}
+        assert "streak" not in kinds
+
+    def test_streak_breaks_on_loss(self):
+        from app.db import Player, ScoreRow
+        from app.jobs import _gather_nudge_context_triggers
+
+        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
+        # Alice won Mon, lost Tue. Today is Wed → streak ended at 0.
+        recent = [
+            ScoreRow(1, "Alice", "queens", 700, date(2026, 4, 13), 10),
+            ScoreRow(2, "Bob",   "queens", 700, date(2026, 4, 13), 30),
+            ScoreRow(1, "Alice", "queens", 701, date(2026, 4, 14), 30),
+            ScoreRow(2, "Bob",   "queens", 701, date(2026, 4, 14), 10),
+        ]
+        triggers = _gather_nudge_context_triggers(
+            player=alice,
+            today=date(2026, 4, 15),
+            week_scores=[],
+            recent_scores=recent,
+            enabled_games=frozenset({"queens"}),
+        )
+        kinds = {t.kind for t in triggers}
+        assert "streak" not in kinds
+
+
 # ---------------------------------------------------------------------------
 # run_pre_reset_warning — escalating nags at 2h / 1h / 30min / 5min before
 # the LA midnight rollover
@@ -574,6 +724,69 @@ class TestNewGamesAnnouncement:
         body2 = run_new_games_announcement(repo, settings, now=now2)
         assert body1 is not None and body2 is not None
         assert body1 != body2
+
+
+class TestNewGamesContextTriggers:
+    """Pass C: the new-games message can prepend a contextual riff
+    (last day of period / yesterday's blowout) when relevant. Tests
+    target the detection helpers directly."""
+
+    def test_last_day_context_fires_on_sunday(self):
+        from app.jobs import _new_games_last_day_context
+
+        # Sunday LA — week closes.
+        ctx = _new_games_last_day_context(date(2026, 4, 19))
+        assert ctx is not None
+        assert "week" in ctx
+
+    def test_last_day_context_silent_midweek(self):
+        from app.jobs import _new_games_last_day_context
+
+        assert _new_games_last_day_context(date(2026, 4, 14)) is None
+
+    def test_last_day_context_picks_year_over_month(self):
+        from app.jobs import _new_games_last_day_context
+
+        # Dec 31 — year closes (also month closes; year wins).
+        ctx = _new_games_last_day_context(date(2026, 12, 31))
+        assert ctx is not None
+        assert "year" in ctx
+
+    def test_blowout_context_fires_when_winner_smashes_field(self):
+        from app.db import ScoreRow
+        from app.jobs import _new_games_blowout_context
+
+        # Alice 14s vs Bob 50s on Queens — 36s gap → blowout.
+        scores = [
+            ScoreRow(1, "Alice", "queens", 700, date(2026, 4, 14), 14),
+            ScoreRow(2, "Bob",   "queens", 700, date(2026, 4, 14), 50),
+        ]
+        ctx = _new_games_blowout_context(scores, frozenset({"queens"}))
+        assert ctx is not None
+        assert "Alice" in ctx
+        assert "Queens" in ctx
+
+    def test_blowout_context_silent_when_field_is_tight(self):
+        from app.db import ScoreRow
+        from app.jobs import _new_games_blowout_context
+
+        # 12s vs 18s — 6s gap, ratio 1.5x. Below both thresholds.
+        scores = [
+            ScoreRow(1, "Alice", "queens", 700, date(2026, 4, 14), 12),
+            ScoreRow(2, "Bob",   "queens", 700, date(2026, 4, 14), 18),
+        ]
+        ctx = _new_games_blowout_context(scores, frozenset({"queens"}))
+        assert ctx is None
+
+    def test_blowout_context_silent_when_solo_player(self):
+        from app.db import ScoreRow
+        from app.jobs import _new_games_blowout_context
+
+        scores = [
+            ScoreRow(1, "Alice", "queens", 700, date(2026, 4, 14), 10),
+        ]
+        ctx = _new_games_blowout_context(scores, frozenset({"queens"}))
+        assert ctx is None
 
 
 # ---------------------------------------------------------------------------

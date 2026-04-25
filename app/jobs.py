@@ -28,11 +28,13 @@ commands the webhook exposes — see :func:`render_daily` /
 from __future__ import annotations
 
 import logging
+import random
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import Settings
-from .db import Repository
+from .db import Player, Repository, ScoreRow
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER
 from .puzzles import (
     is_last_day_of_month,
@@ -462,12 +464,223 @@ _MORNING_SIGN_OFFS = (
 )
 
 
+# Contextual riff pools — one of these can prepend the rotating
+# opener when a stat about the recipient is interesting enough to
+# call out. Triggers gathered per-player; if multiple match, one is
+# picked at random (no priority order). Falls back to the plain
+# opener when nothing fires.
+_NUDGE_CTX_LEADER_TEMPLATES: Tuple[str, ...] = (
+    "{name}, you're leading the weekly leaderboard ({points}). Insufferable allowed.",
+    "Top of the table, {name} — {points}. Don't blow it.",
+    "Currently the player to beat, {name} ({points}). Press the advantage.",
+    "{name}, week's leaderboard sits at: 1. you, {points}. Lap of honour optional.",
+    "You're #1 this week, {name} ({points}). The view from the top.",
+    "{name} is the current week leader at {points}. Defend the throne.",
+    "Pole position, {name}: {points} this week. Stay there.",
+    "{name}, leaderboard says you. {points}. Try to look surprised.",
+    "Crown's still yours, {name} — {points} on the week. Don't drop it.",
+    "{name} sits atop the weekly board with {points}. Earn it again today.",
+)
+_NUDGE_CTX_LAST_DAY_TEMPLATES: Tuple[str, ...] = (
+    # ``{period}`` interpolates "week" / "month" / "year".
+    "Heads up {name} — last day of the {period}. Standings lock at midnight.",
+    "{name}, today closes the {period}. Make it count.",
+    "Last day of the {period}, {name}. No second chances.",
+    "{name} — final day of the {period}. Stand and deliver.",
+    "Today's the {period}'s last hurrah, {name}. Go big or be remembered for going small.",
+    "{name}, the {period} ends tonight. Whatever you do today is the last word.",
+    "Closing day of the {period}, {name}. The tape is in sight.",
+    "{name}, the {period} doesn't get rewritten after midnight. Your move.",
+    "Final-of-the-{period} energy required, {name}. The bot will be watching.",
+    "{name} — last day of the {period}. Tomorrow's standings are decided today.",
+)
+_NUDGE_CTX_STREAK_TEMPLATES: Tuple[str, ...] = (
+    # ``{game}`` and ``{streak}`` (an int) get interpolated.
+    "{name}, you've won {game} {streak} days running. Don't blow it now.",
+    "{streak}-day {game} win streak going for {name}. Today extends it. Or kills it.",
+    "Hot streak alert, {name}: you've taken {game} {streak} days in a row.",
+    "{name} has won {game} {streak} times running. The pressure mounts.",
+    "{streak} consecutive {game} wins, {name}. Today's a chance to make it {streak_plus_one}.",
+    "{name}, the {game} crown's been yours for {streak} days. Hold the line.",
+    "Quietly running away with it — {name} has won {game} {streak} days straight.",
+    "{name}, your {game} streak sits at {streak}. Today's the test.",
+    "{streak} on the trot, {name} — {game} crown still yours. Don't choke.",
+    "{name} has owned {game} for {streak} days. Reign continues today, or doesn't.",
+)
+
+
+@dataclass
+class _NudgeContext:
+    """One contextual riff matching the recipient. ``kind`` keys into
+    a template pool; ``format_data`` carries the fields the templates
+    interpolate."""
+
+    kind: str
+    format_data: Dict[str, Any]
+
+
+def _gather_nudge_context_triggers(
+    *,
+    player: Player,
+    today: date,
+    week_scores: Sequence[ScoreRow],
+    recent_scores: Sequence[ScoreRow],
+    enabled_games: frozenset,
+) -> List[_NudgeContext]:
+    """Return every contextual nudge trigger that fires for ``player``
+    on ``today``. Caller picks one at random.
+
+    ``week_scores`` is the current week's scores filtered to enabled
+    games (used for the leader detector). ``recent_scores`` is the
+    last ~14 days of scores (used for the streak detector — needs
+    enough history to count back).
+    """
+    triggers: List[_NudgeContext] = []
+
+    leader = _detect_leader_trigger(player, week_scores)
+    if leader is not None:
+        triggers.append(leader)
+
+    last_day = _detect_last_day_trigger(today)
+    if last_day is not None:
+        triggers.append(last_day)
+
+    streak = _detect_streak_trigger(
+        player=player,
+        today=today,
+        recent_scores=recent_scores,
+        enabled_games=enabled_games,
+    )
+    if streak is not None:
+        triggers.append(streak)
+
+    return triggers
+
+
+def _detect_leader_trigger(
+    player: Player, week_scores: Sequence[ScoreRow]
+) -> Optional[_NudgeContext]:
+    """Fire when ``player`` is currently top of the weekly leaderboard
+    AND the field has at least 2 players (no point taunting yourself
+    when you're alone on the board)."""
+    lb = weekly_leaderboard(list(week_scores))
+    if len(lb) < 2:
+        return None
+    leader = lb[0]
+    if leader.player_id != player.id:
+        return None
+    return _NudgeContext(
+        kind="leader",
+        format_data={"_points_raw": str(leader.total_points)},
+    )
+
+
+def _detect_last_day_trigger(today: date) -> Optional[_NudgeContext]:
+    """Fire on the last day of the year, then month, then week (in
+    that order of "biggest period". A single trigger fires per call —
+    we pick the largest period that closes today so the nudge
+    headlines it correctly."""
+    if is_last_day_of_year(today):
+        return _NudgeContext(kind="last_day", format_data={"period": "year"})
+    if is_last_day_of_month(today):
+        return _NudgeContext(kind="last_day", format_data={"period": "month"})
+    # Sunday LA closes the week — Python's weekday() has Monday=0,
+    # Sunday=6. Match that with our LA-anchored convention.
+    if today.weekday() == 6:
+        return _NudgeContext(kind="last_day", format_data={"period": "week"})
+    return None
+
+
+def _detect_streak_trigger(
+    *,
+    player: Player,
+    today: date,
+    recent_scores: Sequence[ScoreRow],
+    enabled_games: frozenset,
+) -> Optional[_NudgeContext]:
+    """Fire when ``player`` has won a single game on N consecutive
+    days ending yesterday. "Won" means lowest raw_score on that
+    day's submission for that game across all players who played.
+    Threshold: 2+ days (a one-day "streak" isn't a streak).
+
+    If multiple games qualify, picks the one with the longest
+    streak. Ties broken by display order in
+    :data:`GAME_DISPLAY_ORDER`.
+    """
+    # Group recent scores by (game, puzzle_date).
+    by_game_day: Dict[Tuple[str, date], List[ScoreRow]] = {}
+    for s in recent_scores:
+        if s.game not in enabled_games:
+            continue
+        if s.puzzle_date >= today:
+            continue  # only count past days; today's still in progress
+        by_game_day.setdefault((s.game, s.puzzle_date), []).append(s)
+
+    best_game: Optional[str] = None
+    best_streak = 0
+    for game in GAME_DISPLAY_ORDER:
+        if game not in enabled_games:
+            continue
+        # Walk back day by day from yesterday, counting consecutive
+        # days where ``player`` was the day's winner.
+        streak = 0
+        cursor = today - timedelta(days=1)
+        while True:
+            day_scores = by_game_day.get((game, cursor))
+            if not day_scores:
+                break  # game wasn't played that day → streak ends
+            day_winner = min(day_scores, key=lambda s: s.raw_score)
+            if day_winner.player_id != player.id:
+                break
+            streak += 1
+            cursor -= timedelta(days=1)
+        if streak > best_streak:
+            best_streak = streak
+            best_game = game
+
+    if best_game is None or best_streak < 2:
+        return None
+    return _NudgeContext(
+        kind="streak",
+        format_data={
+            "game": GAME_DISPLAY[best_game],
+            "streak": str(best_streak),
+            "streak_plus_one": str(best_streak + 1),
+        },
+    )
+
+
+def _render_nudge_context(context: _NudgeContext, *, player_name: str) -> str:
+    """Pick a random template from the matching pool and resolve
+    placeholders. Returns one rendered line (no trailing newline)."""
+    pool: Tuple[str, ...]
+    if context.kind == "leader":
+        pool = _NUDGE_CTX_LEADER_TEMPLATES
+    elif context.kind == "last_day":
+        pool = _NUDGE_CTX_LAST_DAY_TEMPLATES
+    elif context.kind == "streak":
+        pool = _NUDGE_CTX_STREAK_TEMPLATES
+    else:
+        raise ValueError(f"unknown nudge context kind: {context.kind!r}")
+
+    template = random.choice(pool)
+    fd = context.format_data
+    subs: Dict[str, Any] = {"name": player_name}
+    if "_points_raw" in fd:
+        subs["points"] = _fmt_weekly_points(float(fd["_points_raw"]))
+    for key in ("period", "game", "streak", "streak_plus_one"):
+        if key in fd:
+            subs[key] = fd[key]
+    return template.format(**subs)
+
+
 def _build_morning_nudge(
     player_name: str,
     enabled_games: frozenset,
     played_games: set,
     *,
     today: Optional[date] = None,
+    context_line: Optional[str] = None,
 ) -> str:
     """Render the per-player nudge body. ``played_games`` is the set of
     games the player has already submitted today; the message lists
@@ -476,7 +689,12 @@ def _build_morning_nudge(
     ``today`` drives the day-ordinal rotation across the opener and
     sign-off pools so the same player doesn't read identical copy
     every morning. Falls back to ``date.today()`` for callers that
-    don't pass it (tests, ad-hoc invocations)."""
+    don't pass it (tests, ad-hoc invocations).
+
+    ``context_line``, when supplied, prepends a one-line riff before
+    the rotating opener — used to call out a leaderboard position,
+    last-day-of-period notice, or active win-streak. Caller decides
+    when to populate it; the renderer just slots it in."""
     missing = [
         GAME_DISPLAY[g]
         for g in GAME_DISPLAY_ORDER
@@ -501,7 +719,12 @@ def _build_morning_nudge(
 
     sign_off = _MORNING_SIGN_OFFS[ordinal % len(_MORNING_SIGN_OFFS)]
 
-    lines = [opener, ""]
+    lines: List[str] = []
+    if context_line:
+        lines.append(context_line)
+        lines.append("")
+    lines.append(opener)
+    lines.append("")
     lines.append("Still to play:")
     for game in missing:
         lines.append(f"  - {game}")
@@ -547,6 +770,22 @@ def run_morning_nudge(
         if s.game in enabled:
             games_by_player.setdefault(s.player_id, set()).add(s.game)
 
+    # Pull two date ranges once, reuse per player for the contextual
+    # triggers below. ``week_scores`` drives the leader detector;
+    # ``recent_scores`` (last 14 days incl. today) drives the
+    # streak detector. Both are filtered to enabled games.
+    monday, sunday = week_bounds(today)
+    week_scores = [
+        s for s in repo.list_scores(date_from=monday, date_to=sunday)
+        if s.game in enabled
+    ]
+    recent_scores = [
+        s for s in repo.list_scores(
+            date_from=today - timedelta(days=14), date_to=today
+        )
+        if s.game in enabled
+    ]
+
     nudged: List[str] = []
     for player in active_players:
         if not player.notifications_enabled:
@@ -554,8 +793,31 @@ def run_morning_nudge(
         played = games_by_player.get(player.id, set())
         if played >= set(enabled):
             continue  # they're already done — nothing to nudge about
+
+        context_line: Optional[str] = None
+        try:
+            triggers = _gather_nudge_context_triggers(
+                player=player,
+                today=today,
+                week_scores=week_scores,
+                recent_scores=recent_scores,
+                enabled_games=enabled,
+            )
+            if triggers:
+                chosen = random.choice(triggers)
+                context_line = _render_nudge_context(
+                    chosen, player_name=player.display_name
+                )
+        except Exception:
+            logger.exception(
+                "Morning nudge context-trigger gathering failed for player %s",
+                player.id,
+            )
+
         body = _build_morning_nudge(
-            player.display_name, enabled, played, today=today
+            player.display_name, enabled, played,
+            today=today,
+            context_line=context_line,
         )
         if send_dm(settings, player.whatsapp_id, body):
             nudged.append(player.whatsapp_id)
@@ -835,6 +1097,94 @@ _NEW_GAMES_TEMPLATES: Tuple[str, ...] = (
 )
 
 
+_NEW_GAMES_CTX_LAST_DAY_TEMPLATES: Tuple[str, ...] = (
+    # ``{period}`` interpolates "week" / "month" / "year".
+    "Heads up — last day of the {period}. Standings lock at midnight.",
+    "Final day of the {period}. No mulligans after this.",
+    "{period} closes tonight. Make today count.",
+    "Closing day of the {period} — your last word goes on the record.",
+    "End-of-{period} energy required. Today's the deciding round.",
+    "The {period} ends at LA midnight. Whatever you do today seals it.",
+    "Last day of the {period}. The leaderboard is watching what you do.",
+    "Final round of the {period}. Deliver or be remembered for not.",
+)
+
+_NEW_GAMES_CTX_BLOWOUT_TEMPLATES: Tuple[str, ...] = (
+    # ``{name}`` and ``{game}`` and ``{gap}`` interpolated.
+    "Yesterday {name} won {game} by {gap}. Set the bar high or get used to chasing.",
+    "{name} smoked yesterday's {game} by {gap}. Today's a chance to remind them they're mortal.",
+    "Reminder: {name} beat 2nd place on {game} by {gap} yesterday. The crown's right there.",
+    "Yesterday's blowout — {name} took {game} by {gap}. Today: prove yesterday was a fluke.",
+    "{name} won {game} by {gap} yesterday. The rest of you have some explaining to do.",
+    "FYI {name} dropped {game} on the rest of you by {gap} yesterday. Avenge or accept.",
+    "Yesterday: {name}, {game}, +{gap} on the field. Today: a fresh chance to humble them.",
+)
+
+
+def _new_games_last_day_context(today: date) -> Optional[str]:
+    """Reuse the morning-nudge last-day detector but pull the rendered
+    line from this surface's pool. Returns one line, or ``None`` when
+    no period closes today."""
+    if is_last_day_of_year(today):
+        period = "year"
+    elif is_last_day_of_month(today):
+        period = "month"
+    elif today.weekday() == 6:
+        period = "week"
+    else:
+        return None
+    template = random.choice(_NEW_GAMES_CTX_LAST_DAY_TEMPLATES)
+    return template.format(period=period)
+
+
+def _new_games_blowout_context(
+    yesterday_scores: Sequence[ScoreRow], enabled_games: frozenset
+) -> Optional[str]:
+    """Find the largest 1st-vs-2nd time gap in yesterday's enabled
+    games and return a "blowout" callout. Threshold: 30 seconds OR
+    2x ratio — we only want clear blowouts, not 5-second wins."""
+    by_game: Dict[str, List[ScoreRow]] = {}
+    for s in yesterday_scores:
+        if s.game not in enabled_games:
+            continue
+        by_game.setdefault(s.game, []).append(s)
+
+    best_gap: int = 0
+    best_winner: Optional[ScoreRow] = None
+    best_game: Optional[str] = None
+    for game, rows in by_game.items():
+        if len(rows) < 2:
+            continue
+        sorted_rows = sorted(rows, key=lambda r: r.raw_score)
+        winner, runner_up = sorted_rows[0], sorted_rows[1]
+        gap = runner_up.raw_score - winner.raw_score
+        # 30s absolute OR 2x ratio (whichever looser threshold).
+        meaningful = (
+            gap >= 30
+            or (winner.raw_score > 0 and runner_up.raw_score >= winner.raw_score * 2)
+        )
+        if not meaningful:
+            continue
+        if gap > best_gap:
+            best_gap = gap
+            best_winner = winner
+            best_game = game
+
+    if best_winner is None or best_game is None:
+        return None
+    template = random.choice(_NEW_GAMES_CTX_BLOWOUT_TEMPLATES)
+    minutes, seconds = divmod(best_gap, 60)
+    if minutes:
+        gap_str = f"{minutes}:{seconds:02d}"
+    else:
+        gap_str = f"{best_gap}s"
+    return template.format(
+        name=best_winner.player_name or "—",
+        game=GAME_DISPLAY[best_game],
+        gap=gap_str,
+    )
+
+
 def run_new_games_announcement(
     repo: Repository,
     settings: Settings,
@@ -849,14 +1199,45 @@ def run_new_games_announcement(
     nobody's missed when the group post fails. Bails silently when
     no one's been active in the last week.
 
+    A contextual riff (last day of period / yesterday's blowout) is
+    prepended when relevant. If multiple riffs apply, one is picked
+    at random — no priority order. Falls back to the bare static
+    template when nothing fires.
+
     Returns the body that was sent, or ``None`` if no audience.
     """
     now = now or datetime.now(settings.tz)
     today = la_date(now)
 
-    body = _NEW_GAMES_TEMPLATES[
+    base = _NEW_GAMES_TEMPLATES[
         today.toordinal() % len(_NEW_GAMES_TEMPLATES)
     ]
+
+    # Gather contextual riffs. ``yesterday_scores`` is bounded to the
+    # day before today so the blowout detector sees only the puzzle
+    # period that just closed.
+    contexts: List[str] = []
+    last_day = _new_games_last_day_context(today)
+    if last_day is not None:
+        contexts.append(last_day)
+    try:
+        yesterday = today - timedelta(days=1)
+        yesterday_scores = repo.list_scores(date_from=yesterday, date_to=yesterday)
+        blowout = _new_games_blowout_context(
+            yesterday_scores, settings.enabled_games
+        )
+        if blowout is not None:
+            contexts.append(blowout)
+    except Exception:
+        logger.exception(
+            "New games blowout detection failed (LA day %s) — "
+            "falling back to bare template", today,
+        )
+
+    if contexts:
+        body = f"{random.choice(contexts)}\n\n{base}"
+    else:
+        body = base
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
     dm_targets = repo.list_active_whatsapp_ids(date_from=since, date_to=today)
