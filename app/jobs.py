@@ -215,6 +215,16 @@ _CHAMPION_TEMPLATES = (
     "Wear it like you mean it.",
     "{name} took week {iso} like it was personal. {points}. "
     "Maybe it was. Who knows. Champion regardless.",
+    "{name}: week {iso}, {points}, undisputed. "
+    "We came, we saw, you conquered. Mostly the last one.",
+    "Big news, {name}: you won. The whole week. {points}. "
+    "Everybody else? Spectators. You? CHAMPION.",
+    "{name} — week {iso} closes with you on top. {points}. "
+    "Bask. You earned it. Briefly.",
+    "Officially the best of week {iso}: {name}. {points}. "
+    "Print this DM. Frame this DM. Show the children.",
+    "{name}, look at you. CHAMPION of week {iso} with {points}. "
+    "Don't peak now. Or do. Either's fine.",
 )
 _LOSER_TEMPLATES = (
     "{name} — wooden spoon this week with {points}. "
@@ -238,6 +248,16 @@ _LOSER_TEMPLATES = (
     "Tactical retreat. Regroup. Avenge.",
     "{name}, you ended week {iso} with {points}. "
     "On the bright side: you can only improve. On the other bright side: easily.",
+    "Drum roll for last place, week {iso}: {name}, {points}. "
+    "We did the drum roll. It was sad. Get 'em next week.",
+    "{name} — wooden spoon awarded with {points}. "
+    "Comes engraved with the words \"better luck Monday.\"",
+    "{name} brought up the rear of week {iso} with {points}. "
+    "Somebody's gotta hold the floor up. Today: you.",
+    "{name}, the leaderboard is shaped a bit like a hill, and you are very much the bottom of it. "
+    "{points}. Climb back up.",
+    "{name} closed week {iso} on {points}. Last. "
+    "Tomorrow's a new week. Tomorrow's also Monday. Brace.",
 )
 
 
@@ -386,6 +406,14 @@ _MORNING_OPENERS_NO_PROGRESS = (
     "Morning {name} — the games are out there, mocking your absence.",
     "{name}, day's on. Puzzles untouched. Reputation: pending.",
     "Rise and grind, {name}. The puzzles aren't grinding themselves.",
+    "Morning {name}! The puzzles are sitting there, untouched, judging.",
+    "{name}, gentle reminder: the day is happening WITH or without you. With is better.",
+    "Hello {name}. The leaderboard has a {name}-shaped gap in it. Fill it.",
+    "Bright and early, {name}. Bright and unplayed.",
+    "{name} — the early-bird recap window is open. Be the early bird.",
+    "Morning {name}. Five tiny puzzles stand between you and bragging rights.",
+    "{name}, today's slate: blank. Today's potential: high. Today's actual: tbd.",
+    "Up and at 'em, {name}. The puzzles are at 'em already.",
 )
 
 _MORNING_OPENERS_PARTIAL = (
@@ -399,6 +427,13 @@ _MORNING_OPENERS_PARTIAL = (
     "Morning {name}. On the board with: {played}.",
     "{name} — the early bird, etc. So far: {played}.",
     "{name}, look at you go. Done: {played}.",
+    "Cracking start, {name}. Bagged: {played}.",
+    "{name}, momentum spotted. Cleared: {played}.",
+    "Morning {name}. Already in the books: {played}. Don't stop now.",
+    "{name} — partial credit on the board: {played}. Finish the homework.",
+    "Halfway clever, {name}. Finished: {played}.",
+    "{name}, you didn't even need the nudge for: {played}. Showoff.",
+    "Morning {name} — {played} done, leaderboard already noticing.",
 )
 
 _MORNING_SIGN_OFFS = (
@@ -409,6 +444,12 @@ _MORNING_SIGN_OFFS = (
     "Shares to me when complete. Easy.",
     "Drop the shares in here as you go.",
     "DM me your shares when each one's done — that's how you make it onto the board.",
+    "Each share -> me. Standard procedure.",
+    "Forward shares my way as you finish. I'll do the maths.",
+    "Done a puzzle? Share it here. Repeat as needed.",
+    "Shares incoming -> here. The leaderboard will reward your effort. Modestly.",
+    "Send shares this way as you go. Don't make me chase them down.",
+    "Share each one back here. Quietly. Loudly. Smugly. Up to you.",
 )
 
 
@@ -557,6 +598,14 @@ _PRE_RESET_TEMPLATES: dict = {
         "You've still got time to look smart on the leaderboard.",
         "{name} — 2h until midnight (LA). {missing} on the to-do list. "
         "Lots of runway. Fly the plane.",
+        "{name}, 2 hours and {missing} unplayed. "
+        "Plenty of time to do it. Plenty of time to procrastinate. Choose.",
+        "T-minus 120 minutes, {name}. {missing} on standby. "
+        "Tap the puzzle. Solve the puzzle. Repeat.",
+        "{name} — early warning system: 2h. {missing} pending. "
+        "All systems go. Pilot is you. Plane is the puzzles. Move.",
+        "{name}, 2-hour heads-up. {missing}. "
+        "You can do this in 15 minutes flat. The other 1h45 is yours.",
     ),
     "1h": (
         "60 minutes, {name}. Outstanding: {missing}. "
@@ -574,6 +623,16 @@ _PRE_RESET_TEMPLATES: dict = {
         "The window is closing. The puzzles are not. Yet.",
         "{name} — 60 to go, {missing} on the slate. "
         "You said \"in a sec\" four hours ago. The sec is now.",
+        "Single hour left, {name}. {missing}. "
+        "We can do this the easy way (now) or the embarrassing way (in tomorrow's recap).",
+        "{name}: 60. Minutes. {missing} undone. "
+        "The puzzles aren't long. The night is. Maths it.",
+        "{name} — last hour. {missing}. "
+        "I've seen you do harder things during meetings. Pretend this is a meeting.",
+        "Hour to go, {name}. {missing}. "
+        "Quick reminder: glory does not wait. Glory specifically does not wait.",
+        "{name}: 1h, {missing}. "
+        "This is your sign. This is THE sign. Go.",
     ),
     "30min": (
         "Thirty minutes, {name}. Still mocking the streak: {missing}. "
@@ -592,6 +651,14 @@ _PRE_RESET_TEMPLATES: dict = {
         "This is the part of the movie where the hero finally does the thing.",
         "Thirty. Minutes. {name}. {missing}. "
         "The clock is doing its job. Are you?",
+        "{name}, half hour. {missing}. "
+        "I'm not begging. I'm pre-begging. Save us both the begging.",
+        "30, {name}. {missing}. "
+        "If you're driving: pull over. If you're cooking: turn off the stove. If you're scrolling: STOP.",
+        "{name} — 30. {missing}. "
+        "Pretend midnight is 11:30. Solve them. Surprise yourself.",
+        "Half hour, {name}. {missing}. "
+        "The window for dignified completion is narrowing.",
     ),
     "5min": (
         "FIVE MINUTES {name}. {missing}. "
@@ -613,6 +680,15 @@ _PRE_RESET_TEMPLATES: dict = {
         "I have begged. I have pleaded. I am now SHOUTING. PLAY.",
         "{name} this is the LAST PING. 5 minutes. {missing}. "
         "Tomorrow's recap is being written and it does NOT flatter you.",
+        "{name}!! 5 MINUTES!! {missing}!! "
+        "I CAN'T BE MORE EXPLICIT THAN THIS WITHOUT TRIGGERING SPAM FILTERS!!",
+        "{name}, 300 seconds. {missing}. "
+        "PUT. DOWN. THE PHONE. (Wait. Pick it up. Open LinkedIn. PLAY.)",
+        "{name} the puzzles are about to expire and so is my patience. 5 min. {missing}. GO.",
+        "{name}, this is your final boss fight. 5 minutes. {missing}. "
+        "Win it. Lose it. Just don't ignore it.",
+        "{name}: 5 minutes, {missing}. "
+        "If you don't play these I will personally bring it up at every future recap until the heat death of the universe.",
     ),
 }
 
@@ -739,6 +815,14 @@ _NEW_GAMES_TEMPLATES: Tuple[str, ...] = (
     "Reset complete. The leaderboard has been wiped of yesterday's sins. "
     "New games are LIVE — get in it.",
     "Morning. Puzzles dropped. The clock is running. Get in it.",
+    "Today's puzzles: out. Today's leaderboard: empty. Today's vibe: opportunity. Get in it.",
+    "The board has been wiped clean and the puzzles are warm. Get in it.",
+    "Open. The. Puzzles. (Get in it.)",
+    "Yesterday's standings have been carbon-dated. New games are LIVE. Get in it.",
+    "Drumroll please — new puzzles. No drumroll? Fine. New puzzles anyway. Get in it.",
+    "Daybreak. Puzzles up. Honour available in limited quantities. Get in it.",
+    "The puzzles are out. Your move. Get in it.",
+    "Today's games are LIVE and they are deeply judgmental. Get in it.",
 )
 
 
@@ -777,3 +861,113 @@ def run_new_games_announcement(
     send_recap(settings, body, dm_targets=dm_targets)
     logger.info("New games announcement sent (LA day %s)", today)
     return body
+
+
+# ---------------------------------------------------------------------------
+# Easter egg: brag / gripe broadcasts (webhook-triggered)
+# ---------------------------------------------------------------------------
+
+
+# User-triggered broadcasts. ``brag`` for "I'm having a great day, let
+# everybody know"; ``gripe`` for "I'm having a stinker, drag the group
+# in with me". Per-player per-day cooldown lives in the repo so the
+# same person can't spam the same prompt fifty times in a row.
+TAUNT_KINDS: Tuple[str, ...] = ("brag", "gripe")
+
+_BRAG_TEMPLATES: Tuple[str, ...] = (
+    "{sender} is in form today and wanted you to know. Try to keep up.",
+    "Public service announcement: {sender} is cooking. "
+    "Maybe respond with scores. Maybe just suffer in silence.",
+    "{sender} just hit the brag button. Translation: they're winning, "
+    "they're insufferable, they want company.",
+    "{sender} is having a moment and wants witnesses. Bear witness.",
+    "Heads up — {sender} smells blood. The leaderboard is the blood.",
+    "{sender} would like a small parade in their honour. "
+    "Today's puzzles, apparently, were not for the weak.",
+    "{sender} has typed `brag` into a chat bot. We are obligated to relay it. "
+    "They're crushing it.",
+    "Ding ding — {sender} is on a tear. Catch up or get used to second.",
+    "{sender}: \"I'm having a great day.\" Bot: \"OK\". Group: forced to listen.",
+    "{sender} is feeling themselves today. Admittedly, the data agrees.",
+    "{sender} sent the bot an unsolicited flex. We are passing it on at retail.",
+    "Notice: {sender} is undefeated in their own head right now. "
+    "Provide receipts or accept defeat.",
+)
+
+_GRIPE_TEMPLATES: Tuple[str, ...] = (
+    "{sender} bombed today and wants the group to feel it. "
+    "Solidarity. Or mockery. Dealer's choice.",
+    "{sender} is having a stinker. The bot is contractually obligated to tell you.",
+    "{sender} requests recognition for the absolute mess they've made of today's puzzles.",
+    "Heads up: {sender} is publicly admitting defeat. Use this information wisely.",
+    "{sender} would like to file a complaint about today's puzzles. "
+    "Complaint: they were too hard. Mostly for {sender}.",
+    "{sender} is unwell (psychologically, at the puzzles). Send thoughts. "
+    "Or send your scores so they can feel worse.",
+    "{sender} has typed `gripe`. The bot dutifully relays: it's been a day. "
+    "And not in the good way.",
+    "Today defeated {sender} comprehensively, and they want everyone to know. "
+    "Honesty appreciated.",
+    "{sender} is having the kind of day where the puzzles are winning. "
+    "By a lot. Comfort or mock at your discretion.",
+    "Newsflash: {sender} is on the floor. Today did not go to plan. "
+    "Tomorrow's revenge tour starts at midnight.",
+    "{sender} sent the bot a distress signal. Roughly translated: \"I am bad at puzzles today.\" "
+    "Group is invited to commiserate.",
+    "{sender}: today's score was a personal worst. {sender}: needed you to know. "
+    "{sender}: regrets nothing.",
+)
+
+
+def run_taunt(
+    repo: Repository,
+    settings: Settings,
+    *,
+    kind: str,
+    sender_id: int,
+    sender_name: str,
+    sender_whatsapp_id: str,
+    now: Optional[datetime] = None,
+) -> Tuple[int, Optional[str]]:
+    """Broadcast a ``brag`` or ``gripe`` to every recently-active
+    player except the sender.
+
+    Returns ``(count_sent, body)`` where ``count_sent`` is the number
+    of recipients Twilio accepted and ``body`` is the rendered text
+    (handy for tests / logs). Returns ``(0, None)`` when the sender
+    is on cooldown for ``kind`` today, and ``(0, body)`` when nobody
+    else is in the active window.
+
+    Cooldown is recorded **only** when the broadcast actually goes
+    out — if there's no audience, the sender doesn't burn their
+    daily token.
+    """
+    if kind not in TAUNT_KINDS:
+        raise ValueError(f"unknown taunt kind: {kind!r}")
+    now = now or datetime.now(settings.tz)
+    today = la_date(now)
+
+    if repo.has_taunted_today(sender_id, kind, today):
+        return 0, None
+
+    pool = _BRAG_TEMPLATES if kind == "brag" else _GRIPE_TEMPLATES
+    body = pool[today.toordinal() % len(pool)].format(sender=sender_name)
+
+    since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
+    targets = [
+        wid for wid in repo.list_active_whatsapp_ids(date_from=since, date_to=today)
+        if wid != sender_whatsapp_id
+    ]
+    if not targets:
+        return 0, body
+
+    sent = 0
+    for wid in targets:
+        if send_dm(settings, wid, body):
+            sent += 1
+    repo.record_taunt(sender_id, kind, today)
+    logger.info(
+        "Taunt [%s] from player_id=%s reached %d/%d recipients (LA day %s)",
+        kind, sender_id, sent, len(targets), today,
+    )
+    return sent, body

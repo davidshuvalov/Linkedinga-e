@@ -1472,3 +1472,210 @@ class TestAllWeekCommand:
         while cursor <= today:
             assert cursor.strftime("%a %d %b") in reply
             cursor += timedelta(days=1)
+
+
+# ---------------------------------------------------------------------------
+# brag / gripe Easter-egg broadcasts
+# ---------------------------------------------------------------------------
+
+
+class TestTauntCommands:
+    """Both ``brag`` and ``gripe`` broadcast a competitive nudge to
+    every recently-active player except the sender. Per-day per-command
+    cooldown stops one bored player from spamming the group."""
+
+    @staticmethod
+    def _seed_active(repo: InMemoryRepository, *names_phones, today):
+        """Seed each (whatsapp_id, display_name) pair with a single
+        score yesterday so they count as active."""
+        from app.puzzles import la_date
+        from datetime import timedelta as _td
+        ref = la_date(today) - _td(days=1)
+        pno = 700
+        for wid, name in names_phones:
+            p = repo.get_or_create_player(wid, name)
+            repo.insert_score(
+                player_id=p.id, game="queens", puzzle_no=pno,
+                puzzle_date=ref, raw_score=10, share_text="x",
+            )
+            pno += 1
+
+    def test_unknown_kind_raises(self, repo):
+        from app.jobs import run_taunt
+        with pytest.raises(ValueError):
+            run_taunt(
+                repo, _settings_with_default_games(),
+                kind="bogus", sender_id=1, sender_name="Alice",
+                sender_whatsapp_id="whatsapp:+61400000001", now=NOW,
+            )
+
+    def test_brag_broadcasts_to_other_active_players(self, repo):
+        from unittest.mock import patch
+        self._seed_active(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            ("whatsapp:+61400000003", "Charlie"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            reply = handle_inbound(
+                repo,
+                from_="whatsapp:+61400000001",
+                body="brag",
+                profile_name="Alice",
+                now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        # Bob and Charlie should each have received a DM; Alice should not.
+        recipients = [c.args[1] for c in mock_dm.call_args_list]
+        assert set(recipients) == {
+            "whatsapp:+61400000002",
+            "whatsapp:+61400000003",
+        }
+        assert "whatsapp:+61400000001" not in recipients
+        # All recipients get the same body, named after the sender.
+        bodies = {c.args[2] for c in mock_dm.call_args_list}
+        assert len(bodies) == 1
+        assert "Alice" in bodies.pop()
+        # Confirmation reply names the count.
+        assert reply is not None
+        assert "Sent `brag` to 2 players" in reply
+
+    def test_gripe_uses_a_different_pool_to_brag(self, repo):
+        from unittest.mock import patch
+        self._seed_active(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="gripe",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        gripe_body = mock_dm.call_args_list[0].args[2]
+
+        # Reset cooldown for the same sender to compare bodies cleanly.
+        repo._taunt_log.clear()
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm2:
+            handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="brag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        brag_body = mock_dm2.call_args_list[0].args[2]
+        assert gripe_body != brag_body
+
+    def test_cooldown_blocks_second_use_same_day(self, repo):
+        from unittest.mock import patch
+        self._seed_active(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True):
+            first = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="brag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        assert first is not None and "Sent `brag`" in first
+
+        # Second invocation same day must hit the cooldown.
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            second = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="brag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        assert second is not None
+        assert "already used `brag`" in second
+        mock_dm.assert_not_called()
+
+    def test_brag_and_gripe_have_independent_cooldowns(self, repo):
+        from unittest.mock import patch
+        self._seed_active(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True):
+            r1 = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="brag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+            r2 = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="gripe",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        assert r1 is not None and "Sent `brag`" in r1
+        assert r2 is not None and "Sent `gripe`" in r2
+
+    def test_no_audience_returns_lonely_reply_and_no_cooldown_burned(self, repo):
+        from unittest.mock import patch
+        # Only the sender exists in the active window — nobody else to taunt.
+        self._seed_active(
+            repo, ("whatsapp:+61400000001", "Alice"), today=NOW,
+        )
+        with patch("app.jobs.send_dm") as mock_dm:
+            reply = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="brag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        mock_dm.assert_not_called()
+        assert reply is not None
+        assert "active window" in reply
+        # Cooldown must NOT have been recorded — the user shouldn't burn
+        # their daily token on a no-op.
+        from app.puzzles import la_date
+        assert not repo.has_taunted_today(1, "brag", la_date(NOW))
+
+    def test_flex_alias_works(self, repo):
+        from unittest.mock import patch
+        self._seed_active(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            reply = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="flex",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        mock_dm.assert_called_once()
+        assert reply is not None and "Sent `brag`" in reply
+
+    def test_whinge_alias_works(self, repo):
+        from unittest.mock import patch
+        self._seed_active(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            reply = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="whinge",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        mock_dm.assert_called_once()
+        assert reply is not None and "Sent `gripe`" in reply
+
+    def test_no_settings_returns_helpful_message(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="brag",
+            profile_name="Alice", now=NOW, settings=None,
+        )
+        assert reply is not None
+        assert "Twilio" in reply

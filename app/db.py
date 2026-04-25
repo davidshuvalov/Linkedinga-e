@@ -168,6 +168,22 @@ class Repository(Protocol):
         (date, type) pair is a no-op."""
         ...
 
+    def has_taunted_today(
+        self, player_id: int, kind: str, day: date
+    ) -> bool:
+        """Has ``player_id`` already used the ``kind`` taunt
+        (``"brag"`` or ``"gripe"``) on ``day`` (LA)? Drives the
+        per-day per-command cooldown so a single player can't blast
+        the group with the same prompt 50 times in a row."""
+        ...
+
+    def record_taunt(
+        self, player_id: int, kind: str, day: date
+    ) -> None:
+        """Record that ``player_id`` used the ``kind`` taunt on
+        ``day``. Idempotent."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # In-memory implementation (tests + local fallback)
@@ -186,6 +202,9 @@ class InMemoryRepository:
     # (date, type) → sent. Stores a set since the only thing we ever
     # ask is "has this pair been recorded?".
     _recap_sent: set = field(default_factory=set)
+    # (player_id, kind, day) → recorded. Drives the per-day
+    # per-command cooldown for the brag/gripe Easter eggs.
+    _taunt_log: set = field(default_factory=set)
 
     def get_or_create_player(
         self, whatsapp_id: str, display_name: str
@@ -382,6 +401,16 @@ class InMemoryRepository:
         self, recap_date: date, recap_type: str
     ) -> None:
         self._recap_sent.add((recap_date, recap_type))
+
+    def has_taunted_today(
+        self, player_id: int, kind: str, day: date
+    ) -> bool:
+        return (player_id, kind, day) in self._taunt_log
+
+    def record_taunt(
+        self, player_id: int, kind: str, day: date
+    ) -> None:
+        self._taunt_log.add((player_id, kind, day))
 
 
 # ---------------------------------------------------------------------------
@@ -748,3 +777,22 @@ class SupabaseRepository:
             )
             .execute()
         )
+
+    # The brag/gripe Easter eggs piggy-back on ``recap_log`` so we
+    # don't need a new table or migration to ship them. The
+    # ``recap_type`` column is just a string, so we type the key as
+    # ``taunt:<kind>:<player_id>`` to namespace it cleanly away from
+    # the daily/weekly recap entries.
+    @staticmethod
+    def _taunt_key(player_id: int, kind: str) -> str:
+        return f"taunt:{kind}:{player_id}"
+
+    def has_taunted_today(
+        self, player_id: int, kind: str, day: date
+    ) -> bool:
+        return self.has_recap_been_sent(day, self._taunt_key(player_id, kind))
+
+    def record_taunt(
+        self, player_id: int, kind: str, day: date
+    ) -> None:
+        self.mark_recap_sent(day, self._taunt_key(player_id, kind))
