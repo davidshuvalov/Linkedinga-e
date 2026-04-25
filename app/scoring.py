@@ -421,15 +421,27 @@ def prize_allocations(leaderboard: Sequence[PlayerWeeklyStats]) -> Prizes:
 
 # Spec thresholds. Named constants so the classification reads like the spec.
 _TIGHT_SPREAD_THRESHOLD = 0.5        # Case A: spread < this
-_CLUSTER_TOP_RATIO = 1.4             # Case B: r12 and r23 both < this
-_CLUSTER_DROP_RATIO = 1.6            # Case B: r34 (or late-drop) > this
+_CLUSTER_TOP_RATIO = 1.4             # All in-cluster consecutive ratios <
+_CLUSTER_DROP_RATIO = 1.6            # Drop ratio after cluster >
 _CLEAR_WINNER_RATIO = 1.5            # Case C: r12 > this
-_CLUSTER_BONUS_POOL = 1.5            # points redistributed in Case B
 _CLEAR_WINNER_MAX_BONUS = 2.0        # hard cap in Case C
 _MIN_SCORE = 0.0                     # floor for any player — only
                                      # prevents negatives from debits;
                                      # positions 6+ naturally stay at 0
                                      # unless they tie with 5th place
+
+# Bonus pool size by cluster size. Top-3 keeps its historical 1.5
+# (the original Case B). Top-2 gets a smaller pool (fewer winners,
+# stays below the +2 clear-winner ceiling so a "two close at the top"
+# round doesn't out-reward a "one runaway" round). Top-4 reuses 1.5
+# — the same total pot split four ways = smaller per-winner bonus,
+# but the lone bottom player absorbs the entire debit, which feels
+# right for a "one clear loser" round.
+_CLUSTER_BONUS_POOL_BY_SIZE = {
+    2: 1.0,
+    3: 1.5,
+    4: 1.5,
+}
 
 
 def _base_points_for_size(n: int) -> List[int]:
@@ -446,58 +458,89 @@ def _base_points_for_size(n: int) -> List[int]:
     return [_POSITION_POINTS.get(rank, 0) for rank in range(1, n + 1)]
 
 
-def _classify_round(
-    n: int, spread: float, r12: float, r23: Optional[float], r34: Optional[float]
-) -> str:
-    """Decide which adjustment regime applies (``tight`` / ``cluster`` /
-    ``winner``).
+def _detect_cluster(ratios: Sequence[float], n: int) -> Optional[int]:
+    """Return the cluster size ``k`` (4, 3, or 2) when the round has a
+    "top-k tight pack with a clear drop to position k+1" shape, else
+    ``None``.
 
-    Mirrors the CASE A/B/C tree in the spec: tight beats cluster beats
-    winner. Falls back to ``tight`` (no adjustment) whenever none of the
-    strong triggers fire — the spec calls out that we only apply
-    adjustments "in clear cases".
+    ``ratios[i]`` is ``times[i+1] / times[i]`` (so ``ratios[0]`` is
+    r12). We probe the largest cluster first so a top-4 round doesn't
+    silently match the top-3 rule and leave the 4th-placed player out
+    of the bonus pack.
+
+    A cluster of size ``k`` requires:
+
+    * All ``k - 1`` in-cluster ratios are tight (``< 1.4``)
+    * The ``k``-to-``k+1`` ratio is a clear drop (``> 1.6``)
+    * The round has at least one player past the cluster (so the
+      drop position exists)
+
+    Returns ``None`` for any round that doesn't fit.
+    """
+    for k in (4, 3, 2):
+        if n <= k:
+            # Need at least one player past the cluster for the drop
+            # check to be meaningful.
+            continue
+        in_cluster_tight = all(
+            ratios[i] < _CLUSTER_TOP_RATIO for i in range(k - 1)
+        )
+        drop_after = ratios[k - 1] > _CLUSTER_DROP_RATIO
+        if in_cluster_tight and drop_after:
+            return k
+    return None
+
+
+def _classify_round(
+    n: int, spread: float, ratios: Sequence[float]
+) -> Tuple[str, Optional[int]]:
+    """Decide which adjustment regime applies.
+
+    Returns ``(regime, cluster_size)`` where ``regime`` is one of
+    ``"tight"`` / ``"cluster"`` / ``"winner"``. ``cluster_size`` is
+    the ``k`` (2, 3, or 4) only when ``regime == "cluster"``, else
+    ``None``.
+
+    Order of precedence (largest cluster wins, then clear-winner,
+    then tight). Tight short-circuits on a small overall spread —
+    the spec's "only adjust in clear cases" rule.
     """
     if spread < _TIGHT_SPREAD_THRESHOLD:
-        return "tight"
+        return "tight", None
 
-    # Front cluster: top 3 ratios are close AND there's a big drop after
-    # 3rd place. ``r34`` captures the 3rd-to-4th ratio when a 4th exists;
-    # with exactly 3 players there's no "after 3rd" position so cluster
-    # can't apply.
-    cluster_top_tight = (
-        r23 is not None
-        and r12 < _CLUSTER_TOP_RATIO
-        and r23 < _CLUSTER_TOP_RATIO
-    )
-    cluster_drop = r34 is not None and r34 > _CLUSTER_DROP_RATIO
-    if cluster_top_tight and cluster_drop:
-        return "cluster"
+    cluster_size = _detect_cluster(ratios, n)
+    if cluster_size is not None:
+        return "cluster", cluster_size
 
-    if r12 > _CLEAR_WINNER_RATIO:
-        return "winner"
+    if ratios[0] > _CLEAR_WINNER_RATIO:
+        return "winner", None
 
-    return "tight"
+    return "tight", None
 
 
 def _apply_cluster_bonus(
-    scores: List[float], times: Sequence[float], n: int
+    scores: List[float], times: Sequence[float], n: int, top_k: int
 ) -> None:
-    """Case B — boost the front cluster, debit the stragglers.
+    """Boost the front ``top_k`` cluster, debit the stragglers.
 
-    Mutates ``scores`` in place. Top-3 bonuses are time-weighted
+    Mutates ``scores`` in place. In-cluster bonuses are time-weighted
     (``1/time_i``, normalised) so the fastest of the cluster gets the
     biggest share. The full bonus pool is then subtracted evenly from
-    the bottom players, keeping the running total equal to the base.
+    the players past the cluster, keeping the running total equal to
+    the base. Pool size depends on ``top_k`` —
+    :data:`_CLUSTER_BONUS_POOL_BY_SIZE` maps each supported cluster
+    size to its pool.
     """
-    weights = [1.0 / times[i] for i in range(3)]
+    pool = _CLUSTER_BONUS_POOL_BY_SIZE[top_k]
+    weights = [1.0 / times[i] for i in range(top_k)]
     wsum = sum(weights)
-    for i in range(3):
-        scores[i] += _CLUSTER_BONUS_POOL * weights[i] / wsum
+    for i in range(top_k):
+        scores[i] += pool * weights[i] / wsum
 
-    bottom_count = n - 3
+    bottom_count = n - top_k
     if bottom_count > 0:
-        per_player = _CLUSTER_BONUS_POOL / bottom_count
-        for i in range(3, n):
+        per_player = pool / bottom_count
+        for i in range(top_k, n):
             scores[i] -= per_player
 
 
@@ -632,15 +675,18 @@ def competitive_score(
 
     1. Sort by ``time`` ascending and hand out base points by rank.
     2. Average base points across tied groups.
-    3. Compute the ratios ``r12``, ``r23``, ``r34`` and the overall
+    3. Compute every consecutive time ratio plus the overall
        ``spread = (tn - t1) / t1``.
     4. Classify the round:
          * **Tight** (``spread < 0.5``) — leave base points alone.
-         * **Front cluster** (top 3 close + big drop after 3rd) —
-           redistribute a 1.5-point bonus pool across the top 3 by
+         * **Front cluster** (top ``k`` are tight + big drop to
+           position ``k+1``) for ``k`` in 4, 3, 2 (largest first):
+           redistribute a bonus pool across the top ``k`` by
            ``1/time`` weights and debit bottom players evenly.
-         * **Clear winner** (``r12 > 1.5``) — award 1st a ``min(2,
-           2*(r12-1))`` bonus, debit the rest proportional to base.
+           Pool: 1.5 / 1.5 / 1.0 for ``k`` of 4 / 3 / 2.
+         * **Clear winner** (``r12 > 1.5`` and no cluster matched) —
+           award 1st a ``min(2, 2*(r12-1))`` bonus, debit the rest
+           proportional to base.
          * Otherwise — no adjustment.
     5. Clamp any cluster-debit-induced negative to 0, scale back to
        the base-points total, round to 1 d.p. with the residue
@@ -673,19 +719,22 @@ def competitive_score(
     base_points = _base_points_with_tied_groups(raw_base, times, n)
     scores: List[float] = list(base_points)
 
-    # Step 3 — ratios + spread against the fastest time.
+    # Step 3 — every consecutive ratio plus the overall spread. The
+    # classifier needs the full ratio chain so it can detect top-k
+    # clusters of any supported size.
     t1, tn = times[0], times[-1]
-    r12 = times[1] / t1
-    r23 = times[2] / times[1] if n >= 3 else None
-    r34 = times[3] / times[2] if n >= 4 else None
+    ratios = [times[i + 1] / times[i] for i in range(n - 1)]
     spread = (tn - t1) / t1
 
-    # Step 4 — classify and apply at most one adjustment block.
-    regime = _classify_round(n, spread, r12, r23, r34)
+    # Step 4 — classify and apply at most one adjustment block. The
+    # classifier picks the largest cluster that fits, falling back to
+    # clear-winner and finally tight.
+    regime, cluster_size = _classify_round(n, spread, ratios)
     if regime == "cluster":
-        _apply_cluster_bonus(scores, times, n)
+        assert cluster_size is not None
+        _apply_cluster_bonus(scores, times, n, cluster_size)
     elif regime == "winner":
-        _apply_clear_winner_bonus(scores, base_points, times, r12, n)
+        _apply_clear_winner_bonus(scores, base_points, times, ratios[0], n)
     # regime == "tight": fall through with base points intact.
 
     # Step 5 — floor, rebalance, round, reconcile.

@@ -215,13 +215,13 @@ class TestAssignDailyPoints:
         assert abs(sum(r.values()) - 14.0) < 0.05
 
     def test_tied_1st_2nd_share_4_5_each(self):
-        # 3 players, tied 1st/2nd, 3rd well behind. No Case triggers
-        # (r12=1 rules out both cluster and clear-winner with n=3),
-        # so base points stand: tied pair get (5+4)/2 = 4.5 each.
+        # 3 players, tied 1st/2nd, 3rd close behind. Tight regime
+        # (spread = 0.3 < 0.5) so no cluster or clear-winner fires
+        # — base points stand and the tied pair shares (5+4)/2 = 4.5.
         scores = [
             _row(1, "A", "queens", 714, 10),
             _row(2, "B", "queens", 714, 10),
-            _row(3, "C", "queens", 714, 30),
+            _row(3, "C", "queens", 714, 13),
         ]
         r = assign_daily_points(scores)
         assert r[1] == 4.5
@@ -711,6 +711,139 @@ class TestCompetitiveScore:
             {"name": "E", "time": 30},
         ])
         assert abs(sum(self._scores(out)) - 15.0) < 0.01
+
+    def test_top_two_cluster_boosts_top_two(self):
+        # Patches scenario: 6, 7 vs 42, 68, 97. r12=1.17 (tight),
+        # r23=6.0 (huge drop) → top-2 cluster fires.
+        out = competitive_score([
+            {"name": "Duvi",   "time": 6},
+            {"name": "Darren", "time": 7},
+            {"name": "Goat",   "time": 42},
+            {"name": "Ben",    "time": 68},
+            {"name": "adamk",  "time": 97},
+        ])
+        scores = self._scores(out)
+        # Top 2 each got a bonus above their base.
+        assert scores[0] > 5.0
+        assert scores[1] > 4.0
+        # Bottom 3 absorbed the debit.
+        assert scores[2] < 3.0
+        assert scores[3] < 2.0
+        assert scores[4] < 1.0
+        # Rankings preserved and total preserved (modulo rounding).
+        assert scores == sorted(scores, reverse=True)
+        assert abs(sum(scores) - 15.0) < 0.05
+
+    def test_top_two_cluster_pool_smaller_than_top_three(self):
+        # Same first two times in two rounds; only the rest changes.
+        # The top-2 cluster pool (1.0) should yield a smaller bonus
+        # to 1st than the top-3 cluster pool (1.5) does.
+        top_two = competitive_score([
+            {"name": "A", "time": 6},
+            {"name": "B", "time": 7},
+            # Big drop at r23 → top-2 cluster
+            {"name": "C", "time": 42},
+            {"name": "D", "time": 68},
+            {"name": "E", "time": 97},
+        ])
+        top_three = competitive_score([
+            {"name": "A", "time": 6},
+            {"name": "B", "time": 7},
+            # Tight to 3rd, then big drop → top-3 cluster
+            {"name": "C", "time": 8},
+            {"name": "D", "time": 68},
+            {"name": "E", "time": 97},
+        ])
+        # Top-2 pool is 1.0 split between 2 winners; top-3 pool is
+        # 1.5 split between 3 winners. Per-winner share is similar
+        # but the *total* bonus pumped into the front of the field
+        # differs. Comparing 1st-place values directly:
+        #   top-2: 5 + 1.0 * w1   (where w1 ~ 7/(6+7) ≈ 0.538)
+        #   top-3: 5 + 1.5 * w1'  (where w1' ~ (1/6)/(1/6+1/7+1/8))
+        # The top-2 1st-place gets a smaller absolute bonus (~0.54
+        # vs ~0.57). Asserting the looser invariant: 1st in top-2
+        # is no greater than 1st in top-3.
+        assert top_two[0]["final_score"] <= top_three[0]["final_score"] + 0.05
+
+    def test_top_four_cluster_boosts_top_four(self):
+        # Top 4 are all close (30/32/35/37), 5th is a clear drop (90).
+        # r12=1.07, r23=1.09, r34=1.06, r45=2.43.
+        out = competitive_score([
+            {"name": "A", "time": 30},
+            {"name": "B", "time": 32},
+            {"name": "C", "time": 35},
+            {"name": "D", "time": 37},
+            {"name": "E", "time": 90},
+        ])
+        scores = self._scores(out)
+        # Top 4 each got a bonus above their base.
+        assert scores[0] > 5.0
+        assert scores[1] > 4.0
+        assert scores[2] > 3.0
+        assert scores[3] > 2.0
+        # 5th absorbed the entire debit.
+        assert scores[4] < 1.0
+        # Rankings + total preserved.
+        assert scores == sorted(scores, reverse=True)
+        assert abs(sum(scores) - 15.0) < 0.05
+
+    def test_largest_cluster_wins_when_multiple_could_match(self):
+        # Top 4 all tight (r12=r23=r34=1.1), r45 = 50/13 ≈ 3.85 (big
+        # drop). This shape can only match top-4 — top-3 would need
+        # r34 > 1.6 (it's 1.08) and top-2 would need r23 > 1.6
+        # (it's 1.09). So it falls cleanly into top-4.
+        out = competitive_score([
+            {"name": "A", "time": 10},
+            {"name": "B", "time": 11},
+            {"name": "C", "time": 12},
+            {"name": "D", "time": 13},
+            {"name": "E", "time": 50},
+        ])
+        scores = self._scores(out)
+        # All four front players above their base — top-4 cluster fired.
+        assert scores[0] > 5.0
+        assert scores[1] > 4.0
+        assert scores[2] > 3.0
+        assert scores[3] > 2.0
+        # 5th eats the debit.
+        assert scores[4] < 1.0
+
+    def test_top_three_cluster_still_wins_when_top_four_doesnt_fit(self):
+        # r12=1.25, r23=1.2, r34=2.5 (drop), r45=1.1 — top-3 only.
+        # 4th is past the cluster, 5th is tight to 4th.
+        out = competitive_score([
+            {"name": "A", "time": 8},
+            {"name": "B", "time": 10},
+            {"name": "C", "time": 12},
+            {"name": "D", "time": 30},
+            {"name": "E", "time": 33},
+        ])
+        scores = self._scores(out)
+        # Top 3 above base, bottom 2 below.
+        assert scores[0] > 5.0
+        assert scores[1] > 4.0
+        assert scores[2] > 3.0
+        assert scores[3] < 2.0
+        assert scores[4] < 1.0
+
+    def test_friday_zip_now_triggers_top_two_cluster(self):
+        # Real round from Friday's recap that exposed the gap:
+        # The Goat 0:10, adamk 0:11 (tight top 2), then 0:18, 0:19,
+        # 0:38. r12=1.1, r23=18/11≈1.64 → top-2 fires.
+        out = competitive_score([
+            {"name": "Goat",   "time": 10},
+            {"name": "adamk",  "time": 11},
+            {"name": "Darren", "time": 18},
+            {"name": "Duvi",   "time": 19},
+            {"name": "Ben",    "time": 38},
+        ])
+        scores = self._scores(out)
+        assert scores[0] > 5.0
+        assert scores[1] > 4.0
+        # Stragglers below their base.
+        assert scores[2] < 3.0
+        assert scores[3] < 2.0
+        assert scores[4] < 1.0
 
     def test_minimum_score_floor_is_enforced(self):
         # Any score is at least 0.5 even after a heavy winner-bonus debit.
