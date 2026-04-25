@@ -486,6 +486,7 @@ def daily_recap(
     *,
     month_scores: Optional[Sequence[ScoreRow]] = None,
     year_scores: Optional[Sequence[ScoreRow]] = None,
+    include_missing_today_nag: bool = True,
 ) -> str:
     """Format a daily recap for ``day``.
 
@@ -555,11 +556,15 @@ def daily_recap(
 
     # Passive-aggressive nudge for players who played earlier this
     # week but skipped today. Sits at the bottom where it won't
-    # compete with the actual scores.
-    nag = _missing_today_line(day, week_filtered, day_scores)
-    if nag is not None:
-        lines.append("")
-        lines.append(nag)
+    # compete with the actual scores. Suppressed for past-day recaps
+    # — the nag only makes sense for "today is in progress, get on
+    # with it"; nagging about a missed Tuesday from inside a Friday
+    # recap reads as nonsense.
+    if include_missing_today_nag:
+        nag = _missing_today_line(day, week_filtered, day_scores)
+        if nag is not None:
+            lines.append("")
+            lines.append(nag)
 
     return "\n".join(lines).rstrip() + "\n"
 

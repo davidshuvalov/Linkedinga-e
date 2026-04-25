@@ -76,12 +76,11 @@ _HELP_TEXT = (
     "Commands:\n"
     "  Look at scores:\n"
     "    recap / today — full daily recap\n"
-    "    recap yesterday / recap N days ago / recap YYYY-MM-DD — past recap\n"
-    "    yesterday / \"N days ago\" — leaderboard as of that day\n"
+    "    yesterday / \"N days ago\" / recap YYYY-MM-DD — past daily recap\n"
     "    week / wrap — weekly wrap\n"
     "    all / history — every round this week\n"
     "    leaderboard / standings (+ optional game, e.g. \"leaderboard queens\")\n"
-    "    leaderboard yesterday / leaderboard YYYY-MM-DD — past standings\n"
+    "    leaderboard yesterday / leaderboard YYYY-MM-DD — compact past standings\n"
     "    times — per-game time standings (fastest totals this week)\n"
     "    month / mtd (+ optional game, e.g. \"month queens\") — MTD summary\n"
     "    year / ytd (+ optional game, e.g. \"year queens\") — YTD summary\n"
@@ -133,34 +132,34 @@ def _resolve_recap_target(
 
     Supported forms:
     - ``recap`` / ``today`` → today
-    - ``recap yesterday`` → today - 1
-    - ``recap N days ago`` (N = 1..6) → today - N
+    - ``recap yesterday`` / ``yesterday`` → today - 1
+    - ``recap N days ago`` / ``N days ago`` (N = 1..6) → today - N
     - ``recap YYYY-MM-DD`` → exact date within the last week
 
-    Bare ``yesterday`` / ``N days ago`` are handled by
-    :func:`_resolve_leaderboard_target` instead — they return just the
-    leaderboard, not a full recap, which matches how people actually
-    use those queries ("what were the standings yesterday?").
+    The bare ``yesterday`` / ``N days ago`` keywords route to the full
+    recap so a casual "what happened yesterday?" gets the per-game
+    breakdown people actually want. The compact-leaderboard variant
+    is still available behind the explicit ``leaderboard …`` /
+    ``standings …`` prefix (see :func:`_resolve_leaderboard_target`).
     """
     if lower in ("recap", "today"):
         return (today, None)
-    if lower == "recap yesterday":
+    if lower in ("recap yesterday", "yesterday"):
         return (today - timedelta(days=1), None)
 
-    # ``recap 3 days ago`` / ``recap 3 days``
-    if lower.startswith("recap "):
-        rest = lower[len("recap "):]
-        m = _DAYS_AGO_RE.match(rest)
-        if m:
-            n = int(m.group(1))
-            if n < 1 or n > _MAX_DAYS_AGO:
-                return (
-                    today,
-                    f"I can only pull recaps from the last {_MAX_DAYS_AGO} days. "
-                    f"Try ``recap yesterday``, ``recap 2 days ago`` … up to "
-                    f"``recap {_MAX_DAYS_AGO} days ago``.",
-                )
-            return (today - timedelta(days=n), None)
+    # ``recap 3 days ago`` / ``recap 3 days`` / bare ``3 days ago``.
+    rest = lower[len("recap "):] if lower.startswith("recap ") else lower
+    m = _DAYS_AGO_RE.match(rest)
+    if m:
+        n = int(m.group(1))
+        if n < 1 or n > _MAX_DAYS_AGO:
+            return (
+                today,
+                f"I can only pull recaps from the last {_MAX_DAYS_AGO} days. "
+                f"Try ``yesterday``, ``2 days ago`` … up to "
+                f"``{_MAX_DAYS_AGO} days ago``.",
+            )
+        return (today - timedelta(days=n), None)
 
     m = _RECAP_DATE_RE.match(lower)
     if m:
@@ -187,23 +186,24 @@ def _resolve_leaderboard_target(
 
     Returns the same ``(target_day, error_msg)`` shape as
     :func:`_resolve_recap_target`; returns ``None`` when the text
-    isn't a date-scoped leaderboard command.
+    isn't an explicitly-prefixed leaderboard command.
 
-    Supported forms (with or without a leading ``leaderboard`` /
-    ``standings`` prefix):
-    - bare ``yesterday`` → today - 1
-    - bare ``N days ago`` (N = 1..6) → today - N
+    Only the explicit ``leaderboard …`` / ``standings …`` form lands
+    here — bare ``yesterday`` / ``N days ago`` route to the full
+    recap (see :func:`_resolve_recap_target`) since that's what
+    people usually want. The compact leaderboard view is reserved
+    for callers who explicitly ask for it.
+
+    Supported forms:
+    - ``leaderboard yesterday`` → today - 1
+    - ``leaderboard N days ago`` (N = 1..6) → today - N
     - ``leaderboard YYYY-MM-DD`` → exact date within the last week
-
-    The idea: readers who care about a past day mostly want the final
-    standings, not the full per-game recap, so the bare date keywords
-    default to leaderboard mode.
     """
-    # Strip optional leading "leaderboard " / "standings " prefix, but
-    # remember whether we stripped it — YYYY-MM-DD is only accepted
-    # when prefixed so a bare date string doesn't get grabbed.
+    # Require the leaderboard/standings prefix — without it, the bare
+    # keyword belongs to the recap resolver.
     stripped = _LEADERBOARD_PREFIX_RE.sub("", lower, count=1)
-    prefixed = stripped != lower
+    if stripped == lower:
+        return None
 
     if stripped == "yesterday":
         return (today - timedelta(days=1), None)
@@ -215,26 +215,23 @@ def _resolve_leaderboard_target(
             return (
                 today,
                 f"I can only pull leaderboards from the last {_MAX_DAYS_AGO} days. "
-                f"Try ``yesterday``, ``2 days ago`` … up to "
-                f"``{_MAX_DAYS_AGO} days ago``.",
+                f"Try ``leaderboard yesterday``, ``leaderboard 2 days ago`` … up to "
+                f"``leaderboard {_MAX_DAYS_AGO} days ago``.",
             )
         return (today - timedelta(days=n), None)
 
-    if prefixed:
-        try:
-            target = date.fromisoformat(stripped)
-        except ValueError:
-            return None
-        if target > today:
-            return (today, "That's in the future — I don't have those scores yet.")
-        if (today - target).days > _MAX_DAYS_AGO:
-            return (
-                today,
-                f"I can only pull leaderboards from the last {_MAX_DAYS_AGO} days.",
-            )
-        return (target, None)
-
-    return None
+    try:
+        target = date.fromisoformat(stripped)
+    except ValueError:
+        return None
+    if target > today:
+        return (today, "That's in the future — I don't have those scores yet.")
+    if (today - target).days > _MAX_DAYS_AGO:
+        return (
+            today,
+            f"I can only pull leaderboards from the last {_MAX_DAYS_AGO} days.",
+        )
+    return (target, None)
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +316,15 @@ def _handle_recap(
     # but the webhook module is imported early by main.py).
     from .jobs import render_daily
 
-    day = target_day or la_date(now)
-    body, _ = render_daily(repo, settings, day)
+    today = la_date(now)
+    day = target_day or today
+    # Past-day recaps drop the "Haven't heard from X today" footer —
+    # nagging about a missed Tuesday from inside a Friday recap reads
+    # as nonsense. The current-day recap keeps it.
+    body, _ = render_daily(
+        repo, settings, day,
+        include_missing_today_nag=(day == today),
+    )
     return body
 
 
