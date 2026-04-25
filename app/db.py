@@ -184,6 +184,28 @@ class Repository(Protocol):
         ``day``. Idempotent."""
         ...
 
+    def list_today_for_game(
+        self, *, game: str, day: date
+    ) -> List[ScoreRow]:
+        """Return every score row for ``game`` on ``day``. Used by
+        submission-time trigger detection ("best of today" /
+        "worst of today") so the writer can rank the just-inserted
+        row against everyone else's day."""
+        ...
+
+    def get_top_extremes_for_game(
+        self, *, game: str, n: int = 2
+    ) -> tuple[List["ScoreRow"], List["ScoreRow"]]:
+        """Return ``(fastest_top_n, slowest_top_n)`` score rows for
+        ``game`` across all players, all time. Each list is ordered
+        most-extreme-first and contains up to ``n`` rows (fewer if
+        the game has fewer total submissions). Caller uses these
+        to detect "all-time record" / "all-time worst-ever"
+        triggers after an insert — by asking for top-2 the caller
+        can always identify the "previous holder" even when the
+        just-inserted row claims first place."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # In-memory implementation (tests + local fallback)
@@ -411,6 +433,52 @@ class InMemoryRepository:
         self, player_id: int, kind: str, day: date
     ) -> None:
         self._taunt_log.add((player_id, kind, day))
+
+    def list_today_for_game(
+        self, *, game: str, day: date
+    ) -> List[ScoreRow]:
+        names_by_id = {p.id: p.display_name for p in self._players.values()}
+        return [
+            ScoreRow(
+                player_id=s["player_id"],
+                player_name=names_by_id.get(s["player_id"], ""),
+                game=s["game"],
+                puzzle_no=s["puzzle_no"],
+                puzzle_date=s["puzzle_date"],
+                raw_score=s["raw_score"],
+            )
+            for s in self.scores
+            if s["game"] == game and s["puzzle_date"] == day
+        ]
+
+    def get_top_extremes_for_game(
+        self, *, game: str, n: int = 2
+    ) -> tuple[List[ScoreRow], List[ScoreRow]]:
+        names_by_id = {p.id: p.display_name for p in self._players.values()}
+        rows = [s for s in self.scores if s["game"] == game]
+        if not rows:
+            return [], []
+
+        def _to_row(s: Dict[str, Any]) -> ScoreRow:
+            return ScoreRow(
+                player_id=s["player_id"],
+                player_name=names_by_id.get(s["player_id"], ""),
+                game=s["game"],
+                puzzle_no=s["puzzle_no"],
+                puzzle_date=s["puzzle_date"],
+                raw_score=s["raw_score"],
+            )
+
+        # Tiebreak on player_id so the ordering is deterministic in
+        # tests when multiple rows share the same raw_score.
+        fastest_sorted = sorted(rows, key=lambda s: (s["raw_score"], s["player_id"]))
+        slowest_sorted = sorted(
+            rows, key=lambda s: (-s["raw_score"], s["player_id"])
+        )
+        return (
+            [_to_row(s) for s in fastest_sorted[:n]],
+            [_to_row(s) for s in slowest_sorted[:n]],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -796,3 +864,80 @@ class SupabaseRepository:
         self, player_id: int, kind: str, day: date
     ) -> None:
         self.mark_recap_sent(day, self._taunt_key(player_id, kind))
+
+    def list_today_for_game(
+        self, *, game: str, day: date
+    ) -> List[ScoreRow]:
+        # Embed the players(display_name) join so we can render the
+        # caller's "you beat X by N seconds" copy without a second
+        # lookup. ``puzzle_date`` is stored as ISO; eq-match works
+        # natively against the date.isoformat() string.
+        resp = (
+            self._client.table("scores")
+            .select(
+                "player_id, game, puzzle_no, puzzle_date, raw_score, "
+                "players(display_name)"
+            )
+            .eq("game", game)
+            .eq("puzzle_date", day.isoformat())
+            .execute()
+        )
+        rows: List[ScoreRow] = []
+        for row in resp.data or []:
+            player = row.get("players") or {}
+            rows.append(
+                ScoreRow(
+                    player_id=row["player_id"],
+                    player_name=player.get("display_name", ""),
+                    game=row["game"],
+                    puzzle_no=row["puzzle_no"],
+                    puzzle_date=date.fromisoformat(row["puzzle_date"]),
+                    raw_score=row["raw_score"],
+                )
+            )
+        return rows
+
+    def get_top_extremes_for_game(
+        self, *, game: str, n: int = 2
+    ) -> tuple[List[ScoreRow], List[ScoreRow]]:
+        # Two cheap queries (order + limit n each) instead of pulling
+        # the whole game's history. PostgREST honours .order() so
+        # this lands at most n rows per side.
+        common = (
+            "player_id, game, puzzle_no, puzzle_date, raw_score, "
+            "players(display_name)"
+        )
+        fastest_resp = (
+            self._client.table("scores")
+            .select(common)
+            .eq("game", game)
+            .order("raw_score")
+            .limit(n)
+            .execute()
+        )
+        slowest_resp = (
+            self._client.table("scores")
+            .select(common)
+            .eq("game", game)
+            .order("raw_score", desc=True)
+            .limit(n)
+            .execute()
+        )
+
+        def _rows(resp_data: Optional[List[Dict[str, Any]]]) -> List[ScoreRow]:
+            out: List[ScoreRow] = []
+            for row in resp_data or []:
+                player = row.get("players") or {}
+                out.append(
+                    ScoreRow(
+                        player_id=row["player_id"],
+                        player_name=player.get("display_name", ""),
+                        game=row["game"],
+                        puzzle_no=row["puzzle_no"],
+                        puzzle_date=date.fromisoformat(row["puzzle_date"]),
+                        raw_score=row["raw_score"],
+                    )
+                )
+            return out
+
+        return _rows(fastest_resp.data), _rows(slowest_resp.data)
