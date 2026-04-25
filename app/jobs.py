@@ -1351,6 +1351,178 @@ _GRIPE_TEMPLATES: Tuple[str, ...] = (
 )
 
 
+# Stat-aware variants — each uses one or more of {best_game} /
+# {best_score} / {worst_game} / {worst_score} / {rank} / {total} /
+# {points} / {leader_name}. Run-time selection only considers a
+# stat-aware template when EVERY placeholder it uses has a value
+# (filtered via _template_supported). Plain templates above are
+# always candidates.
+_BRAG_STAT_TEMPLATES: Tuple[str, ...] = (
+    "{sender} just clocked {best_score} on {best_game} today. Try to keep up.",
+    "Brag justified: {sender} dropped {best_score} on {best_game}. Take notes.",
+    "{sender}'s opening salvo on today's {best_game}: {best_score}. They want a parade.",
+    "{sender} would like the group to know they hit {best_score} on {best_game}. Cheers expected.",
+    "Today's update from {sender}: {best_score} on {best_game}. They are accepting compliments via DM.",
+    "{sender}: {best_score} on {best_game}. Group: forced to acknowledge.",
+    "Notable: {sender} clocked {best_score} on {best_game}. They've activated their internal hype machine.",
+    "{sender} sits #{rank} of {total} this week with {points} and wants you to feel that gap.",
+    "{sender} is currently #{rank} on the week ({points}). Insufferable allowed.",
+    "Top of the week: {sender} at #{rank} with {points}. They would like that on the record.",
+    "{sender}, currently {points} this week (#{rank} of {total}), would like a moment of your time.",
+    "Public flex: {sender} sits at #{rank} this week ({points}). Try harder, the rest of you.",
+    "{sender}'s {best_game} of the day: {best_score}. They're #{rank} on the week. The combination is unbearable.",
+    "{sender} is leading week (#{rank}, {points}) AND just hit {best_score} on {best_game}. Group is not OK.",
+    "Heads up: {sender}'s {best_score} on {best_game} just landed and they are NOT being humble about it.",
+)
+
+_GRIPE_STAT_TEMPLATES: Tuple[str, ...] = (
+    "{sender} just put up {worst_score} on {worst_game}. They want company in misery.",
+    "{sender} bombed {worst_game} with {worst_score}. The puzzle won that round.",
+    "{sender}'s {worst_game} today: {worst_score}. They wanted you to share in the shame.",
+    "Group support requested: {sender} clocked {worst_score} on {worst_game}. Genuinely yikes.",
+    "{sender} sits #{rank} of {total} this week ({points}). They blame the puzzles.",
+    "{sender} would like to register a complaint: #{rank} on the week with {points}. Send sympathy.",
+    "{sender}'s week so far: {points}, #{rank} of {total}. They're not coping. Be kind.",
+    "Today's highlights for {sender}: {worst_score} on {worst_game}, #{rank} on the week. A career low.",
+    "{sender}: {worst_score} on {worst_game}. Bot: tough one. {sender}: needed you to know.",
+    "Public commiseration request from {sender}: {worst_score} on {worst_game}. The misery is real.",
+    "{sender}'s {worst_game} today was a {worst_score}. The leaderboard now has them at #{rank}. Send wine.",
+    "{sender} would like {leader_name} to know that #{rank} on the week is not where they thought they'd be.",
+    "{sender} is currently #{rank} on the week ({points}). They've made peace with it. Sort of.",
+    "Hot take from {sender}: {worst_score} on {worst_game} is genuinely impressive. Just the wrong kind.",
+    "{sender}, current standing #{rank} of {total} on {points}, would like the group to acknowledge the struggle.",
+)
+
+
+@dataclass
+class _TauntStats:
+    """Computed stats handed to the brag/gripe template renderer.
+    Fields are ``None`` when the data isn't available — render-time
+    filtering ensures stat-aware templates only fire when every
+    placeholder they use has a value."""
+
+    best_game: Optional[str] = None
+    best_score: Optional[str] = None
+    worst_game: Optional[str] = None
+    worst_score: Optional[str] = None
+    rank: Optional[int] = None
+    total: Optional[int] = None
+    points: Optional[str] = None
+    leader_name: Optional[str] = None
+
+
+_TIME_GAMES_FOR_TAUNT: Tuple[str, ...] = (
+    "queens", "tango", "crossclimb", "zip", "patches", "mini_sudoku",
+)
+
+
+def _format_taunt_seconds(secs: int) -> str:
+    minutes, seconds = divmod(secs, 60)
+    return f"{minutes}:{seconds:02d}"
+
+
+def _compute_taunt_stats(
+    repo: Repository, sender_id: int, today: date, enabled_games: frozenset
+) -> _TauntStats:
+    """Best-effort stat lookup for the brag/gripe template renderer.
+    Returns an empty :class:`_TauntStats` when the sender hasn't
+    played today and no leaderboard exists; partial data is fine —
+    template filtering handles the gaps.
+    """
+    stats = _TauntStats()
+
+    # Today's slice: best/worst time-game submission for the sender.
+    try:
+        today_scores = repo.list_scores(date_from=today, date_to=today)
+    except Exception:
+        logger.exception(
+            "list_scores failed during taunt stat lookup (sender=%s, day=%s)",
+            sender_id, today,
+        )
+        today_scores = []
+    sender_today = [
+        s for s in today_scores
+        if s.player_id == sender_id
+        and s.game in enabled_games
+        and s.game in _TIME_GAMES_FOR_TAUNT
+    ]
+    if sender_today:
+        best = min(sender_today, key=lambda s: s.raw_score)
+        worst = max(sender_today, key=lambda s: s.raw_score)
+        stats.best_game = GAME_DISPLAY[best.game]
+        stats.best_score = _format_taunt_seconds(best.raw_score)
+        if worst.game != best.game or worst.raw_score != best.raw_score:
+            stats.worst_game = GAME_DISPLAY[worst.game]
+            stats.worst_score = _format_taunt_seconds(worst.raw_score)
+        else:
+            # Only one game today → reuse it as both best and worst
+            # so the gripe templates that reference {worst_game} can
+            # still render. The honest answer is "the only game I
+            # played went badly".
+            stats.worst_game = stats.best_game
+            stats.worst_score = stats.best_score
+
+    # Weekly leaderboard rank + points.
+    try:
+        monday, sunday = week_bounds(today)
+        week_scores = [
+            s for s in repo.list_scores(date_from=monday, date_to=sunday)
+            if s.game in enabled_games
+        ]
+    except Exception:
+        logger.exception(
+            "week_scores fetch failed during taunt stats (sender=%s, day=%s)",
+            sender_id, today,
+        )
+        week_scores = []
+    if week_scores:
+        lb = weekly_leaderboard(week_scores)
+        for i, entry in enumerate(lb, start=1):
+            if entry.player_id == sender_id:
+                stats.rank = i
+                stats.total = len(lb)
+                stats.points = _fmt_weekly_points(entry.total_points)
+                break
+        if lb:
+            stats.leader_name = lb[0].player_name or None
+
+    return stats
+
+
+def _template_supported(template: str, stats: _TauntStats) -> bool:
+    """A stat-aware template is only a viable candidate when every
+    one of its named placeholders has a value in ``stats``. Plain
+    templates (just ``{sender}``) are trivially supported."""
+    for field in (
+        "best_game", "best_score", "worst_game", "worst_score",
+        "rank", "total", "points", "leader_name",
+    ):
+        token = "{" + field + "}"
+        if token in template and getattr(stats, field) is None:
+            return False
+    return True
+
+
+def _render_taunt(
+    template: str, sender_name: str, stats: _TauntStats
+) -> str:
+    """Substitute ``{sender}`` plus any stat fields the template uses.
+    ``str.format`` raises if the template references a key the stats
+    doesn't carry; :func:`_template_supported` filters those out so
+    we never reach this with a missing field."""
+    return template.format(
+        sender=sender_name,
+        best_game=stats.best_game,
+        best_score=stats.best_score,
+        worst_game=stats.worst_game,
+        worst_score=stats.worst_score,
+        rank=stats.rank,
+        total=stats.total,
+        points=stats.points,
+        leader_name=stats.leader_name,
+    )
+
+
 def run_taunt(
     repo: Repository,
     settings: Settings,
@@ -1382,8 +1554,19 @@ def run_taunt(
     if repo.has_taunted_today(sender_id, kind, today):
         return 0, None
 
-    pool = _BRAG_TEMPLATES if kind == "brag" else _GRIPE_TEMPLATES
-    body = pool[today.toordinal() % len(pool)].format(sender=sender_name)
+    # Build the candidate template pool: plain (always) + stat-aware
+    # filtered to whichever templates have ALL their placeholders
+    # populated. Two senders on the same day get different lines
+    # because (a) random.choice is, well, random, and (b) the stat
+    # data differs per sender (different best/worst games, different
+    # leaderboard rank).
+    plain = _BRAG_TEMPLATES if kind == "brag" else _GRIPE_TEMPLATES
+    stat_pool = _BRAG_STAT_TEMPLATES if kind == "brag" else _GRIPE_STAT_TEMPLATES
+    stats = _compute_taunt_stats(repo, sender_id, today, settings.enabled_games)
+    stat_candidates = [t for t in stat_pool if _template_supported(t, stats)]
+    candidates: List[str] = list(plain) + stat_candidates
+    template = random.choice(candidates)
+    body = _render_taunt(template, sender_name, stats)
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
     targets = [

@@ -487,7 +487,9 @@ class TestPbDmDailyCap:
         )
         # PB is special — should still fire even at the cap.
         assert body is not None
-        assert "Alice" in body
+        # Either the player name or the game appears (some templates
+        # phrase the PB without naming the player explicitly).
+        assert "Alice" in body or "Queens" in body
 
     def test_under_cap_picks_any_trigger(self):
         from app.db import Player
