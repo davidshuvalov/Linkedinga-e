@@ -518,19 +518,30 @@ def daily_recap(
     lines: List[str] = [header, ""]
     lines.extend(_per_game_sections(day, day_scores))
 
+    # "Week so far" must reflect the standings AS OF ``day`` — including
+    # all scores up to and including ``day`` but nothing past it. For
+    # the live cron this is a no-op (``day`` IS today, so puzzle_date
+    # never exceeds it). For an on-demand past-day recap it matters:
+    # rendering Tuesday's recap on Friday must NOT pull Wed/Thu/Fri
+    # scores into the leaderboard, otherwise the snapshot lies about
+    # what the standings looked like at the time.
+    week_so_far = [s for s in week_filtered if s.puzzle_date <= day]
+
     # Per-game running totals across the whole week — complements the
     # overall "Week so far" leaderboard below by showing who's ahead in
     # each game individually, not just on aggregate points.
-    game_totals_lines = _per_game_running_totals(week_filtered)
+    game_totals_lines = _per_game_running_totals(week_so_far)
     if game_totals_lines:
         lines.append("")
         lines.extend(game_totals_lines)
 
-    # Prior standings = the week up to but not including today, so
-    # the position-change arrows compare today's board to yesterday's.
-    prior_scores = [s for s in week_filtered if s.puzzle_date < day]
+    # Prior standings = the week up to but not including ``day``, so
+    # the position-change arrows compare ``day``'s board to the day
+    # before. For the live cron that means today vs yesterday; for a
+    # past-day recap it means that-day vs the day before.
+    prior_scores = [s for s in week_so_far if s.puzzle_date < day]
     lb_lines = _weekly_leaderboard_lines(
-        week_filtered,
+        week_so_far,
         title="Week so far",
         prior_scores=prior_scores,
     )
