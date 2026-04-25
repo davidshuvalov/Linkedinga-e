@@ -186,6 +186,77 @@ _ALL_TIME_ANTI_RECORD_TEMPLATES = (
 )
 
 
+# Phase D triggers — finer slices of personal history.
+#   * dow_pb       — best ever on this game on this weekday
+#                    (e.g. "fastest Tuesday Queens you've had")
+#   * dow_worst    — worst ever on this weekday for this game
+#   * year_pb      — fastest score for this game in the calendar year
+#   * year_worst   — slowest score for this game in the calendar year
+#   * first_today  — just-inserted is the only score for this game today
+#                    ("you broke the seal" — solo player or first-mover)
+# Format placeholders these pools support beyond the common
+# {name}/{game}/{new}/{prior}: {weekday} (e.g. "Tuesday"),
+# {year} (e.g. "2026").
+
+_DOW_PB_TEMPLATES = (
+    "{name}, that's your best-ever {game} on a {weekday}: {new} (was {prior}). "
+    "Specific stats for specific people.",
+    "Best {weekday} {game} of your career, {name}: {new}. Beats your old {weekday} record of {prior}.",
+    "{name} owns {weekday}s on {game} now: {new} clear of your prior {prior}.",
+    "{weekday} {name} just rewrote the personal {game} {weekday}-record: {new} beats {prior}.",
+    "{name}, {weekday}s belong to you on {game}. {new} is your new best (was {prior}).",
+    "Specific glory, {name}: {new} on {game} is your fastest-ever {weekday} (down from {prior}).",
+    "Plot twist: {name}'s {weekday}s are now {game} highlight reels. {new} (was {prior}).",
+    "{name} on a {weekday} on {game}: dangerous. {new}, beating your {prior}.",
+    "Personal {weekday}-record fall — {name}, {game} in {new} (was {prior}). The week has a favourite day now.",
+    "{name}, {game} on {weekday} is officially your thing now: {new} (was {prior}).",
+    "Sneakily good, {name}. New {weekday} {game} PB: {new} (was {prior}).",
+    "{name}, {weekday}s used to mean {prior} on {game}. Now they mean {new}. Update your CV.",
+)
+
+_DOW_WORST_TEMPLATES = (
+    "{name}, {game} on a {weekday} just hit a new low: {new} (was {prior}). {weekday}s, hey.",
+    "Worst {weekday} you've ever had on {game}, {name}: {new} (old low {prior}).",
+    "{name}, that's a new {weekday}-worst for {game}: {new}. The {prior} from last {weekday} feels positively heroic now.",
+    "{name}, {weekday} {game} bottoming out: {new} undercuts {prior}.",
+    "Personal {weekday} anti-record on {game}, {name}: {new} (was {prior}). Tomorrow's a different weekday.",
+    "{name}, on {weekday}s the {game} board now reads: 1) you, slowest. {new} (was {prior}).",
+    "{name}, your {weekday}-worst for {game} just got worster: {new} (was {prior}).",
+    "{game} on {weekday}s is your kryptonite, {name}: new low {new} (was {prior}).",
+    "{name}, {new} on {game} is the slowest {weekday} you've ever played. (Old shame: {prior}.)",
+    "Tough {weekday}, {name}. New {game} {weekday}-low: {new} (was {prior}).",
+)
+
+_YEAR_PB_TEMPLATES = (
+    "{name}, that's your fastest {game} of {year}: {new} (was {prior}).",
+    "Best {game} of the year so far, {name}: {new}. Old {year} best was {prior}.",
+    "{name} sets a new {year} {game} PB: {new} (was {prior}). The year's still young, but for now you own it.",
+    "Top of {name}'s {year} {game} chart: {new}, beating their old {prior}.",
+    "{name}, {year} just got its {game} headline: {new} (was {prior}).",
+    "Best {game} {name} has played this year: {new}. The old {year} mark was {prior}.",
+    "{name}, that's a {year} PB on {game}: {new} (was {prior}). Bookmark it.",
+    "{game} {year} record holder for {name}: {name}. {new} (was {prior}). Nepotism.",
+    "Annual leaderboard moves: {name}'s best {game} of {year} is now {new} (was {prior}).",
+    "{name} drops a {year} {game} best: {new}. Your old {year} record ({prior}) had a good run.",
+    "Calendar's noticed, {name}: {new} on {game} is your {year} fastest (was {prior}).",
+    "{name}, {game} {year} edition: {new}, your fastest of the year (was {prior}).",
+)
+
+_FIRST_TODAY_TEMPLATES = (
+    "{name}, you broke the seal on today's {game}: {new}. The board's open.",
+    "First on the board for today's {game}, {name}: {new}. Now the others have to catch up.",
+    "{name}: {new} on {game} — you're first to play today. Set the bar wherever you fancy.",
+    "{name}, you're the day's pioneer on {game}: {new}. Everyone else now has a number to beat.",
+    "First in today, {name}: {new} on {game}. The day's {game} board has one entry, and it's yours.",
+    "Today's {game} starts with {name}: {new}. First mover advantage.",
+    "{name}, you opened today's {game} ledger at {new}. The rest of the field is on notice.",
+    "Number one (so far) on today's {game}, {name}: {new}. Single-entry leaderboard. Enjoy it.",
+    "{name} kicks today's {game} off at {new}. Everyone else is playing for second already.",
+    "{name}, you're the early bird on today's {game}: {new}. Worm acquired.",
+    "{name}, opening salvo on today's {game}: {new}. Lonely at the top, until it isn't.",
+)
+
+
 _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "new_pb": _NEW_PB_TEMPLATES,
     "tied_pb": _TIED_PB_TEMPLATES,
@@ -195,7 +266,29 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "worst_of_day": _WORST_OF_DAY_TEMPLATES,
     "all_time_record": _ALL_TIME_RECORD_TEMPLATES,
     "all_time_anti_record": _ALL_TIME_ANTI_RECORD_TEMPLATES,
+    "dow_pb": _DOW_PB_TEMPLATES,
+    "dow_worst": _DOW_WORST_TEMPLATES,
+    "year_pb": _YEAR_PB_TEMPLATES,
+    "first_today": _FIRST_TODAY_TEMPLATES,
 }
+
+
+# PB-trigger DMs are capped to ``_PB_DM_DAILY_CAP`` per player per
+# day so an active player isn't drowned in DMs. SPECIAL_TRIGGER_KINDS
+# bypass the cap — they're rare and worth surfacing every time. The
+# cap counts BOTH special and non-special DMs (so a player who's
+# already had two specials still gets a third special, but won't get
+# any non-special on top); the cap is "non-special never exceeds 2".
+_PB_DM_DAILY_CAP = 2
+
+SPECIAL_TRIGGER_KINDS: frozenset = frozenset({
+    "new_pb",                # personal best for this game
+    "tied_pb",               # equalled personal best
+    "all_time_record",       # all-time fastest across the group
+    "all_time_anti_record",  # all-time slowest across the group
+    "dow_pb",                # best on this game on this weekday
+    "year_pb",               # fastest of the calendar year
+})
 
 
 @dataclass
@@ -407,14 +500,159 @@ def gather_submission_triggers(
     if record is not None:
         triggers.append(record)
 
+    # Phase D: finer slices of personal history. We pull the player's
+    # full game history once and hand the same list to every Phase-D
+    # detector — keeps the repo round-trips down to one even when
+    # several Phase-D triggers could match.
+    try:
+        player_game_history = [
+            s for s in repo.list_player_scores(player_id) if s.game == game
+        ]
+    except Exception:
+        logger.exception(
+            "list_player_scores failed (player=%s) — skipping Phase D triggers",
+            player_id,
+        )
+        player_game_history = []
+
+    dow = _detect_dow_extreme_trigger(player_game_history, new_raw, today)
+    if dow is not None:
+        triggers.append(dow)
+
+    year = _detect_year_extreme_trigger(player_game_history, new_raw, today)
+    if year is not None:
+        triggers.append(year)
+
+    first = _detect_first_today_trigger(today_scores, new_raw, player_id)
+    if first is not None:
+        triggers.append(first)
+
     return triggers
+
+
+# ---------------------------------------------------------------------------
+# Phase D detectors
+# ---------------------------------------------------------------------------
+
+
+_WEEKDAY_NAMES = (
+    "Monday", "Tuesday", "Wednesday", "Thursday",
+    "Friday", "Saturday", "Sunday",
+)
+
+
+def _detect_dow_extreme_trigger(
+    player_game_history: Sequence[ScoreRow],
+    new_raw: int,
+    today: date,
+) -> Optional[Trigger]:
+    """Fire when the just-inserted score is the player's best (or
+    worst) ever on this game on this weekday. Requires at least one
+    prior submission on the same weekday — first-ever-Tuesday-Queens
+    isn't an interesting "Tuesday PB" callout.
+
+    The just-inserted row is in ``player_game_history``. We compare
+    against the OTHER same-weekday rows (i.e. exclude the one we
+    just wrote)."""
+    weekday = today.weekday()
+    same_dow = [
+        s for s in player_game_history
+        if s.puzzle_date.weekday() == weekday and s.puzzle_date != today
+    ]
+    if not same_dow:
+        return None
+
+    raws = [s.raw_score for s in same_dow]
+    weekday_name = _WEEKDAY_NAMES[weekday]
+
+    if new_raw < min(raws):
+        return Trigger(
+            kind="dow_pb",
+            format_data={
+                "_new_raw": str(new_raw),
+                "_prior_raw": str(min(raws)),
+                "weekday": weekday_name,
+            },
+        )
+    if new_raw > max(raws):
+        return Trigger(
+            kind="dow_worst",
+            format_data={
+                "_new_raw": str(new_raw),
+                "_prior_raw": str(max(raws)),
+                "weekday": weekday_name,
+            },
+        )
+    return None
+
+
+def _detect_year_extreme_trigger(
+    player_game_history: Sequence[ScoreRow],
+    new_raw: int,
+    today: date,
+) -> Optional[Trigger]:
+    """Fire when the just-inserted score is the player's best of the
+    calendar year for this game. Requires at least one prior in the
+    same year — January 2nd's first-ever-of-the-year submission
+    isn't an interesting "year PB".
+
+    Only positive (PB) variant for now — the year-worst case overlaps
+    too much with the personal-worst trigger to feel distinct.
+    """
+    year = today.year
+    same_year = [
+        s for s in player_game_history
+        if s.puzzle_date.year == year and s.puzzle_date != today
+    ]
+    if not same_year:
+        return None
+
+    raws = [s.raw_score for s in same_year]
+    if new_raw < min(raws):
+        return Trigger(
+            kind="year_pb",
+            format_data={
+                "_new_raw": str(new_raw),
+                "_prior_raw": str(min(raws)),
+                "year": str(year),
+            },
+        )
+    return None
+
+
+def _detect_first_today_trigger(
+    today_scores: Sequence[ScoreRow],
+    new_raw: int,
+    player_id: int,
+) -> Optional[Trigger]:
+    """Fire when the just-inserted row is the only score for this
+    game today — i.e. no other player has put one down yet, and
+    this player hasn't double-submitted (which the unique constraint
+    prevents anyway).
+
+    Mutually exclusive with ``best_of_day`` / ``worst_of_day`` (which
+    require ≥ 2 distinct players on the day) so a "you broke the
+    seal" callout doesn't compete with a "best of day" callout for
+    a solo first-mover."""
+    if len(today_scores) != 1:
+        return None
+    only = today_scores[0]
+    if only.player_id != player_id or only.raw_score != new_raw:
+        return None
+    return Trigger(
+        kind="first_today",
+        format_data={"_new_raw": str(new_raw)},
+    )
 
 
 def render_trigger(trigger: Trigger, *, player_name: str, game: str) -> str:
     """Format ``trigger`` into the DM body. Pulls a random template
-    from the trigger's pool and resolves ``{name}`` / ``{game}`` /
-    ``{new}`` / ``{prior}`` / ``{prior_holder}`` from the format
+    from the trigger's pool and resolves placeholders from the format
     data and the caller-supplied identity bits.
+
+    Supported placeholders (templates use a subset based on kind):
+    ``{name}``, ``{game}``, ``{new}``, ``{prior}``, ``{prior_holder}``,
+    ``{weekday}``, ``{year}``.
     """
     pool = _TEMPLATES_BY_KIND[trigger.kind]
     template = random.choice(pool)
@@ -429,8 +667,9 @@ def render_trigger(trigger: Trigger, *, player_name: str, game: str) -> str:
         subs["new"] = format_raw_score(game, int(fd["_new_raw"]))
     if "_prior_raw" in fd:
         subs["prior"] = format_raw_score(game, int(fd["_prior_raw"]))
-    if "prior_holder" in fd:
-        subs["prior_holder"] = fd["prior_holder"]
+    for key in ("prior_holder", "weekday", "year"):
+        if key in fd:
+            subs[key] = fd[key]
     return template.format(**subs)
 
 
@@ -517,10 +756,50 @@ def maybe_notify_personal_best(
     if not triggers:
         return None
 
-    # When multiple triggers fire (e.g. a personal best that's also
-    # the best of the day), pick one at random — no priority order.
-    chosen = random.choice(triggers)
+    # Cap enforcement: an active player can fire several triggers a
+    # day (best-of-day on each game, first-today, etc.). To stop the
+    # bot from drowning them in DMs we cap non-special triggers at
+    # _PB_DM_DAILY_CAP per player per day. Special triggers (real
+    # PBs, all-time records, day-of-week PBs, year PBs) bypass the
+    # cap — they're rare and earned.
+    try:
+        already_sent = repo.count_pb_dms_today(player.id, today)
+    except Exception:
+        logger.exception(
+            "count_pb_dms_today failed (player=%s) — defaulting to 0",
+            player.id,
+        )
+        already_sent = 0
+
+    if already_sent >= _PB_DM_DAILY_CAP:
+        # Above the cap → only specials can still go through.
+        special = [t for t in triggers if t.kind in SPECIAL_TRIGGER_KINDS]
+        if not special:
+            logger.info(
+                "PB DM suppressed for player %s — daily cap reached "
+                "and no special trigger fired (kinds=%s)",
+                player.id, [t.kind for t in triggers],
+            )
+            return None
+        chosen = random.choice(special)
+    else:
+        # Under the cap → random pick from any matching trigger.
+        chosen = random.choice(triggers)
+
     body = render_trigger(chosen, player_name=player.display_name, game=game)
+
+    # Bump the per-day counter regardless of whether Twilio is
+    # configured — tests + dry-run callers should see the cap take
+    # effect just like production. The counter only tracks "we
+    # decided to send a DM"; if Twilio fails afterwards that's a
+    # separate concern (the player still notionally got their slot).
+    try:
+        repo.record_pb_dm(player.id, today)
+    except Exception:
+        logger.exception(
+            "record_pb_dm failed (player=%s, day=%s) — DM still sent",
+            player.id, today,
+        )
 
     if settings is None:
         # Local / test path where Twilio isn't configured. Still

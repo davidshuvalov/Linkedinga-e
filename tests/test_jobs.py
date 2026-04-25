@@ -27,6 +27,7 @@ from app.jobs import (
     run_morning_nudge,
     run_new_games_announcement,
     run_pre_reset_warning,
+    run_weekly_wrap_early,
     send_champion_loser_dms,
 )
 
@@ -110,6 +111,55 @@ class TestRunDailyRecap:
 
         assert "No scores yet" in body
         mock_send.assert_called_once()
+
+
+class TestWeeklyWrapEarly:
+    """``run_weekly_wrap_early`` fires at Sun 23:59 LA — one minute
+    before the new puzzle drop. Lands the wrap before the next-day
+    new-games message. Idempotent via ``recap_log`` so the Mon 00:00
+    LA daily_recap cron skips silently when the early wrap already
+    sent."""
+
+    @patch("app.jobs.send_recap")
+    def test_fires_on_sunday_la_at_2359(self, mock_send, seeded_repo):
+        # Sun 19 Apr 2026 at 23:59 LA. la_date(now) == Sunday.
+        now = datetime(2026, 4, 19, 23, 59, tzinfo=LA)
+        body = run_weekly_wrap_early(seeded_repo, SETTINGS, now=now)
+        assert body is not None
+        assert "Weekly wrap — Mon 13 Apr to Sun 19 Apr 2026" in body
+        mock_send.assert_called_once()
+
+    @patch("app.jobs.send_recap")
+    def test_silent_on_non_sunday(self, mock_send, seeded_repo):
+        # Tuesday — even if the cron is invoked manually, it bails
+        # rather than rendering a daily recap.
+        now = datetime(2026, 4, 14, 23, 59, tzinfo=LA)
+        body = run_weekly_wrap_early(seeded_repo, SETTINGS, now=now)
+        assert body is None
+        mock_send.assert_not_called()
+
+    @patch("app.jobs.send_recap")
+    def test_idempotent_when_already_sent(self, mock_send, seeded_repo):
+        # First run sends; second run is a no-op (recap_log entry).
+        now = datetime(2026, 4, 19, 23, 59, tzinfo=LA)
+        run_weekly_wrap_early(seeded_repo, SETTINGS, now=now)
+        mock_send.reset_mock()
+        body = run_weekly_wrap_early(seeded_repo, SETTINGS, now=now)
+        assert body is None
+        mock_send.assert_not_called()
+
+    @patch("app.jobs.send_recap")
+    def test_monday_daily_recap_skips_after_early_wrap(self, mock_send, seeded_repo):
+        # Sun 23:59 LA fires the wrap; the Mon 00:00 LA daily_recap
+        # cron should then see the recap_log entry and skip.
+        sun_2359 = datetime(2026, 4, 19, 23, 59, tzinfo=LA)
+        run_weekly_wrap_early(seeded_repo, SETTINGS, now=sun_2359)
+        mock_send.reset_mock()
+
+        mon_0000 = datetime(2026, 4, 20, 0, 0, tzinfo=LA)
+        body = run_daily_recap(seeded_repo, SETTINGS, now=mon_0000)
+        assert body is None
+        mock_send.assert_not_called()
 
 
 class TestPeriodEndRecapBlocks:
