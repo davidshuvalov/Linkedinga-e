@@ -1742,3 +1742,123 @@ class TestTauntCommands:
         )
         assert reply is not None
         assert "Twilio" in reply
+
+    def test_brag_uses_random_selection_so_repeats_are_rare(self, repo):
+        # 12 plain + N stat-aware brag templates → repeated brags on
+        # the SAME day (cooldown reset between calls) should sample a
+        # mix of templates rather than landing on the same one each
+        # time. Threshold: at least 2 distinct bodies across 5 calls.
+        from unittest.mock import patch
+        self._seed_active(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        bodies = set()
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            for _ in range(5):
+                repo._taunt_log.clear()  # bypass cooldown for the test
+                handle_inbound(
+                    repo, from_="whatsapp:+61400000001", body="brag",
+                    profile_name="Alice", now=NOW,
+                    settings=_settings_with_default_games(),
+                )
+                bodies.add(mock_dm.call_args.args[2])
+        # 5 random picks from a 24+ template pool → very likely 2+
+        # distinct bodies. (Probability of all 5 identical: ~1/24^4.)
+        assert len(bodies) >= 2, (
+            f"brag selection looks deterministic — only got: {bodies}"
+        )
+
+    def test_stat_aware_template_can_reference_today_score(self, repo):
+        # Force a deterministic "stat-aware always wins" scenario by
+        # checking against the rendered body when the sender has a
+        # rich stat surface to draw from. We can't pin the exact
+        # template (random.choice), but we CAN run several attempts
+        # and assert at least one references the sender's actual
+        # game/score data.
+        from unittest.mock import patch
+        from app.puzzles import la_date
+
+        today_la = la_date(NOW)
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        # Alice's actual day on Queens — sets the stat surface so
+        # stat-aware brag templates can reference {best_score} and
+        # {best_game}. Bob is just the audience.
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=today_la, raw_score=14, share_text="x",
+        )
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=714,
+            puzzle_date=today_la, raw_score=50, share_text="x",
+        )
+        seen_stat_aware = False
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            for _ in range(20):
+                repo._taunt_log.clear()
+                handle_inbound(
+                    repo, from_="whatsapp:+61400000001", body="brag",
+                    profile_name="Alice", now=NOW,
+                    settings=_settings_with_default_games(),
+                )
+                body = mock_dm.call_args.args[2]
+                # Stat-aware bodies mention "0:14" (Alice's score),
+                # "Queens", or her weekly rank "#1" / "#2".
+                if "0:14" in body or "Queens" in body or "#1" in body:
+                    seen_stat_aware = True
+                    break
+        assert seen_stat_aware, (
+            "20 random brags fired without any stat-aware template — "
+            "filtering may be excluding all stat-aware variants"
+        )
+
+    def test_two_senders_same_day_get_different_brags(self, repo):
+        # The original day-ordinal selection bug: both senders on the
+        # same day got byte-identical brags. With random + stat-
+        # aware, two different senders should produce different
+        # rendered text (different stats + random selection).
+        from unittest.mock import patch
+        from app.puzzles import la_date
+
+        today_la = la_date(NOW)
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        charlie = repo.get_or_create_player("whatsapp:+61400000003", "Charlie")
+        # Different scores so stats differ.
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=today_la, raw_score=14, share_text="x",
+        )
+        repo.insert_score(
+            player_id=bob.id, game="tango", puzzle_no=554,
+            puzzle_date=today_la, raw_score=45, share_text="x",
+        )
+        # Charlie just the audience.
+        repo.insert_score(
+            player_id=charlie.id, game="zip", puzzle_no=414,
+            puzzle_date=today_la, raw_score=20, share_text="x",
+        )
+
+        with patch("app.jobs.send_dm", return_value=True) as mock_dm:
+            handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="brag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+            alice_body = mock_dm.call_args.args[2]
+            handle_inbound(
+                repo, from_="whatsapp:+61400000002", body="brag",
+                profile_name="Bob", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+            bob_body = mock_dm.call_args.args[2]
+
+        # Each names the brag-er, so trivially different on the
+        # name token. Stronger assertion: they're not byte-identical
+        # after the name swap either (the old day-ordinal selection
+        # would have produced the same template-text for both).
+        assert alice_body != bob_body
+        assert alice_body.replace("Alice", "X") != bob_body.replace("Bob", "X")
