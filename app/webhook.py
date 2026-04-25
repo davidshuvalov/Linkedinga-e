@@ -1069,7 +1069,11 @@ def _handle_taunt(
     if sent == 0:
         return "Nobody else is in the active window — taunt unsent."
     suffix = "Consequences pending." if kind == "brag" else "Sympathy optional."
-    return f"Sent `{kind}` to {sent} player{'s' if sent != 1 else ''}. {suffix}"
+    plural = "s" if sent != 1 else ""
+    return (
+        f"Sent `{kind}` to {sent} player{plural}. {suffix}\n\n"
+        f"They got:\n> {body}"
+    )
 
 
 def handle_inbound(
