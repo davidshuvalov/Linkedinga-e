@@ -726,7 +726,7 @@ _RULES_TEXT = (
     "3–5 player time-based rounds (no ties) use competitive scoring:\n"
     "  * Base points by rank: 5/4/3/2/1.\n"
     "  * Tight game (times within 50% of fastest) — base points stand.\n"
-    "  * Clear winner (2nd is >1.5x slower than 1st) — 1st gets a\n"
+    "  * Clear winner (2nd is >1.3x slower than 1st) — 1st gets a\n"
     "    bonus up to +2, debited proportionally from others.\n"
     "  * Front cluster (top K tight + drop >1.3x to next player) —\n"
     "    top K share a bonus pool weighted by 1/time. K = 4/3/2,\n"

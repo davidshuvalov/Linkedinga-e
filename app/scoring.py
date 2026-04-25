@@ -424,7 +424,11 @@ _TIGHT_SPREAD_THRESHOLD = 0.5        # Case A: spread < this
 _CLUSTER_TOP_RATIO = 1.4             # All in-cluster consecutive ratios <
 _CLUSTER_DROP_RATIO = 1.3            # Drop ratio after cluster > this fires
                                      # any cluster bonus at all
-_CLEAR_WINNER_RATIO = 1.5            # Case C: r12 > this
+_CLEAR_WINNER_RATIO = 1.3            # Case C: r12 > this  (lowered from
+                                     # 1.5 so a clear-but-not-runaway
+                                     # leader — Mini-Sudoku-shaped 1.35x
+                                     # gaps — still earns a bonus instead
+                                     # of falling through to flat ranks)
 _CLEAR_WINNER_MAX_BONUS = 2.0        # hard cap in Case C
 _MIN_SCORE = 0.0                     # floor for any player — only
                                      # prevents negatives from debits;
@@ -723,7 +727,7 @@ def competitive_score(
            Pool size scales with the drop: 0.5 pts at drop=1.3,
            1.5 pts at drop=1.6, 2.0 pts at drop≥2.0 — bigger
            blowouts earn bigger pools.
-         * **Clear winner** (``r12 > 1.5`` and no cluster matched) —
+         * **Clear winner** (``r12 > 1.3`` and no cluster matched) —
            award 1st a ``min(2, 2*(r12-1))`` bonus, debit the rest
            proportional to base.
          * Otherwise — no adjustment.
