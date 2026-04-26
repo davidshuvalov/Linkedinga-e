@@ -2184,6 +2184,71 @@ class TestEasterEgg42:
 
 
 # ---------------------------------------------------------------------------
+# Score-confirmation reply consolidation
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmationConsolidation:
+    """The score-confirmation reply folds in the personal-best /
+    worst-of-day trigger body and the day-complete summary so the
+    submitter gets one consolidated WhatsApp message instead of
+    two or three separate sends."""
+
+    def test_pb_trigger_appended_to_confirmation(self, repo):
+        from unittest.mock import patch
+        settings = _settings_with_default_games()
+        with patch("app.notifications.send_dm") as mock_dm:
+            reply = handle_inbound(
+                repo,
+                from_="whatsapp:+61400000001",
+                body="Queens #714\n0:42",
+                profile_name="Alice", now=NOW,
+                enabled_games=settings.enabled_games,
+                settings=settings,
+            )
+        # Confirmation header is always present.
+        assert reply is not None
+        assert "Got it, Alice. Queens #714: 0:42." in reply
+        # Trigger body appended (Alice opened today's Queens — at
+        # least one of the first-today / best-of-day templates fires).
+        assert reply.count("\n\n") >= 1
+        # No separate Twilio DM was sent — the trigger body rides
+        # inside the webhook's TwiML reply instead.
+        assert mock_dm.call_count == 0
+
+    def test_day_complete_summary_appended_to_final_submission(self, repo):
+        from unittest.mock import patch
+        settings = _settings_with_default_games()
+        submissions = [
+            ("Queens #714", "0:42"),
+            ("Tango #614", "1:10"),
+            ("Zip #414", "0:33"),
+            ("Patches #214", "1:55"),
+            ("Mini Sudoku #114", "0:50"),  # 5th and final
+        ]
+        last_reply = None
+        with patch("app.notifications.send_dm") as mock_dm:
+            for header, score in submissions:
+                last_reply = handle_inbound(
+                    repo,
+                    from_="whatsapp:+61400000001",
+                    body=f"{header}\n{score}",
+                    profile_name="Alice", now=NOW,
+                    enabled_games=settings.enabled_games,
+                    settings=settings,
+                )
+        assert last_reply is not None
+        # 5th submit's reply must include the day-complete scorecard.
+        assert "Day done, Alice" in last_reply
+        assert "Today's total" in last_reply
+        # And it still has the score-confirmation header at the top.
+        assert "Got it, Alice. Mini Sudoku #114: 0:50." in last_reply
+        # No separate Twilio DM — both trigger and day-complete
+        # bodies are consolidated into the TwiML reply.
+        assert mock_dm.call_count == 0
+
+
+# ---------------------------------------------------------------------------
 # No-peek gate on today's recap / leaderboard
 # ---------------------------------------------------------------------------
 
