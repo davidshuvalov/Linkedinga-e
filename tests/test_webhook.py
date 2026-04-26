@@ -271,22 +271,54 @@ def _seed_three_queens(repo, today):
         )
 
 
+def _seed_sender_played_all_today(
+    repo, sender_whatsapp_id, sender_name, today_la, enabled_games
+):
+    """Seed the sender with one score per enabled game on ``today_la``.
+    Used by recap/leaderboard tests that want to reach the renderer
+    past the no-peek gate, which requires the requester to have
+    submitted every enabled game today before today's competitive
+    data unlocks."""
+    player = repo.get_or_create_player(sender_whatsapp_id, sender_name)
+    pno = 900
+    for game in sorted(enabled_games):
+        repo.insert_score(
+            player_id=player.id, game=game, puzzle_no=pno,
+            puzzle_date=today_la, raw_score=99,
+            share_text=f"{game} seed",
+        )
+        pno += 1
+    return player
+
+
 class TestLeaderboardCommand:
-    def test_leaderboard_with_no_scores(self, repo):
+    def test_leaderboard_today_blocked_until_sender_plays_all_games(self, repo):
+        # No-peek gate: today's leaderboard is locked until the
+        # requester has submitted every enabled game today. Empty DB +
+        # sender hasn't played → blocked.
         reply = handle_inbound(
             repo, from_="whatsapp:+61400000001", body="leaderboard",
             profile_name="Alice", now=NOW,
             settings=_settings_with_default_games(),
         )
-        assert "No scores yet" in reply
+        assert "No peeking" in reply
+        assert "Still to play" in reply
 
     def test_leaderboard_lists_players_ranked(self, repo):
         from app.puzzles import la_date
-        _seed_three_queens(repo, la_date(NOW))
+        today_la = la_date(NOW)
+        # Sender must clear the no-peek gate before today's
+        # leaderboard renders.
+        settings = _settings_with_default_games()
+        _seed_sender_played_all_today(
+            repo, "whatsapp:+61400000001", "Alice",
+            today_la, settings.enabled_games,
+        )
+        _seed_three_queens(repo, today_la)
         reply = handle_inbound(
             repo, from_="whatsapp:+61400000001", body="leaderboard",
             profile_name="Alice", now=NOW,
-            settings=_settings_with_default_games(),
+            settings=settings,
         )
         assert "1. Alice" in reply
         assert "2. Bob" in reply
@@ -294,11 +326,17 @@ class TestLeaderboardCommand:
 
     def test_leaderboard_per_game_filter(self, repo):
         from app.puzzles import la_date
-        _seed_three_queens(repo, la_date(NOW))
+        today_la = la_date(NOW)
+        settings = _settings_with_default_games()
+        _seed_sender_played_all_today(
+            repo, "whatsapp:+61400000001", "Alice",
+            today_la, settings.enabled_games,
+        )
+        _seed_three_queens(repo, today_la)
         reply = handle_inbound(
             repo, from_="whatsapp:+61400000001", body="leaderboard queens",
             profile_name="Alice", now=NOW,
-            settings=_settings_with_default_games(),
+            settings=settings,
         )
         assert "Queens — week so far" in reply
         assert "Alice" in reply
@@ -1162,7 +1200,10 @@ def _settings_with_default_games():
 
 
 class TestRecapCommand:
-    def test_recap_with_no_scores_yet(self, repo):
+    def test_recap_today_blocked_when_sender_hasnt_played(self, repo):
+        # No-peek gate: today's recap is locked behind the requester
+        # having submitted at least one game today. Empty DB + sender
+        # hasn't played → blocked entirely.
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -1172,15 +1213,21 @@ class TestRecapCommand:
             settings=_settings_with_default_games(),
         )
         assert reply is not None
-        assert "Daily recap" in reply
-        assert "No scores yet" in reply
+        assert "No peeking" in reply
+        assert "Today's games:" in reply
 
     def test_recap_includes_week_so_far(self, repo):
         # Seed two scores on the LA day matching NOW.
         from app.puzzles import la_date
 
         today_la = la_date(NOW)
-        repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        settings = _settings_with_default_games()
+        # Sender must clear the no-peek gate before today's recap
+        # renders the full week-so-far block.
+        _seed_sender_played_all_today(
+            repo, "whatsapp:+61400000001", "Alice",
+            today_la, settings.enabled_games,
+        )
         repo.get_or_create_player("whatsapp:+61400000002", "Bob")
         repo.insert_score(
             player_id=1, game="queens", puzzle_no=714,
@@ -1199,31 +1246,43 @@ class TestRecapCommand:
             body="recap",
             profile_name="Alice",
             now=NOW,
-            settings=_settings_with_default_games(),
+            settings=settings,
         )
         assert "Queens #714" in reply
         assert "Week so far:" in reply
         assert "1. Alice" in reply
 
     def test_today_is_alias_for_recap(self, repo):
+        from app.puzzles import la_date
+        settings = _settings_with_default_games()
+        _seed_sender_played_all_today(
+            repo, "whatsapp:+61400000001", "Alice",
+            la_date(NOW), settings.enabled_games,
+        )
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
             body="today",
             profile_name="Alice",
             now=NOW,
-            settings=_settings_with_default_games(),
+            settings=settings,
         )
         assert "Daily recap" in reply
 
     def test_recap_case_insensitive(self, repo):
+        from app.puzzles import la_date
+        settings = _settings_with_default_games()
+        _seed_sender_played_all_today(
+            repo, "whatsapp:+61400000001", "Alice",
+            la_date(NOW), settings.enabled_games,
+        )
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
             body="RECAP",
             profile_name="Alice",
             now=NOW,
-            settings=_settings_with_default_games(),
+            settings=settings,
         )
         assert "Daily recap" in reply
 
@@ -1363,20 +1422,27 @@ class TestHistoricalRecapCommands:
 
     def test_today_recap_keeps_missing_today_nag(self, repo):
         # Counter-test: when the recap IS for today, the nag returns.
+        # Charlie is the requester (and has played all of today's
+        # enabled games to clear the no-peek gate). Alice played
+        # yesterday but skipped today → nag fires for Alice.
         from datetime import timedelta
         from app.puzzles import la_date
 
         today = la_date(NOW)
         yesterday = today - timedelta(days=1)
-        # Alice played yesterday but skipped today → nag fires.
+        settings = _settings_with_default_games()
         self._seed_day(repo, yesterday, 1, "Alice", 10, puzzle_no=713)
         self._seed_day(repo, today, 2, "Bob", 12, puzzle_no=714)
+        _seed_sender_played_all_today(
+            repo, "whatsapp:+61400000003", "Charlie",
+            today, settings.enabled_games,
+        )
 
         reply = handle_inbound(
-            repo, from_="whatsapp:+61400000001",
+            repo, from_="whatsapp:+61400000003",
             body="recap",
-            profile_name="Alice", now=NOW,
-            settings=_settings_with_default_games(),
+            profile_name="Charlie", now=NOW,
+            settings=settings,
         )
         assert reply is not None
         # Alice's name appears somewhere in the bottom nag block.
@@ -2115,3 +2181,202 @@ class TestEasterEgg42:
         # The trigger is intentionally hidden — finding it is the point.
         from app.webhook import _HELP_TEXT
         assert "42" not in _HELP_TEXT
+
+
+# ---------------------------------------------------------------------------
+# No-peek gate on today's recap / leaderboard
+# ---------------------------------------------------------------------------
+
+
+class TestNoPeekGate:
+    """Today's recap and leaderboard are gated on the requester's own
+    submissions, LinkedIn-style:
+
+    - 0 games submitted → terse no-peek reply
+    - some submitted → recap restricted to those games, no aggregates;
+      leaderboard blocked entirely
+    - all submitted → full views (the prior behavior)
+
+    Past-day commands (yesterday, recap YYYY-MM-DD, leaderboard
+    yesterday, etc.) are never gated."""
+
+    def _seed_other_player_all_games_today(
+        self, repo, ws_id, name, today_la, enabled
+    ):
+        """Seed a non-sender with all today's games so today's
+        rankings have someone to render."""
+        player = repo.get_or_create_player(ws_id, name)
+        pno = 800
+        for game in sorted(enabled):
+            repo.insert_score(
+                player_id=player.id, game=game, puzzle_no=pno,
+                puzzle_date=today_la, raw_score=50,
+                share_text=f"{game} other-seed",
+            )
+            pno += 1
+
+    # --- recap: zero submissions ---------------------------------------
+
+    def test_recap_today_blocks_when_sender_played_nothing(self, repo):
+        from app.puzzles import la_date
+        settings = _settings_with_default_games()
+        # Other players' scores exist; sender has none.
+        self._seed_other_player_all_games_today(
+            repo, "whatsapp:+61400000002", "Bob",
+            la_date(NOW), settings.enabled_games,
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="recap",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "No peeking" in reply
+        assert "Bob" not in reply  # zero competitive data leaks
+
+    # --- recap: partial submissions ------------------------------------
+
+    def test_recap_today_partial_shows_played_games_only(self, repo):
+        from app.puzzles import la_date
+        settings = _settings_with_default_games()
+        today = la_date(NOW)
+        # Bob has played all enabled games today (audience).
+        self._seed_other_player_all_games_today(
+            repo, "whatsapp:+61400000002", "Bob",
+            today, settings.enabled_games,
+        )
+        # Alice has played queens + tango only — partial.
+        alice = repo.get_or_create_player(
+            "whatsapp:+61400000001", "Alice"
+        )
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=today, raw_score=10, share_text="x",
+        )
+        repo.insert_score(
+            player_id=alice.id, game="tango", puzzle_no=614,
+            puzzle_date=today, raw_score=15, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="recap",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        # Played games render in the body. Check only the part above
+        # the "Still to play" tail (which legitimately names the
+        # locked games to nudge the user toward unlocking them).
+        body_part = reply.split("Still to play:")[0]
+        assert "Queens #714" in body_part
+        assert "Tango" in body_part
+        assert "Zip" not in body_part
+        assert "Patches" not in body_part
+        assert "Mini Sudoku" not in body_part
+        # Aggregate blocks suppressed.
+        assert "Week so far" not in body_part
+        # Tail nudges the user toward unlocking the rest.
+        assert "Still to play" in reply
+        assert "Submit those to unlock" in reply
+
+    # --- recap: all submissions ----------------------------------------
+
+    def test_recap_today_full_when_sender_played_everything(self, repo):
+        from app.puzzles import la_date
+        settings = _settings_with_default_games()
+        today = la_date(NOW)
+        _seed_sender_played_all_today(
+            repo, "whatsapp:+61400000001", "Alice",
+            today, settings.enabled_games,
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="recap",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        # Full recap shape: header + per-game + Week so far block.
+        assert "Daily recap" in reply
+        assert "Week so far" in reply
+        assert "No peeking" not in reply
+
+    # --- recap: past day is never gated --------------------------------
+
+    def test_yesterday_recap_not_gated(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=713,
+            puzzle_date=yesterday, raw_score=10, share_text="x",
+        )
+        # Alice has played NOTHING — but yesterday is not gated.
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="yesterday",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Daily recap" in reply
+        assert "Bob" in reply
+        assert "No peeking" not in reply
+
+    # --- leaderboard: gated until ALL games played ---------------------
+
+    def test_leaderboard_today_blocks_partial_submitter(self, repo):
+        from app.puzzles import la_date
+        settings = _settings_with_default_games()
+        today = la_date(NOW)
+        # Alice has only played queens — partial. Even per-game
+        # leaderboards lock until all games done.
+        alice = repo.get_or_create_player(
+            "whatsapp:+61400000001", "Alice"
+        )
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=today, raw_score=10, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="leaderboard",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "No peeking" in reply
+        assert "Played today: Queens" in reply
+        assert "Still to play" in reply
+
+    def test_leaderboard_per_game_today_blocks_partial(self, repo):
+        from app.puzzles import la_date
+        settings = _settings_with_default_games()
+        today = la_date(NOW)
+        # Alice has played queens but not the rest. Even
+        # `leaderboard queens` is blocked — strict gate.
+        alice = repo.get_or_create_player(
+            "whatsapp:+61400000001", "Alice"
+        )
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=today, raw_score=10, share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001",
+            body="leaderboard queens",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "No peeking" in reply
+
+    def test_leaderboard_yesterday_not_gated(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        today = la_date(NOW)
+        yesterday = today - timedelta(days=1)
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=713,
+            puzzle_date=yesterday, raw_score=10, share_text="x",
+        )
+        # Alice has played nothing — but yesterday's leaderboard is
+        # not gated.
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001",
+            body="leaderboard yesterday",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No peeking" not in reply
+        assert "Bob" in reply

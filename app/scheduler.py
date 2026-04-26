@@ -487,6 +487,7 @@ def daily_recap(
     month_scores: Optional[Sequence[ScoreRow]] = None,
     year_scores: Optional[Sequence[ScoreRow]] = None,
     include_missing_today_nag: bool = True,
+    lock_aggregates: bool = False,
 ) -> str:
     """Format a daily recap for ``day``.
 
@@ -503,6 +504,13 @@ def daily_recap(
     ``week_scores`` must include ``day``'s scores. Scores for disabled
     games are filtered out before rendering and before leaderboard
     aggregation.
+
+    ``lock_aggregates`` short-circuits after the per-game sections,
+    suppressing the "Week so far" leaderboard, per-game running totals,
+    month/year totals, and the missing-today nag. Used by the on-demand
+    recap when the requester has only partially submitted today's
+    games — they see rankings for the games they've played but no
+    aggregate competitive data they haven't earned access to yet.
     """
     header = f"Daily recap — {day.strftime('%a %d %b %Y')}"
 
@@ -517,6 +525,9 @@ def daily_recap(
 
     lines: List[str] = [header, ""]
     lines.extend(_per_game_sections(day, day_scores))
+
+    if lock_aggregates:
+        return "\n".join(lines).rstrip() + "\n"
 
     # "Week so far" must reflect the standings AS OF ``day`` — including
     # all scores up to and including ``day`` but nothing past it. For

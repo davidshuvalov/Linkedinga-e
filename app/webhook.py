@@ -74,8 +74,8 @@ _LEADERBOARD_PREFIX_RE = re.compile(
 # scannable — we have a lot now.
 _HELP_TEXT = (
     "Commands:\n"
-    "  Look at scores:\n"
-    "    recap / today — full daily recap\n"
+    "  Look at scores (today's results lock until you've played — past days unrestricted):\n"
+    "    recap / today — full daily recap (need to have played all today's games)\n"
     "    yesterday / \"N days ago\" / recap YYYY-MM-DD — past daily recap\n"
     "    week / wrap — weekly wrap\n"
     "    all / history — every round this week\n"
@@ -345,13 +345,109 @@ def _handle_unparsed(repo: Repository) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _games_played_today_by(
+    repo: Repository,
+    whatsapp_id: str,
+    profile_name: str,
+    today_la: date,
+    enabled_games: FrozenSet[str],
+) -> set[str]:
+    """Set of enabled games the sender has submitted on the LA day
+    ``today_la``. Used by the no-peek gate to decide whether a
+    requester gets to see today's competitive data — see
+    :func:`_handle_recap` and :func:`_handle_leaderboard`."""
+    display_name = (profile_name or "").strip() or whatsapp_id
+    player = repo.get_or_create_player(whatsapp_id, display_name)
+    today_scores = repo.list_scores(date_from=today_la, date_to=today_la)
+    return {
+        s.game for s in today_scores
+        if s.player_id == player.id and s.game in enabled_games
+    }
+
+
+def _pretty_game_list(games: "set[str] | frozenset[str]") -> str:
+    """Render a set of game keys in canonical display order."""
+    return ", ".join(GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in games)
+
+
+def _no_peek_zero_recap(enabled_games: FrozenSet[str]) -> str:
+    """Reply when a requester asks for today's recap without having
+    submitted a single game. LinkedIn-style lockout."""
+    return (
+        "No peeking. Submit at least one of today's games first, then "
+        "ask again.\n"
+        "\n"
+        f"Today's games: {_pretty_game_list(enabled_games)}"
+    )
+
+
+def _no_peek_leaderboard(
+    played: "set[str]", enabled_games: FrozenSet[str]
+) -> str:
+    """Reply when a requester asks for today's leaderboard without
+    having submitted every enabled game. Stricter than the recap
+    gate — the leaderboard aggregates everyone's scores so partial
+    submitters get no view."""
+    missing = set(enabled_games) - played
+    return (
+        "No peeking. The leaderboard unlocks when you've played every "
+        "game today.\n"
+        "\n"
+        f"Played today: {_pretty_game_list(played) or '(none)'}\n"
+        f"Still to play: {_pretty_game_list(missing)}"
+    )
+
+
+def _partial_peek_recap(
+    repo: Repository,
+    settings: Settings,
+    today: date,
+    played: "set[str]",
+    enabled_games: FrozenSet[str],
+) -> str:
+    """Render today's recap restricted to the games the requester has
+    played, with all aggregate blocks (week-so-far leaderboard,
+    per-game running totals, month/year totals, missing-today nag)
+    suppressed. Tail-appends a 'still to play' note so the requester
+    knows what unlocks the rest."""
+    from .scheduler import daily_recap
+
+    monday, sunday = week_bounds(today)
+    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    body = daily_recap(
+        today, week_scores,
+        enabled_games=frozenset(played),
+        include_missing_today_nag=False,
+        lock_aggregates=True,
+    ).rstrip()
+    missing = set(enabled_games) - played
+    return (
+        f"{body}\n\n"
+        f"Still to play: {_pretty_game_list(missing)}\n"
+        "Submit those to unlock the leaderboard and the full recap."
+    )
+
+
 def _handle_recap(
     repo: Repository,
     settings: Optional[Settings],
     now: datetime,
     target_day: Optional[date] = None,
+    *,
+    from_: Optional[str] = None,
+    profile_name: str = "",
 ) -> str:
-    """On-demand daily recap for ``target_day`` (defaults to today LA)."""
+    """On-demand daily recap for ``target_day`` (defaults to today LA).
+
+    For today's recap, gates the response on the requester's own
+    submissions to stop pre-attempt peeking (LinkedIn-style):
+    - 0 games submitted → terse no-peek reply
+    - some submitted → recap restricted to those games, no aggregates
+    - all submitted → full recap (current behavior)
+
+    Past-day recaps are never gated — the requester is reading
+    history, not peeking at a live round.
+    """
     if settings is None:
         return "Recap isn't available in this context."
     # Lazy import to avoid a circular dep (jobs imports scheduler which
@@ -361,6 +457,23 @@ def _handle_recap(
 
     today = la_date(now)
     day = target_day or today
+
+    # No-peek gate: only on today's recap, only when we know who's
+    # asking. ``from_=None`` is used by some test paths and by the
+    # CLI preview, where gating doesn't apply.
+    if day == today and from_ is not None and settings.enabled_games:
+        played = _games_played_today_by(
+            repo, from_, profile_name, today, settings.enabled_games
+        )
+        all_games = set(settings.enabled_games)
+        if not played:
+            return _no_peek_zero_recap(settings.enabled_games)
+        if played != all_games:
+            return _partial_peek_recap(
+                repo, settings, today, played, settings.enabled_games
+            )
+        # All games played → fall through to the full recap below.
+
     # Past-day recaps drop the "Haven't heard from X today" footer —
     # nagging about a missed Tuesday from inside a Friday recap reads
     # as nonsense. The current-day recap keeps it.
@@ -513,6 +626,9 @@ def _handle_leaderboard(
     now: datetime,
     game: Optional[str] = None,
     target_day: Optional[date] = None,
+    *,
+    from_: Optional[str] = None,
+    profile_name: str = "",
 ) -> str:
     """Weekly leaderboard — overall or restricted to one game.
 
@@ -526,12 +642,27 @@ def _handle_leaderboard(
     daily recap's "Week so far" block so the format stays consistent
     across surfaces. Game-filtered mode shows per-player cumulative
     time + submissions for that single game.
+
+    No-peek gate: when ``target_day`` is today, the requester must
+    have submitted every enabled game today before the leaderboard
+    unlocks. Past-day leaderboards are never gated.
     """
     if settings is None:
         return "Leaderboard isn't available in this context."
     from .scheduler import _weekly_leaderboard_lines
 
     target_day = target_day or la_date(now)
+    today = la_date(now)
+    if (
+        target_day == today
+        and from_ is not None
+        and settings.enabled_games
+    ):
+        played = _games_played_today_by(
+            repo, from_, profile_name, today, settings.enabled_games
+        )
+        if played != set(settings.enabled_games):
+            return _no_peek_leaderboard(played, settings.enabled_games)
     monday, sunday = week_bounds(target_day)
     week_scores = repo.list_scores(date_from=monday, date_to=sunday)
     filtered = [
@@ -1216,7 +1347,9 @@ def handle_inbound(
     if lower in ("all", "all week", "history"):
         return _handle_all_week(repo, settings, now)
     if lower in ("leaderboard", "standings"):
-        return _handle_leaderboard(repo, settings, now)
+        return _handle_leaderboard(
+            repo, settings, now, from_=from_, profile_name=profile_name
+        )
     # ``leaderboard queens`` / ``standings tango`` — per-game variant.
     for game_key in GAMES:
         display_lower = GAME_DISPLAY[game_key].lower()
@@ -1226,7 +1359,10 @@ def handle_inbound(
             f"standings {game_key}",
             f"standings {display_lower}",
         ):
-            return _handle_leaderboard(repo, settings, now, game=game_key)
+            return _handle_leaderboard(
+                repo, settings, now, game=game_key,
+                from_=from_, profile_name=profile_name,
+            )
     # ``times`` — per-game cumulative time standings across time-based games.
     if lower in ("times", "game times", "time standings"):
         return _handle_times(repo, settings, now)
@@ -1303,7 +1439,8 @@ def handle_inbound(
         if error is not None:
             return error
         return _handle_leaderboard(
-            repo, settings, now, target_day=target_day
+            repo, settings, now, target_day=target_day,
+            from_=from_, profile_name=profile_name,
         )
 
     # Date-anchored recap commands: ``recap`` / ``today`` /
@@ -1315,7 +1452,10 @@ def handle_inbound(
         target_day, error = recap_target
         if error is not None:
             return error
-        return _handle_recap(repo, settings, now, target_day=target_day)
+        return _handle_recap(
+            repo, settings, now, target_day=target_day,
+            from_=from_, profile_name=profile_name,
+        )
 
     # Try to parse as a game share
     parsed = parse_any(body_stripped)

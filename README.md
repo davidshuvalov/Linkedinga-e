@@ -358,16 +358,27 @@ Players can DM the bot (case-insensitive) with these keywords:
 
 **Look at scores**
 
+> **No-peek gate (LinkedIn-style):** `recap` / `today` and `leaderboard`
+> hide today's results until you've made an attempt yourself.
+> - 0 of today's games submitted → blocked entirely.
+> - Some submitted → recap shows only the games you've played; the
+>   leaderboard stays locked.
+> - All submitted → full view.
+>
+> Past-day commands (`yesterday`, `recap YYYY-MM-DD`,
+> `leaderboard yesterday`, `wrap`, `all`, `month`, `year`, etc.) are
+> never gated.
+
 | Command                                      | Response |
 | -------------------------------------------- | -------- |
-| `recap` / `today`                            | Daily recap for today (LA) — per-game rankings + "Week so far" leaderboard + passive-aggressive nudge for anyone ghosting. |
+| `recap` / `today`                            | Daily recap for today (LA) — per-game rankings + "Week so far" leaderboard + passive-aggressive nudge for anyone ghosting. Gated; see above. |
 | `yesterday`                                  | Yesterday's recap. |
 | `N days ago` (1–6)                           | Recap for N days back. |
 | `recap YYYY-MM-DD`                           | Recap for a specific date within the last 6 days. |
 | `week` / `wrap`                              | Weekly wrap — per-game winners + prizes. |
 | `all` / `history`                            | Every round day-by-day, Mon → today. |
-| `leaderboard` / `standings`                  | Just the weekly leaderboard. |
-| `leaderboard <game>` (e.g. `leaderboard queens`) | Per-game weekly standings. |
+| `leaderboard` / `standings`                  | Just the weekly leaderboard. Gated; see above. |
+| `leaderboard <game>` (e.g. `leaderboard queens`) | Per-game weekly standings. Gated; see above. |
 | `prizes`                                     | Live snapshot of who's winning each prize. |
 | `missing` / `who` / `ghosts`                 | Players who played earlier this week but not today. |
 | `games` / `enabled`                          | Which games are tracked vs parsed-but-untracked. |
