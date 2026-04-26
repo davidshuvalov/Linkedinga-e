@@ -103,12 +103,15 @@ def render_daily(
         y_start, y_end = year_bounds(target_day)
         year_scores = repo.list_scores(date_from=y_start, date_to=y_end)
 
+    absent = absent_player_names_for_week(repo, target_day, week_scores)
+
     if _is_sunday(target_day):
         body = weekly_wrap(
             monday, sunday, week_scores,
             enabled_games=settings.enabled_games,
             month_scores=month_scores,
             year_scores=year_scores,
+            absent_player_names=absent,
         )
     else:
         body = daily_recap(
@@ -117,12 +120,34 @@ def render_daily(
             month_scores=month_scores,
             year_scores=year_scores,
             include_missing_today_nag=include_missing_today_nag,
+            absent_player_names=absent,
         )
 
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday
     )
     return body, dm_targets
+
+
+def absent_player_names_for_week(
+    repo: Repository,
+    reference_day: date,
+    week_scores: Sequence[ScoreRow],
+) -> List[str]:
+    """Display names of recently-active players (last 14 days as of
+    ``reference_day``) who have NO scores in ``week_scores``.
+
+    Used by the weekly leaderboard renderers to make the standings
+    read as a roster — everyone in the friend group shows up,
+    whether they played this week or not. Sorted alphabetically
+    (case-insensitive) so the list reads predictably."""
+    since = reference_day - timedelta(days=_ACTIVE_WINDOW_DAYS)
+    active_players = repo.list_players_active_since(since)
+    scored_pids = {s.player_id for s in week_scores}
+    return sorted(
+        (p.display_name for p in active_players if p.id not in scored_pids),
+        key=str.lower,
+    )
 
 
 def render_wrap(
@@ -141,8 +166,13 @@ def render_wrap(
     """
     monday, sunday = week_bounds(reference_day)
     week_scores = repo.list_scores(date_from=monday, date_to=sunday)
-    body = weekly_wrap(monday, sunday, week_scores,
-                       enabled_games=settings.enabled_games)
+    body = weekly_wrap(
+        monday, sunday, week_scores,
+        enabled_games=settings.enabled_games,
+        absent_player_names=absent_player_names_for_week(
+            repo, reference_day, week_scores
+        ),
+    )
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday
     )
@@ -1606,19 +1636,24 @@ def run_taunt(
     sender_name: str,
     sender_whatsapp_id: str,
     now: Optional[datetime] = None,
-) -> Tuple[int, Optional[str]]:
+) -> Tuple[int, Optional[str], int]:
     """Broadcast a ``brag`` or ``gripe`` to every recently-active
     player except the sender.
 
-    Returns ``(count_sent, body)`` where ``count_sent`` is the number
-    of recipients Twilio accepted and ``body`` is the rendered text
-    (handy for tests / logs). Returns ``(0, None)`` when the sender
-    is on cooldown for ``kind`` today, and ``(0, body)`` when nobody
-    else is in the active window.
+    Returns ``(count_sent, body, target_count)`` where ``count_sent``
+    is the number of recipients Twilio accepted, ``body`` is the
+    rendered text (handy for tests / logs), and ``target_count`` is
+    the number of players in the active window we tried to reach
+    (lets callers distinguish "nobody to taunt" from "tried but all
+    sends failed").
 
-    Cooldown is recorded **only** when the broadcast actually goes
-    out — if there's no audience, the sender doesn't burn their
-    daily token.
+    Returns ``(0, None, 0)`` when the sender is on cooldown for
+    ``kind`` today.
+
+    Cooldown is recorded **only** when at least one DM actually goes
+    out — so an empty audience or an all-failed Twilio batch (e.g.
+    every recipient is outside the 24h window) doesn't burn the
+    sender's daily token.
     """
     if kind not in TAUNT_KINDS:
         raise ValueError(f"unknown taunt kind: {kind!r}")
@@ -1626,7 +1661,7 @@ def run_taunt(
     today = la_date(now)
 
     if repo.has_taunted_today(sender_id, kind, today):
-        return 0, None
+        return 0, None, 0
 
     # Build the candidate template pool: plain (always) + stat-aware
     # filtered to whichever templates have ALL their placeholders
@@ -1648,15 +1683,16 @@ def run_taunt(
         if wid != sender_whatsapp_id
     ]
     if not targets:
-        return 0, body
+        return 0, body, 0
 
     sent = 0
     for wid in targets:
         if send_dm(settings, wid, body):
             sent += 1
-    repo.record_taunt(sender_id, kind, today)
+    if sent > 0:
+        repo.record_taunt(sender_id, kind, today)
     logger.info(
         "Taunt [%s] from player_id=%s reached %d/%d recipients (LA day %s)",
         kind, sender_id, sent, len(targets), today,
     )
-    return sent, body
+    return sent, body, len(targets)

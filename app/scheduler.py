@@ -239,6 +239,8 @@ def _weekly_leaderboard_lines(
     week_scores: Sequence[ScoreRow],
     title: str = "Week so far",
     prior_scores: Optional[Sequence[ScoreRow]] = None,
+    *,
+    absent_player_names: Optional[Sequence[str]] = None,
 ) -> List[str]:
     """Render the cumulative weekly leaderboard as a compact list.
 
@@ -250,6 +252,11 @@ def _weekly_leaderboard_lines(
     before ``day``), each row gets a position-change suffix comparing
     today's rank to the prior standings. On Monday there's no prior
     standings so arrows are omitted entirely.
+
+    ``absent_player_names``, when provided, lists active players with
+    no scores this week. They get an explicit "Haven't played this
+    week" footer so the leaderboard reads as a roster (everyone in
+    the group is visible) rather than only the people who showed up.
     """
     lb = weekly_leaderboard(week_scores)
     if not lb:
@@ -270,6 +277,10 @@ def _weekly_leaderboard_lines(
             f"  {i}. {p.player_name}: {_pts(p.total_points)} "
             f"(T: {_format_seconds(p.total_time)}, G:{p.submissions}){suffix}"
         )
+    if absent_player_names:
+        lines.append("Haven't played this week:")
+        for name in absent_player_names:
+            lines.append(f"  - {name}")
     return lines
 
 
@@ -487,6 +498,8 @@ def daily_recap(
     month_scores: Optional[Sequence[ScoreRow]] = None,
     year_scores: Optional[Sequence[ScoreRow]] = None,
     include_missing_today_nag: bool = True,
+    lock_aggregates: bool = False,
+    absent_player_names: Optional[Sequence[str]] = None,
 ) -> str:
     """Format a daily recap for ``day``.
 
@@ -503,6 +516,13 @@ def daily_recap(
     ``week_scores`` must include ``day``'s scores. Scores for disabled
     games are filtered out before rendering and before leaderboard
     aggregation.
+
+    ``lock_aggregates`` short-circuits after the per-game sections,
+    suppressing the "Week so far" leaderboard, per-game running totals,
+    month/year totals, and the missing-today nag. Used by the on-demand
+    recap when the requester has only partially submitted today's
+    games — they see rankings for the games they've played but no
+    aggregate competitive data they haven't earned access to yet.
     """
     header = f"Daily recap — {day.strftime('%a %d %b %Y')}"
 
@@ -517,6 +537,9 @@ def daily_recap(
 
     lines: List[str] = [header, ""]
     lines.extend(_per_game_sections(day, day_scores))
+
+    if lock_aggregates:
+        return "\n".join(lines).rstrip() + "\n"
 
     # "Week so far" must reflect the standings AS OF ``day`` — including
     # all scores up to and including ``day`` but nothing past it. For
@@ -544,6 +567,7 @@ def daily_recap(
         week_so_far,
         title="Week so far",
         prior_scores=prior_scores,
+        absent_player_names=absent_player_names,
     )
     if lb_lines:
         lines.append("")
@@ -612,6 +636,7 @@ def weekly_wrap(
     *,
     month_scores: Optional[Sequence[ScoreRow]] = None,
     year_scores: Optional[Sequence[ScoreRow]] = None,
+    absent_player_names: Optional[Sequence[str]] = None,
 ) -> str:
     """Format a weekly wrap covering ``[week_start, week_end]`` inclusive.
 
@@ -655,7 +680,11 @@ def weekly_wrap(
         lines.append("")
 
     # Week totals leaderboard
-    lines.extend(_weekly_leaderboard_lines(week_filtered, title="Week totals"))
+    lines.extend(_weekly_leaderboard_lines(
+        week_filtered,
+        title="Week totals",
+        absent_player_names=absent_player_names,
+    ))
 
     # Per-game weekly winners
     winners = _game_winners_lines(week_filtered)
