@@ -2359,6 +2359,39 @@ class TestNoPeekGate:
         )
         assert "No peeking" in reply
 
+    def test_leaderboard_lists_absent_active_players(self, repo):
+        from datetime import timedelta
+        from app.puzzles import la_date
+
+        settings = _settings_with_default_games()
+        today = la_date(NOW)
+        # Sender clears the no-peek gate.
+        _seed_sender_played_all_today(
+            repo, "whatsapp:+61400000001", "Alice",
+            today, settings.enabled_games,
+        )
+        # Charlie is recently active (played 5 days ago, inside the
+        # 7-day active window) but hasn't submitted this Mon–Sun →
+        # should appear in the "Haven't played" footer of today's
+        # leaderboard. NOW is Tue 14 Apr 2026 → this week is Apr 13–19;
+        # 5 days ago = Apr 9, which is in last week and still in the
+        # 7-day active window.
+        last_week_day = today - timedelta(days=5)
+        charlie = repo.get_or_create_player(
+            "whatsapp:+61400000003", "Charlie"
+        )
+        repo.insert_score(
+            player_id=charlie.id, game="queens", puzzle_no=706,
+            puzzle_date=last_week_day, raw_score=10,
+            share_text="x",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="leaderboard",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Haven't played this week" in reply
+        assert "Charlie" in reply.split("Haven't played this week")[1]
+
     def test_leaderboard_yesterday_not_gated(self, repo):
         from datetime import timedelta
         from app.puzzles import la_date

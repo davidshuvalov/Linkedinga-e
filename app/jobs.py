@@ -103,12 +103,15 @@ def render_daily(
         y_start, y_end = year_bounds(target_day)
         year_scores = repo.list_scores(date_from=y_start, date_to=y_end)
 
+    absent = absent_player_names_for_week(repo, target_day, week_scores)
+
     if _is_sunday(target_day):
         body = weekly_wrap(
             monday, sunday, week_scores,
             enabled_games=settings.enabled_games,
             month_scores=month_scores,
             year_scores=year_scores,
+            absent_player_names=absent,
         )
     else:
         body = daily_recap(
@@ -117,12 +120,34 @@ def render_daily(
             month_scores=month_scores,
             year_scores=year_scores,
             include_missing_today_nag=include_missing_today_nag,
+            absent_player_names=absent,
         )
 
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday
     )
     return body, dm_targets
+
+
+def absent_player_names_for_week(
+    repo: Repository,
+    reference_day: date,
+    week_scores: Sequence[ScoreRow],
+) -> List[str]:
+    """Display names of recently-active players (last 14 days as of
+    ``reference_day``) who have NO scores in ``week_scores``.
+
+    Used by the weekly leaderboard renderers to make the standings
+    read as a roster — everyone in the friend group shows up,
+    whether they played this week or not. Sorted alphabetically
+    (case-insensitive) so the list reads predictably."""
+    since = reference_day - timedelta(days=_ACTIVE_WINDOW_DAYS)
+    active_players = repo.list_players_active_since(since)
+    scored_pids = {s.player_id for s in week_scores}
+    return sorted(
+        (p.display_name for p in active_players if p.id not in scored_pids),
+        key=str.lower,
+    )
 
 
 def render_wrap(
@@ -141,8 +166,13 @@ def render_wrap(
     """
     monday, sunday = week_bounds(reference_day)
     week_scores = repo.list_scores(date_from=monday, date_to=sunday)
-    body = weekly_wrap(monday, sunday, week_scores,
-                       enabled_games=settings.enabled_games)
+    body = weekly_wrap(
+        monday, sunday, week_scores,
+        enabled_games=settings.enabled_games,
+        absent_player_names=absent_player_names_for_week(
+            repo, reference_day, week_scores
+        ),
+    )
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday
     )

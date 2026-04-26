@@ -682,10 +682,14 @@ def _handle_leaderboard(
         # arrows compare the requested day's board to the preceding
         # day's board (None on Monday → no arrows, by design).
         prior = [s for s in filtered if s.puzzle_date < target_day]
+        from .jobs import absent_player_names_for_week
         lines = _weekly_leaderboard_lines(
             filtered,
             title=f"Week so far — {header_date}",
             prior_scores=prior,
+            absent_player_names=absent_player_names_for_week(
+                repo, target_day, filtered
+            ),
         )
         return "\n".join(lines)
 
