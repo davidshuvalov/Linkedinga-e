@@ -666,6 +666,37 @@ class TestDayCompleteSummary:
         # Weekly standing line.
         assert "currently" in body
 
+    def test_weekly_total_excludes_disabled_games(self):
+        # Regression: the per-submit "Week:" total used to include
+        # scores from games no longer in ``enabled_games``, so it
+        # disagreed with the daily recap / weekly wrap (which both
+        # filter first). Reproduce by seeding a disabled game's score
+        # for the same player in the same week and asserting it's not
+        # rolled into the weekly total.
+        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
+        today_scores = [
+            _s(1, "Alice", "queens", 714, 30),
+            _s(2, "Bob",   "queens", 714, 50),
+        ]
+        # Disabled game in the same week — must not contribute points.
+        week_scores = list(today_scores) + [
+            _s(1, "Alice", "crossclimb", 100, 60, d=MON),
+            _s(2, "Bob",   "crossclimb", 100, 90, d=MON),
+        ]
+        enabled = frozenset({"queens"})
+        body = render_day_complete_summary(
+            player=alice,
+            today=TUE,
+            today_scores=today_scores,
+            week_scores=week_scores,
+            enabled_games=enabled,
+        )
+        # Alice wins queens 1v1 → 5 pts. Crossclimb is disabled so it
+        # must not add anything. "Week: 5 pts" (or "5.0") is what the
+        # recap would show; assert it doesn't claim 10 pts.
+        assert "Week: 5 pts" in body
+        assert "Week: 10" not in body
+
     def test_pinpoint_renders_as_guesses(self):
         alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
         today_scores = [_s(1, "Alice", "pinpoint", 714, 3)]
