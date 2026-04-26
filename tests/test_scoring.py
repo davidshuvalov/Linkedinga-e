@@ -524,7 +524,7 @@ class TestWeeklyLeaderboardFirstPlacesAndSubmissions:
 
 
 # ---------------------------------------------------------------------------
-# weekly_leaderboard total_time (powers the Fastest total time prize)
+# weekly_leaderboard total_time (powers the Fastest average time prize)
 # ---------------------------------------------------------------------------
 
 
@@ -558,36 +558,54 @@ class TestWeeklyLeaderboardTotalTime:
 
 
 # ---------------------------------------------------------------------------
-# prize_allocations — fastest_total_time
+# prize_allocations — fastest_average_time
 # ---------------------------------------------------------------------------
 
 
-class TestFastestTotalTimePrize:
-    def test_awarded_to_lowest_total_time_over_threshold(self):
+class TestFastestAverageTimePrize:
+    def test_awarded_to_lowest_average_time_over_threshold(self):
+        # Alice: 600s / 10 = 60.0s avg
+        # Bob:   400s / 10 = 40.0s avg  ← winner
+        # Charlie: 500s / 10 = 50.0s avg
         lb = [
-            PlayerWeeklyStats(1, "Alice", 20, 3, 3, submissions=5,
-                              total_time=300, time_based_submissions=5),
-            PlayerWeeklyStats(2, "Bob",   18, 3, 3, submissions=5,
-                              total_time=200, time_based_submissions=5),
-            PlayerWeeklyStats(3, "Charlie", 15, 2, 2, submissions=5,
-                              total_time=250, time_based_submissions=5),
+            PlayerWeeklyStats(1, "Alice", 20, 3, 3, submissions=10,
+                              total_time=600, time_based_submissions=10),
+            PlayerWeeklyStats(2, "Bob",   18, 3, 3, submissions=10,
+                              total_time=400, time_based_submissions=10),
+            PlayerWeeklyStats(3, "Charlie", 15, 2, 2, submissions=10,
+                              total_time=500, time_based_submissions=10),
         ]
         p = prize_allocations(lb)
-        assert p.fastest_total_time is not None
-        assert p.fastest_total_time.player_name == "Bob"
+        assert p.fastest_average_time is not None
+        assert p.fastest_average_time.player_name == "Bob"
 
-    def test_requires_min_submissions(self):
-        # Alice has the lowest total_time but only 3 time-based rounds —
-        # under the 5-round floor she's ineligible. Bob (higher time,
-        # 5 rounds) wins instead.
+    def test_low_volume_player_cannot_win_on_short_run(self):
+        # The whole point of the change: Alice has a blistering 6s avg
+        # over 9 rounds but doesn't clear the 10-round floor, so she's
+        # ineligible. Bob (40s avg over 10 rounds) wins — his average
+        # is worse but he played enough to qualify.
         lb = [
-            PlayerWeeklyStats(1, "Alice", 12, 3, 3, submissions=3,
-                              total_time=60, time_based_submissions=3),
-            PlayerWeeklyStats(2, "Bob",   15, 5, 5, submissions=5,
-                              total_time=300, time_based_submissions=5),
+            PlayerWeeklyStats(1, "Alice", 18, 3, 3, submissions=9,
+                              total_time=54, time_based_submissions=9),
+            PlayerWeeklyStats(2, "Bob",   20, 5, 5, submissions=10,
+                              total_time=400, time_based_submissions=10),
         ]
         p = prize_allocations(lb)
-        assert p.fastest_total_time.player_name == "Bob"
+        assert p.fastest_average_time.player_name == "Bob"
+
+    def test_higher_volume_can_beat_lower_average(self):
+        # Bob's lower average wins even though Alice played more rounds:
+        # the prize rewards the fastest *mean*, not the fastest grinder.
+        # Alice: 1200s / 25 = 48.0s avg
+        # Bob:    400s / 10 = 40.0s avg ← winner
+        lb = [
+            PlayerWeeklyStats(1, "Alice", 50, 5, 5, submissions=25,
+                              total_time=1200, time_based_submissions=25),
+            PlayerWeeklyStats(2, "Bob",   20, 5, 5, submissions=10,
+                              total_time=400, time_based_submissions=10),
+        ]
+        p = prize_allocations(lb)
+        assert p.fastest_average_time.player_name == "Bob"
 
     def test_returns_none_when_nobody_eligible(self):
         lb = [
@@ -595,20 +613,20 @@ class TestFastestTotalTimePrize:
                               total_time=60, time_based_submissions=2),
         ]
         p = prize_allocations(lb)
-        assert p.fastest_total_time is None
+        assert p.fastest_average_time is None
 
     def test_tiebreak_prefers_more_rounds(self):
-        # Same total_time, different round counts: whoever played more
-        # rounds wins — more impressive to post 300s across 10 games
-        # than across 5.
+        # Same average (40s/round), different round counts: whoever
+        # played more rounds wins — sustaining a 40s mean across 20
+        # games is more impressive than across 10.
         lb = [
-            PlayerWeeklyStats(1, "Alice", 20, 3, 3, submissions=5,
-                              total_time=300, time_based_submissions=5),
-            PlayerWeeklyStats(2, "Bob",   22, 5, 5, submissions=10,
-                              total_time=300, time_based_submissions=10),
+            PlayerWeeklyStats(1, "Alice", 20, 3, 3, submissions=10,
+                              total_time=400, time_based_submissions=10),
+            PlayerWeeklyStats(2, "Bob",   22, 5, 5, submissions=20,
+                              total_time=800, time_based_submissions=20),
         ]
         p = prize_allocations(lb)
-        assert p.fastest_total_time.player_name == "Bob"
+        assert p.fastest_average_time.player_name == "Bob"
 
 
 # ---------------------------------------------------------------------------

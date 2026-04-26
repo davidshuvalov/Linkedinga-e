@@ -339,11 +339,11 @@ def _prize_lines(prizes) -> List[str]:
             f"  Best average: {ba.player_name} "
             f"(avg {ba.average_points:.1f} pts/game, {ba.submissions} submissions)"
         )
-    if prizes.fastest_total_time is not None:
-        ft = prizes.fastest_total_time
+    if prizes.fastest_average_time is not None:
+        ft = prizes.fastest_average_time
         body.append(
-            f"  Fastest total time: {ft.player_name} "
-            f"({_format_seconds(ft.total_time)} across "
+            f"  Fastest average time: {ft.player_name} "
+            f"({_format_seconds(round(ft.average_time))}/round across "
             f"{ft.time_based_submissions} rounds)"
         )
     if not body:
