@@ -1095,7 +1095,7 @@ def _handle_taunt(
 
     display_name = (profile_name or "").strip() or from_
     sender = repo.get_or_create_player(from_, display_name)
-    sent, body = run_taunt(
+    sent, body, target_count = run_taunt(
         repo,
         settings,
         kind=kind,
@@ -1106,8 +1106,18 @@ def _handle_taunt(
     )
     if body is None:
         return f"You've already used `{kind}` today. Try again tomorrow."
-    if sent == 0:
+    if target_count == 0:
         return "Nobody else is in the active window — taunt unsent."
+    if sent == 0:
+        # Audience existed but Twilio rejected every send (typically
+        # because no recipient was inside their 24h customer-care
+        # window). Cooldown not burned — tell the user so they can
+        # retry once people are messaging again.
+        plural = "s" if target_count != 1 else ""
+        return (
+            f"Tried `{kind}` to {target_count} player{plural} but all sends failed "
+            f"(probably the WhatsApp 24h window). Cooldown not burned — try again later."
+        )
     suffix = "Consequences pending." if kind == "brag" else "Sympathy optional."
     plural = "s" if sent != 1 else ""
     return (

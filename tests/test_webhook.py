@@ -1681,6 +1681,35 @@ class TestTauntCommands:
         assert r1 is not None and "Sent `brag`" in r1
         assert r2 is not None and "Sent `gripe`" in r2
 
+    def test_all_sends_failing_does_not_burn_cooldown(self, repo):
+        from unittest.mock import patch
+        from app.puzzles import la_date
+
+        # Bob is in the audience but Twilio rejects every send (e.g.
+        # nobody's inside their 24h customer-care window). The user
+        # should be told it failed AND keep their daily token so they
+        # can try again later.
+        self._seed_active(
+            repo,
+            ("whatsapp:+61400000001", "Alice"),
+            ("whatsapp:+61400000002", "Bob"),
+            today=NOW,
+        )
+        with patch("app.jobs.send_dm", return_value=False) as mock_dm:
+            reply = handle_inbound(
+                repo, from_="whatsapp:+61400000001", body="brag",
+                profile_name="Alice", now=NOW,
+                settings=_settings_with_default_games(),
+            )
+        # Tried to send (Bob was a target) but all attempts failed.
+        mock_dm.assert_called()
+        assert reply is not None
+        assert "all sends failed" in reply
+        assert "Cooldown not burned" in reply
+        # Cooldown must NOT be burned — the user can retry later.
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        assert not repo.has_taunted_today(alice.id, "brag", la_date(NOW))
+
     def test_no_audience_returns_lonely_reply_and_no_cooldown_burned(self, repo):
         from unittest.mock import patch
         # Only the sender exists in the active window — nobody else to taunt.
