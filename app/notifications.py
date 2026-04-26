@@ -922,8 +922,12 @@ def render_day_complete_summary(
     lines.append("")
     lines.append(f"Today's total: {_format_points(total_today)}.")
 
-    # Weekly standing.
-    lb = weekly_leaderboard(list(week_scores))
+    # Weekly standing. Mirror the daily-recap / weekly-wrap filter
+    # (scheduler.daily_recap, scheduler.weekly_wrap) so disabled-game
+    # scores don't inflate the running total — otherwise this line
+    # disagrees with the recap / wrap totals the player will see next.
+    week_filtered = [s for s in week_scores if s.game in enabled_games]
+    lb = weekly_leaderboard(week_filtered)
     if lb:
         ids = [p.player_id for p in lb]
         week_rank = _rank_among(player.id, ids)
