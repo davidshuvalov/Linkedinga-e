@@ -2083,3 +2083,35 @@ class TestNagCommand:
         )
         assert reply is not None
         assert "Twilio" in reply
+
+
+# ---------------------------------------------------------------------------
+# 42 — hidden founder-bio Easter egg
+# ---------------------------------------------------------------------------
+
+
+class TestEasterEgg42:
+    """DMing ``42`` returns the creator's bio. Hidden — not in help."""
+
+    def test_42_returns_founder_bio(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="42",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None
+        assert "Founder Lore" in reply
+        assert "David" in reply
+
+    def test_42_works_with_surrounding_whitespace(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="  42  ",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert reply is not None and "Founder Lore" in reply
+
+    def test_42_is_not_advertised_in_help_text(self, repo):
+        # The trigger is intentionally hidden — finding it is the point.
+        from app.webhook import _HELP_TEXT
+        assert "42" not in _HELP_TEXT

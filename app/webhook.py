@@ -119,6 +119,48 @@ _SCORE_FORMAT_HINT = (
     "  0:10"
 )
 
+# Hidden Easter egg — DM ``42`` to unlock. Verbatim text supplied by
+# the creator. Don't reformat it; the line breaks and trailing
+# two-space soft-breaks are intentional.
+_EASTER_EGG_42 = """Easter Egg: Founder Lore (Unlocked)
+
+Hi, I'm David.
+
+Actuary by trade — which means I professionally think about risk, probabilities, and what could go wrong… and then explain it in spreadsheets.
+
+I've spent my career across life insurance, reinsurance, and consulting — doing very serious things with very serious people (AIA, Hannover Re, etc.), usually involving long documents and longer meetings.
+
+Somewhere along the way, I picked up a hobby in trading futures.
+
+Built systems. Tested ideas. Launched a fund. Closed a fund.
+Net result: a healthy respect for markets and an unhealthy number of Excel tabs.
+
+I also write — partly to clarify my own thinking, partly because once you start having opinions about insurance, it's hard to stop.
+
+Outside of all that:
+- Married Fazzy (still not sure how I pulled that off)
+- Dad to Jamie, Issy, and Livy
+- Now operating on a sleep schedule designed by small children
+
+This app is probably the most "me" thing I've built.
+
+Not a corporate initiative.
+Not a client deliverable.
+Just something slightly unnecessary, mildly over-engineered, and very satisfying.
+
+A LinkedIn games tracker. With WhatsApp. Of course.
+
+It's the kind of thing I'd be proud to show my kids one day — not because it changes the world, but because I made it.
+
+If you've found this, you're either:
+(a) a good friend
+(b) curious enough to dig
+(c) avoiding something more important
+
+…or all three.
+
+Welcome."""
+
 
 def _resolve_recap_target(
     lower: str, today: date
@@ -1236,6 +1278,11 @@ def handle_inbound(
     # nudge body to anyone who hasn't finished today's games yet.
     if lower in ("nag", "blast", "poke"):
         return _handle_nag(repo, settings, from_, profile_name, now)
+    # ``42`` — Hitchhiker's-style hidden trigger that returns the
+    # creator's bio. Intentionally NOT in the help text; finding it
+    # is the point.
+    if lower == "42":
+        return _EASTER_EGG_42
 
     # ``vs <name>`` — all-time head-to-head against a named opponent.
     opp = _parse_vs_command(lower)
