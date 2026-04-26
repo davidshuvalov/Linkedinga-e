@@ -921,7 +921,7 @@ _RULES_TEXT = (
     "  ceiling of the average.\n"
     "\n"
     "Weekly prizes: Most firsts, Most lasts, Best average (≥5 subs),\n"
-    "Fastest total time (≥5 time-based rounds)."
+    "Fastest average time (≥10 time-based rounds)."
 )
 
 
@@ -966,11 +966,12 @@ def _handle_prizes(
             f"  Best average: {ba.player_name} "
             f"(avg {ba.average_points:.1f}, {ba.submissions} subs)"
         )
-    if prizes.fastest_total_time is not None:
-        ft = prizes.fastest_total_time
+    if prizes.fastest_average_time is not None:
+        ft = prizes.fastest_average_time
         lines.append(
-            f"  Fastest total time: {ft.player_name} "
-            f"({_format_seconds(ft.total_time)} / {ft.time_based_submissions} rounds)"
+            f"  Fastest average time: {ft.player_name} "
+            f"({_format_seconds(round(ft.average_time))}/round "
+            f"over {ft.time_based_submissions} rounds)"
         )
     if len(lines) == 1:
         lines.append("  Nobody has qualified yet.")

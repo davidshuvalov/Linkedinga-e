@@ -45,9 +45,11 @@ _POSITION_POINTS: Dict[int, int] = {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}
 # lucky round can't steal the prize.
 MIN_SUBMISSIONS_FOR_AVERAGE_PRIZE = 5
 
-# Same floor for the "Fastest total time" prize — one flukey sub-minute
-# Queens round shouldn't steal a prize meant to reward consistency.
-MIN_SUBMISSIONS_FOR_FASTEST_PRIZE = 5
+# Floor for the "Fastest average time" prize. Higher than the average-points
+# floor because we're now ranking on a per-round mean: a player with 10
+# rounds averaging 30s shouldn't lose to one who happened to play five
+# fast Queens rounds and stop. 10 keeps the prize honest across volume.
+MIN_SUBMISSIONS_FOR_FASTEST_PRIZE = 10
 
 # Pinpoint is guess count, not seconds, so it's excluded from the
 # total-time prize. Every other game stores raw_score in seconds.
@@ -105,6 +107,13 @@ class PlayerWeeklyStats:
             return 0.0
         return self.total_points / self.submissions
 
+    @property
+    def average_time(self) -> float:
+        """Mean seconds per time-based round. Zero if no time-based subs."""
+        if self.time_based_submissions == 0:
+            return 0.0
+        return self.total_time / self.time_based_submissions
+
 
 @dataclass(frozen=True)
 class GameLeader:
@@ -119,9 +128,10 @@ class Prizes:
     most_firsts: Optional[PlayerWeeklyStats]
     most_lasts: Optional[PlayerWeeklyStats]
     best_average: Optional[PlayerWeeklyStats]
-    # Lowest cumulative time across time-based games for the week.
-    # Same shape as the others so the wrap formatter can share logic.
-    fastest_total_time: Optional[PlayerWeeklyStats] = None
+    # Lowest mean seconds per time-based round for the week, gated on
+    # MIN_SUBMISSIONS_FOR_FASTEST_PRIZE so a player with one fluky run
+    # can't beat someone who's grinding consistent times across the week.
+    fastest_average_time: Optional[PlayerWeeklyStats] = None
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +364,7 @@ def prize_allocations(leaderboard: Sequence[PlayerWeeklyStats]) -> Prizes:
     Tiebreaks documented inline; all resolve to smallest ``player_id``.
     ``most_firsts`` / ``most_lasts`` return ``None`` when nobody played
     any competitive rounds (≥2 players) that week. ``best_average`` and
-    ``fastest_total_time`` return ``None`` when nobody meets the
+    ``fastest_average_time`` return ``None`` when nobody meets the
     submissions threshold. All prizes return ``None`` if the
     leaderboard is empty.
     """
@@ -392,26 +402,27 @@ def prize_allocations(leaderboard: Sequence[PlayerWeeklyStats]) -> Prizes:
             key=lambda p: (p.average_points, p.total_points, -p.player_id),
         )
 
-    # Fastest total time: lowest cumulative seconds across time-based
-    # games. Gate on time_based_submissions so somebody who only played
-    # one sub-minute round can't win on volume=1. Tiebreak favours
-    # whoever played more rounds (more impressive at the same total).
+    # Fastest average time: lowest mean seconds per time-based round.
+    # Gate on time_based_submissions so somebody who only played a
+    # handful of fast rounds can't outrank a player grinding consistent
+    # times across many. Tiebreak favours whoever played more rounds
+    # (more impressive at the same average).
     fastest_eligible = [
         p for p in leaderboard
         if p.time_based_submissions >= MIN_SUBMISSIONS_FOR_FASTEST_PRIZE
     ]
-    fastest_total_time: Optional[PlayerWeeklyStats] = None
+    fastest_average_time: Optional[PlayerWeeklyStats] = None
     if fastest_eligible:
-        fastest_total_time = min(
+        fastest_average_time = min(
             fastest_eligible,
-            key=lambda p: (p.total_time, -p.time_based_submissions, p.player_id),
+            key=lambda p: (p.average_time, -p.time_based_submissions, p.player_id),
         )
 
     return Prizes(
         most_firsts=most_firsts,
         most_lasts=most_lasts,
         best_average=best_average,
-        fastest_total_time=fastest_total_time,
+        fastest_average_time=fastest_average_time,
     )
 
 

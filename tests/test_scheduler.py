@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from app.db import ScoreRow
 from app.scheduler import daily_recap, weekly_wrap
@@ -73,7 +73,7 @@ class TestDailyRecap:
         # is every individual round played (not distinct game types,
         # which top out at 7) and total time covers the time-based
         # games so the leaderboard surfaces the same fields the
-        # Fastest total time prize gates on. Time leads so the most
+        # Fastest average time prize gates on. Time leads so the most
         # eye-catching number lands first.
         scores = [
             _row(1, "Alice", "queens", 714, 10),
@@ -443,33 +443,42 @@ class TestWeeklyWrap:
         assert "Alice" in out
         assert "5 submissions" in out
 
-    def test_fastest_total_time_prize_line(self):
-        # Alice plays 5 time-based rounds totalling 115s; Bob has a
-        # single sub-second run. Alice qualifies (≥5 rounds) and has
-        # the lowest total among eligible players, so she wins.
+    def test_fastest_average_time_prize_line(self):
+        # Alice plays 10 time-based rounds across two days at 10s each
+        # (avg 10s/round); Bob has a single sub-second run. Alice
+        # qualifies (≥10 rounds) and has the lowest average among
+        # eligible players, so she wins.
+        WED = TUE + timedelta(days=1)
         scores = [
-            _row(1, "Alice", "queens", 714, 10, TUE),
-            _row(2, "Bob",   "queens", 714, 5,  TUE),
-            _row(1, "Alice", "tango",  554, 20, TUE),
-            _row(1, "Alice", "zip",    393, 10, TUE),
-            _row(1, "Alice", "patches", 28, 15, TUE),
-            _row(1, "Alice", "mini_sudoku", 246, 60, TUE),
+            _row(2, "Bob", "queens", 714, 5, TUE),
+            # TUE: 6 time-based games × 10s each.
+            _row(1, "Alice", "queens",      714, 10, TUE),
+            _row(1, "Alice", "tango",       554, 10, TUE),
+            _row(1, "Alice", "crossclimb",  401, 10, TUE),
+            _row(1, "Alice", "zip",         393, 10, TUE),
+            _row(1, "Alice", "patches",      28, 10, TUE),
+            _row(1, "Alice", "mini_sudoku", 246, 10, TUE),
+            # WED: 4 more rounds for 10 total.
+            _row(1, "Alice", "queens",      715, 10, WED),
+            _row(1, "Alice", "tango",       555, 10, WED),
+            _row(1, "Alice", "zip",         394, 10, WED),
+            _row(1, "Alice", "patches",      29, 10, WED),
         ]
         out = weekly_wrap(MON, SUN, scores, ENABLED)
-        assert "Fastest total time" in out
+        assert "Fastest average time" in out
         assert "Alice" in out
-        # 10+20+10+15+60 = 115s → formatted as 1:55.
-        assert "1:55" in out
-        assert "5 rounds" in out
+        # Average 10s → formatted as 0:10/round.
+        assert "0:10/round" in out
+        assert "10 rounds" in out
 
-    def test_fastest_total_time_suppressed_when_nobody_qualifies(self):
-        # Neither player clears the 5-round floor → line suppressed.
+    def test_fastest_average_time_suppressed_when_nobody_qualifies(self):
+        # Neither player clears the 10-round floor → line suppressed.
         scores = [
             _row(1, "Alice", "queens", 714, 10, TUE),
             _row(2, "Bob",   "queens", 714, 20, TUE),
         ]
         out = weekly_wrap(MON, SUN, scores, ENABLED)
-        assert "Fastest total time" not in out
+        assert "Fastest average time" not in out
 
     def test_wrap_is_concise_enough_to_forward(self):
         # The whole point of keeping the format tight: the wrap stays
