@@ -133,10 +133,9 @@ class TestWebhook:
         assert "<Response/>" in r.text
         assert "<Message>" not in r.text
 
-    def test_random_chatter_gets_help_reply(self, client):
-        # Bot now replies with a "didn't understand" blurb + command
-        # list rather than staying silent — it operates in 1:1 DMs
-        # so users were being left guessing.
+    def test_random_chatter_gets_short_pointer(self, client):
+        # Bot replies with a short "send `help` for commands" rather
+        # than dumping the full help blurb every time.
         r = client.post(
             "/webhook",
             data={
@@ -149,8 +148,10 @@ class TestWebhook:
         assert "<Message>" in r.text
         root = ET.fromstring(r.text)
         msg = (root.find("Message").text or "").lower()
-        assert "didn't understand" in msg
-        assert "stats" in msg
+        assert "don't understand" in msg
+        assert "help" in msg
+        # Help blurb itself should NOT be inlined.
+        assert "stats" not in msg
 
     def test_missing_from_is_422(self, client):
         r = client.post(

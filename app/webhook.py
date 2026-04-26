@@ -1270,10 +1270,11 @@ def handle_inbound(
                 "That looks like a LinkedIn game share but I couldn't read "
                 f"it — logged for a parser fix.\n\n{_SCORE_FORMAT_HINT}"
             )
-        # Doesn't look like a score and doesn't match a command — reply
-        # with a help blurb so users aren't left guessing. (The bot
-        # operates in 1:1 DMs, so this won't spam a group chat.)
-        return f"I didn't understand that.\n\n{_HELP_TEXT}"
+        # Doesn't look like a score and doesn't match a command —
+        # reply with a one-liner that points at ``help`` rather than
+        # dumping the full command list every time. The bot operates
+        # in 1:1 DMs, so the user can pull help when they want it.
+        return "Sorry, I don't understand. Send `help` for approved commands."
 
     pretty_game = GAME_DISPLAY[parsed.game]
 

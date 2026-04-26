@@ -166,10 +166,10 @@ class TestHandleInbound:
         assert repo.unparsed[0]["whatsapp_id"] == "whatsapp:+61400000001"
         assert len(repo.scores) == 0
 
-    def test_unrelated_chatter_gets_help(self, repo):
-        # Bot operates in 1:1 DMs — silence left users guessing. Now
-        # replies with a "didn't understand" blurb + command list so
-        # they can see their options.
+    def test_unrelated_chatter_gets_short_pointer(self, repo):
+        # Bot operates in 1:1 DMs — silence left users guessing. We
+        # reply with a one-liner pointing at ``help`` rather than
+        # dumping the full command list every time someone says hi.
         reply = handle_inbound(
             repo,
             from_="whatsapp:+61400000001",
@@ -178,9 +178,11 @@ class TestHandleInbound:
             now=NOW,
         )
         assert reply is not None
-        assert "didn't understand" in reply.lower()
-        assert "stats" in reply
-        assert "recap" in reply
+        assert "don't understand" in reply.lower()
+        assert "help" in reply.lower()
+        # Help blurb itself should NOT be inlined — that's the change.
+        assert "stats" not in reply
+        assert "recap" not in reply
         assert len(repo.scores) == 0
         assert len(repo.unparsed) == 0
 
@@ -221,7 +223,7 @@ class TestHandleInbound:
             now=NOW,
         )
         assert reply is not None
-        assert "didn't understand" in reply.lower()
+        assert "don't understand" in reply.lower()
         assert len(repo.scores) == 0
         assert len(repo.unparsed) == 0
 
@@ -310,7 +312,7 @@ class TestLeaderboardCommand:
             settings=_settings_with_default_games(),
         )
         # "leaderboard widgets" isn't a known command; treated as chatter.
-        assert "didn't understand" in reply.lower()
+        assert "don't understand" in reply.lower()
 
     def test_leaderboard_with_iso_date(self, repo):
         from datetime import timedelta
@@ -842,7 +844,7 @@ class TestNameCommand:
         )
         # Trailing whitespace-only name: the parser extracts "" which
         # means the regex didn't match, so it falls through to help.
-        assert "didn't understand" in reply.lower() or "empty" in reply.lower()
+        assert "don't understand" in reply.lower() or "empty" in reply.lower()
 
     def test_name_rejects_overlong(self, repo):
         long_name = "A" * 50
