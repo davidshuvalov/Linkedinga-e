@@ -1536,20 +1536,22 @@ def handle_inbound(
     if parsed.game not in enabled_games:
         off_note = " (Not tracked for the leaderboard.)"
 
-    # Personal-best / worst-ever DM. Compares the just-inserted row
-    # against the player's history for this game and fires a
-    # congrats / roast DM when the score is notable. Try/except
-    # wrapper so a DM failure can never sink the webhook ack.
+    # Personal-best / worst-ever and day-complete bodies are folded
+    # into the score-confirmation reply (one consolidated message
+    # instead of two or three Twilio sends). Each call is wrapped in
+    # try/except so a notification failure can never sink the ack.
+    pb_body: Optional[str] = None
     try:
         from .notifications import maybe_notify_personal_best
 
-        maybe_notify_personal_best(
+        pb_body = maybe_notify_personal_best(
             repo,
             settings,
             player=player,
             game=parsed.game,
             new_raw=parsed.raw_score,
             today=puzzle_date,
+            deliver=False,
         )
     except Exception:
         import logging
@@ -1559,19 +1561,17 @@ def handle_inbound(
             player.id,
         )
 
-    # "Day complete" personal summary — fires the moment this player
-    # has submitted every enabled game for today's LA date. Different
-    # audience from the group early-fire recap below: this one DMs
-    # the individual, that one DMs the whole roster.
+    day_complete_body: Optional[str] = None
     try:
         from .notifications import maybe_notify_day_complete
 
-        maybe_notify_day_complete(
+        day_complete_body = maybe_notify_day_complete(
             repo,
             settings,
             player=player,
             today=puzzle_date,
             enabled_games=enabled_games,
+            deliver=False,
         )
     except Exception:
         import logging
@@ -1599,7 +1599,11 @@ def handle_inbound(
                 player.id,
             )
 
-    return (
+    confirmation = (
         f"Got it, {player.display_name}. "
         f"{pretty_game} #{parsed.puzzle_no}: {pretty_new}.{off_note}"
     )
+    extras = [b for b in (pb_body, day_complete_body) if b]
+    if extras:
+        return confirmation + "\n\n" + "\n\n".join(extras)
+    return confirmation

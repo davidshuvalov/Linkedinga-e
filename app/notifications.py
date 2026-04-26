@@ -697,6 +697,7 @@ def maybe_notify_personal_best(
     game: str,
     new_raw: int,
     today: Optional[date] = None,
+    deliver: bool = True,
 ) -> Optional[str]:
     """DM ``player`` a one-line zinger when the just-inserted submission
     fires any of the trigger detectors (PB, tied PB, personal worst,
@@ -711,6 +712,13 @@ def maybe_notify_personal_best(
 
     Exceptions are caught and logged so a notification failure can't
     sink the webhook reply to the original submission.
+
+    ``deliver`` toggles whether a separate Twilio DM goes out. The
+    webhook calls this with ``deliver=False`` so the trigger body
+    can be folded into the score-confirmation reply instead of
+    arriving as a second message — when consolidated like that, the
+    daily-cap and PB-DM counter don't apply (no separate DM to cap)
+    and the body is returned directly for the caller to append.
     """
     try:
         all_scores = repo.list_player_scores(player.id)
@@ -755,6 +763,13 @@ def maybe_notify_personal_best(
     )
     if not triggers:
         return None
+
+    if not deliver:
+        # Inline mode: caller will fold the message into a larger
+        # reply, so daily-cap / counter-bump don't apply and we
+        # return the body without touching Twilio.
+        chosen = random.choice(triggers)
+        return render_trigger(chosen, player_name=player.display_name, game=game)
 
     # Cap enforcement: an active player can fire several triggers a
     # day (best-of-day on each game, first-today, etc.). To stop the
@@ -929,6 +944,7 @@ def maybe_notify_day_complete(
     player: Player,
     today: date,
     enabled_games: FrozenSet[str],
+    deliver: bool = True,
 ) -> Optional[str]:
     """DM ``player`` a summary when this submission means they've now
     played every enabled game for ``today``. Returns the DM body
@@ -939,6 +955,11 @@ def maybe_notify_day_complete(
     bounce off the uniqueness constraint). Callers still wrap the
     invocation in try/except so a transient DB hiccup can't mask the
     webhook ack.
+
+    ``deliver`` toggles whether a separate Twilio DM goes out. The
+    webhook calls this with ``deliver=False`` so the summary can
+    ride inside the score-confirmation reply rather than arrive as
+    a second message.
     """
     if not enabled_games:
         return None
@@ -964,6 +985,9 @@ def maybe_notify_day_complete(
         week_scores=week_scores,
         enabled_games=enabled_games,
     )
+
+    if not deliver:
+        return body
 
     if settings is None:
         logger.info("Day-complete DM (dry-run): %s", body)
