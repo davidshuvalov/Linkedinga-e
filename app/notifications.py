@@ -12,8 +12,9 @@ Public entry points:
   against the just-inserted submission and DMs a single line drawn
   from whichever trigger fired. When more than one trigger fires
   (e.g. a personal best that's ALSO the best of today), one is
-  picked at random — there's no priority order, all triggers are
-  equally valid headlines.
+  picked at random — with one carve-out: a lifetime PB or worst
+  trumps its weekday and year siblings, so a "fastest Queens ever"
+  isn't competing with "fastest Friday Queens".
 
   Trigger kinds currently detected:
     * ``new_pb``        — beats the player's prior best for this game
@@ -273,22 +274,32 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
 }
 
 
-# PB-trigger DMs are capped to ``_PB_DM_DAILY_CAP`` per player per
-# day so an active player isn't drowned in DMs. SPECIAL_TRIGGER_KINDS
-# bypass the cap — they're rare and worth surfacing every time. The
-# cap counts BOTH special and non-special DMs (so a player who's
-# already had two specials still gets a third special, but won't get
-# any non-special on top); the cap is "non-special never exceeds 2".
-_PB_DM_DAILY_CAP = 2
+# Trigger pick-time precedence: when a lifetime PB (or PB-tie) fires,
+# the weekday-PB and year-PB triggers are subsumed by it — saying
+# "fastest Friday Queens" alongside "fastest Queens ever" buries the
+# lede. Same for the worst side. The trump map filters out the
+# subordinate kinds whenever the dominant kind is in the candidate
+# pool; the random pick then runs over the survivors.
+_TRIGGER_TRUMPS: Dict[str, frozenset] = {
+    "new_pb": frozenset({"dow_pb", "year_pb"}),
+    "tied_pb": frozenset({"dow_pb", "year_pb"}),
+    "new_worst": frozenset({"dow_worst"}),
+    "tied_worst": frozenset({"dow_worst"}),
+}
 
-SPECIAL_TRIGGER_KINDS: frozenset = frozenset({
-    "new_pb",                # personal best for this game
-    "tied_pb",               # equalled personal best
-    "all_time_record",       # all-time fastest across the group
-    "all_time_anti_record",  # all-time slowest across the group
-    "dow_pb",                # best on this game on this weekday
-    "year_pb",               # fastest of the calendar year
-})
+
+def _pick_trigger(triggers: Sequence["Trigger"]) -> "Trigger":
+    """Choose one trigger from the candidate list. Lifetime PB / worst
+    triggers (``new_pb``, ``tied_pb``, ``new_worst``, ``tied_worst``)
+    subsume their narrower siblings (weekday / year variants) so a
+    headline-worthy moment isn't diluted; among the survivors the
+    pick is uniform random."""
+    kinds = {t.kind for t in triggers}
+    suppressed: set = set()
+    for kind in kinds:
+        suppressed |= _TRIGGER_TRUMPS.get(kind, frozenset())
+    survivors = [t for t in triggers if t.kind not in suppressed]
+    return random.choice(survivors or list(triggers))
 
 
 @dataclass
@@ -704,11 +715,12 @@ def maybe_notify_personal_best(
     tied worst, best of today, worst of today, all-time record,
     all-time anti-record).
 
-    When more than one trigger fires, picks one at random — there's
-    no priority order, all triggers are equally valid headlines.
-    Returns the DM body sent, or ``None`` when no triggers fired (or
-    ``settings`` is ``None``, the in-webhook fallback when Twilio
-    isn't configured — tests exercise this path).
+    When more than one trigger fires, picks one at random — with the
+    single exception that a lifetime PB / worst trumps its weekday
+    and year siblings (see :func:`_pick_trigger`). Returns the DM
+    body sent, or ``None`` when no triggers fired (or ``settings`` is
+    ``None``, the in-webhook fallback when Twilio isn't configured —
+    tests exercise this path).
 
     Exceptions are caught and logged so a notification failure can't
     sink the webhook reply to the original submission.
@@ -716,9 +728,8 @@ def maybe_notify_personal_best(
     ``deliver`` toggles whether a separate Twilio DM goes out. The
     webhook calls this with ``deliver=False`` so the trigger body
     can be folded into the score-confirmation reply instead of
-    arriving as a second message — when consolidated like that, the
-    daily-cap and PB-DM counter don't apply (no separate DM to cap)
-    and the body is returned directly for the caller to append.
+    arriving as a second message; the body is returned directly for
+    the caller to append.
     """
     try:
         all_scores = repo.list_player_scores(player.id)
@@ -764,57 +775,14 @@ def maybe_notify_personal_best(
     if not triggers:
         return None
 
-    if not deliver:
-        # Inline mode: caller will fold the message into a larger
-        # reply, so daily-cap / counter-bump don't apply and we
-        # return the body without touching Twilio.
-        chosen = random.choice(triggers)
-        return render_trigger(chosen, player_name=player.display_name, game=game)
-
-    # Cap enforcement: an active player can fire several triggers a
-    # day (best-of-day on each game, first-today, etc.). To stop the
-    # bot from drowning them in DMs we cap non-special triggers at
-    # _PB_DM_DAILY_CAP per player per day. Special triggers (real
-    # PBs, all-time records, day-of-week PBs, year PBs) bypass the
-    # cap — they're rare and earned.
-    try:
-        already_sent = repo.count_pb_dms_today(player.id, today)
-    except Exception:
-        logger.exception(
-            "count_pb_dms_today failed (player=%s) — defaulting to 0",
-            player.id,
-        )
-        already_sent = 0
-
-    if already_sent >= _PB_DM_DAILY_CAP:
-        # Above the cap → only specials can still go through.
-        special = [t for t in triggers if t.kind in SPECIAL_TRIGGER_KINDS]
-        if not special:
-            logger.info(
-                "PB DM suppressed for player %s — daily cap reached "
-                "and no special trigger fired (kinds=%s)",
-                player.id, [t.kind for t in triggers],
-            )
-            return None
-        chosen = random.choice(special)
-    else:
-        # Under the cap → random pick from any matching trigger.
-        chosen = random.choice(triggers)
-
+    chosen = _pick_trigger(triggers)
     body = render_trigger(chosen, player_name=player.display_name, game=game)
 
-    # Bump the per-day counter regardless of whether Twilio is
-    # configured — tests + dry-run callers should see the cap take
-    # effect just like production. The counter only tracks "we
-    # decided to send a DM"; if Twilio fails afterwards that's a
-    # separate concern (the player still notionally got their slot).
-    try:
-        repo.record_pb_dm(player.id, today)
-    except Exception:
-        logger.exception(
-            "record_pb_dm failed (player=%s, day=%s) — DM still sent",
-            player.id, today,
-        )
+    if not deliver:
+        # Inline mode: caller folds the message into a larger reply,
+        # so we just hand back the rendered body without touching
+        # Twilio.
+        return body
 
     if settings is None:
         # Local / test path where Twilio isn't configured. Still
