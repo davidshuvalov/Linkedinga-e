@@ -374,180 +374,137 @@ class TestPhaseDTriggers:
         assert "first_today" not in kinds
 
 
-class TestPbDmDailyCap:
-    """maybe_notify_personal_best caps the per-player per-day DM
-    count at _PB_DM_DAILY_CAP (2). Once that's reached, only special
-    triggers (real PBs, all-time records, day-of-week PBs, year PBs)
-    can still send; common triggers (best-of-day, worst-of-day, etc.)
-    are suppressed."""
+class TestNoMilestoneCap:
+    """Now that the trigger body is folded into the score-confirmation
+    reply (one consolidated WhatsApp message), there's no separate DM
+    to throttle. Every game submission that fires a trigger gets one
+    in the receipt — even after several earlier triggers the same
+    day."""
 
-    def test_non_special_trigger_suppressed_after_cap(self):
-        from app.notifications import _PB_DM_DAILY_CAP
-
+    def test_many_triggers_same_day_all_return_a_body(self):
         repo = InMemoryRepository()
         alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
         bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
-        charlie = repo.get_or_create_player("whatsapp:+61400000003", "Charlie")
-        # Charlie set the all-time record at 5s previously, so
-        # Alice's 20s today is NOT a new record (no all_time_record
-        # trigger fires).
-        repo.insert_score(
-            player_id=charlie.id, game="queens", puzzle_no=600,
-            puzzle_date=date(2026, 1, 1), raw_score=5, share_text="x",
+        # Bob plays first on each game so Alice's faster follow-up
+        # fires ``best_of_day`` (a once-non-special trigger). Run it
+        # five games in a row — every one should still return a body.
+        bodies: list[str | None] = []
+        for i, game in enumerate(("queens", "tango", "zip", "crossclimb", "pinpoint")):
+            repo.insert_score(
+                player_id=bob.id, game=game, puzzle_no=700 + i,
+                puzzle_date=TUE, raw_score=30, share_text="x",
+            )
+            repo.insert_score(
+                player_id=alice.id, game=game, puzzle_no=700 + i,
+                puzzle_date=TUE, raw_score=20, share_text="x",
+            )
+            bodies.append(maybe_notify_personal_best(
+                repo, None, player=alice, game=game,
+                new_raw=20, today=TUE,
+            ))
+        assert all(b is not None for b in bodies), (
+            f"some submissions returned no body: {bodies}"
         )
-        # Bob already played today so Alice's 20s can fire
-        # ``best_of_day`` (a non-special trigger). Bob's 30s is also
-        # not a record.
-        repo.insert_score(
-            player_id=bob.id, game="queens", puzzle_no=714,
-            puzzle_date=TUE, raw_score=30, share_text="x",
-        )
-        # Alice has a prior 20s on a Wednesday earlier this year so
-        # her today's 20s is a tied PB (also a special trigger).
-        # Avoid that: give Alice a single prior at 18s so today's 20s
-        # is middling on the personal axis (no PB / no worst), and
-        # not a Tuesday-extreme either (give her a prior Tuesday at
-        # 10 so today's 20 isn't the Tuesday best either).
+
+
+class TestLifetimePbTrumpsWeekday:
+    """When a lifetime PB / worst fires alongside a weekday or year
+    variant, the lifetime headline wins so we don't bury the lede with
+    "fastest Friday" when it's also "fastest ever"."""
+
+    def test_pick_trigger_drops_dow_pb_when_new_pb_present(self):
+        from app.notifications import Trigger, _pick_trigger
+
+        # Force the picker to choose between new_pb and dow_pb only —
+        # dow_pb should be filtered out, leaving new_pb as the only
+        # survivor.
+        triggers = [
+            Trigger(kind="new_pb", format_data={"_new_raw": "20", "_prior_raw": "30"}),
+            Trigger(kind="dow_pb", format_data={
+                "_new_raw": "20", "_prior_raw": "25", "weekday": "Tuesday",
+            }),
+        ]
+        for _ in range(20):
+            assert _pick_trigger(triggers).kind == "new_pb"
+
+    def test_pick_trigger_drops_year_pb_when_tied_pb_present(self):
+        from app.notifications import Trigger, _pick_trigger
+
+        triggers = [
+            Trigger(kind="tied_pb", format_data={"_new_raw": "20"}),
+            Trigger(kind="year_pb", format_data={
+                "_new_raw": "20", "_prior_raw": "22", "year": "2026",
+            }),
+        ]
+        for _ in range(20):
+            assert _pick_trigger(triggers).kind == "tied_pb"
+
+    def test_pick_trigger_drops_dow_worst_when_new_worst_present(self):
+        from app.notifications import Trigger, _pick_trigger
+
+        triggers = [
+            Trigger(kind="new_worst", format_data={"_new_raw": "90", "_prior_raw": "60"}),
+            Trigger(kind="dow_worst", format_data={
+                "_new_raw": "90", "_prior_raw": "70", "weekday": "Tuesday",
+            }),
+        ]
+        for _ in range(20):
+            assert _pick_trigger(triggers).kind == "new_worst"
+
+    def test_pick_trigger_keeps_dow_pb_when_no_lifetime_pb(self):
+        # No new_pb / tied_pb in the pool → dow_pb is a valid headline
+        # and stays in the random pick (here it's the only candidate).
+        from app.notifications import Trigger, _pick_trigger
+
+        triggers = [
+            Trigger(kind="dow_pb", format_data={
+                "_new_raw": "20", "_prior_raw": "25", "weekday": "Tuesday",
+            }),
+        ]
+        assert _pick_trigger(triggers).kind == "dow_pb"
+
+    def test_lifetime_pb_trumps_dow_pb_end_to_end(self):
+        # Real submission path: Alice has a slower prior Tuesday (30s)
+        # and an even slower Wednesday (40s). Today's 20s is BOTH a
+        # new lifetime PB and a Tuesday PB. The picker should headline
+        # the lifetime PB (drop the dow_pb candidate).
+        repo = InMemoryRepository()
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
         repo.insert_score(
             player_id=alice.id, game="queens", puzzle_no=607,
-            puzzle_date=date(2026, 1, 6), raw_score=18, share_text="x",  # Tue
+            puzzle_date=date(2026, 1, 6), raw_score=30, share_text="x",  # Tue
         )
         repo.insert_score(
             player_id=alice.id, game="queens", puzzle_no=608,
-            puzzle_date=date(2026, 1, 7), raw_score=25, share_text="x",  # Wed
+            puzzle_date=date(2026, 1, 7), raw_score=40, share_text="x",  # Wed
+        )
+        # Bob keeps best_of_day from firing solo by also playing today.
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=714,
+            puzzle_date=TUE, raw_score=25, share_text="x",
         )
         repo.insert_score(
             player_id=alice.id, game="queens", puzzle_no=714,
             puzzle_date=TUE, raw_score=20, share_text="x",
         )
-        # Sanity-check the trigger surface: only non-special should
-        # fire (just best_of_day).
-        from app.notifications import (
-            gather_submission_triggers, SPECIAL_TRIGGER_KINDS,
-        )
+        # Sanity: gather_submission_triggers sees both new_pb and dow_pb.
         triggers = gather_submission_triggers(
             repo, player_id=alice.id, game="queens",
-            new_raw=20, today=TUE, prior_raws=[18, 25],
+            new_raw=20, today=TUE, prior_raws=[30, 40],
         )
         kinds = {t.kind for t in triggers}
-        assert kinds & SPECIAL_TRIGGER_KINDS == set(), (
-            f"setup-bug: special trigger fired ({kinds & SPECIAL_TRIGGER_KINDS})"
+        assert "new_pb" in kinds and "dow_pb" in kinds, (
+            f"setup-bug: expected both new_pb and dow_pb, got {kinds}"
         )
-
-        # Pre-record _PB_DM_DAILY_CAP DMs already sent today.
-        for _ in range(_PB_DM_DAILY_CAP):
-            repo.record_pb_dm(alice.id, TUE)
-
-        body = maybe_notify_personal_best(
-            repo, None,
-            player=alice,
-            game="queens",
-            new_raw=20,
-            today=TUE,
-        )
-        # Only non-special triggers fired and the cap is reached →
-        # DM suppressed.
-        assert body is None
-
-    def test_special_trigger_bypasses_cap(self):
-        # Same setup as above but Alice's score is also her PB
-        # (no prior history) — except wait, the gather logic needs
-        # at least ONE prior to detect a PB. Set up a prior loss
-        # so PB fires.
-        from app.db import Player
-        from app.notifications import _PB_DM_DAILY_CAP
-
-        repo = InMemoryRepository()
-        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
-        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
-        # Alice's PRIOR Queens: 40s. Bob's today: 30s. Alice today: 20s.
-        # → Alice fires new_pb (special) AND best_of_day (common).
-        repo.insert_score(
-            player_id=alice.id, game="queens", puzzle_no=700,
-            puzzle_date=MON, raw_score=40, share_text="x",
-        )
-        repo.insert_score(
-            player_id=bob.id, game="queens", puzzle_no=714,
-            puzzle_date=TUE, raw_score=30, share_text="x",
-        )
-        repo.insert_score(
-            player_id=alice.id, game="queens", puzzle_no=714,
-            puzzle_date=TUE, raw_score=20, share_text="x",
-        )
-        # Burn the cap so only specials can still go through.
-        for _ in range(_PB_DM_DAILY_CAP):
-            repo.record_pb_dm(alice.id, TUE)
-
-        body = maybe_notify_personal_best(
-            repo, None,
-            player=alice,
-            game="queens",
-            new_raw=20,
-            today=TUE,
-        )
-        # PB is special — should still fire even at the cap.
-        assert body is not None
-        # Either the player name or the game appears (some templates
-        # phrase the PB without naming the player explicitly).
-        assert "Alice" in body or "Queens" in body
-
-    def test_under_cap_picks_any_trigger(self):
-        from app.db import Player
-
-        repo = InMemoryRepository()
-        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
-        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
-        repo.insert_score(
-            player_id=bob.id, game="queens", puzzle_no=714,
-            puzzle_date=TUE, raw_score=30, share_text="x",
-        )
-        repo.insert_score(
-            player_id=alice.id, game="queens", puzzle_no=714,
-            puzzle_date=TUE, raw_score=20, share_text="x",
-        )
-        # No prior DMs today → cap not reached → DM fires.
-        body = maybe_notify_personal_best(
-            repo, None,
-            player=alice,
-            game="queens",
-            new_raw=20,
-            today=TUE,
-        )
-        assert body is not None
-        # Counter incremented as a side effect of the send.
-        assert repo.count_pb_dms_today(alice.id, TUE) == 1
-
-    def test_counter_increments_on_each_send(self):
-        repo = InMemoryRepository()
-        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
-        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
-        repo.insert_score(
-            player_id=bob.id, game="queens", puzzle_no=714,
-            puzzle_date=TUE, raw_score=30, share_text="x",
-        )
-        # Trigger one DM, then a second on a different game/score.
-        repo.insert_score(
-            player_id=alice.id, game="queens", puzzle_no=714,
-            puzzle_date=TUE, raw_score=20, share_text="x",
-        )
-        maybe_notify_personal_best(
-            repo, None, player=alice, game="queens",
-            new_raw=20, today=TUE,
-        )
-        repo.insert_score(
-            player_id=bob.id, game="tango", puzzle_no=554,
-            puzzle_date=TUE, raw_score=30, share_text="x",
-        )
-        repo.insert_score(
-            player_id=alice.id, game="tango", puzzle_no=554,
-            puzzle_date=TUE, raw_score=20, share_text="x",
-        )
-        maybe_notify_personal_best(
-            repo, None, player=alice, game="tango",
-            new_raw=20, today=TUE,
-        )
-        # Two DMs sent.
-        assert repo.count_pb_dms_today(alice.id, TUE) == 2
+        # Run the picker many times — never a Tuesday-flavoured body.
+        for _ in range(30):
+            body = maybe_notify_personal_best(
+                repo, None, player=alice, game="queens",
+                new_raw=20, today=TUE,
+            )
+            assert body is not None
+            assert "Tuesday" not in body, f"dow_pb leaked into headline: {body}"
 
 
 class TestMaybeNotifyPersonalBestIntegration:
