@@ -467,6 +467,24 @@ _CLUSTER_POOL_AT_MIN = 0.5
 _CLUSTER_POOL_AT_KNEE = 1.5
 _CLUSTER_POOL_AT_MAX = 2.0
 
+# Absolute-time tie floor. Pure ratio-based clustering misfires on
+# very fast rounds: 4s vs 6s is a 1.5x ratio that looks like a
+# runaway winner, but in real-world terms the players are tied.
+# When both times are inside the floor and the gap is small, we
+# treat the pair as in-cluster regardless of the ratio.
+_ABSOLUTE_TIE_FLOOR = 10.0   # seconds: "objectively fast" zone
+_ABSOLUTE_TIE_DELTA = 3.0    # seconds: gaps ≤ this in the floor zone count as tied
+
+
+def _is_absolute_tie(t1: float, t2: float) -> bool:
+    """True when ``t1``/``t2`` are both fast and close in absolute terms.
+
+    Used by cluster detection to recognise a top pack like ``[4, 6, 7]``
+    that the pure ratio test would reject (``r12 = 1.5`` exceeds the
+    1.4 in-cluster threshold).
+    """
+    return t1 < _ABSOLUTE_TIE_FLOOR and (t2 - t1) <= _ABSOLUTE_TIE_DELTA
+
 
 def _scaled_cluster_pool(drop_ratio: float) -> float:
     """Map the post-cluster drop ratio to its bonus pool size.
@@ -503,7 +521,7 @@ def _base_points_for_size(n: int) -> List[int]:
 
 
 def _detect_cluster(
-    ratios: Sequence[float], n: int
+    times: Sequence[float], ratios: Sequence[float], n: int
 ) -> Optional[Tuple[int, float]]:
     """Return ``(cluster_size, drop_ratio)`` when the round has a
     "top-k tight pack with a clear drop to position k+1" shape, else
@@ -516,7 +534,10 @@ def _detect_cluster(
 
     A cluster of size ``k`` requires:
 
-    * All ``k - 1`` in-cluster ratios are tight (``< 1.4``)
+    * All ``k - 1`` in-cluster pairs are tight — either by ratio
+      (``< 1.4``) or by absolute-time tie (both fast, gap small).
+      The absolute-tie escape hatch keeps shapes like ``[4, 6, 7]``
+      from being misread as a runaway 1st.
     * The ``k``-to-``k+1`` ratio is a clear drop (``> 1.3``)
     * The round has at least one player past the cluster (so the
       drop position exists)
@@ -531,7 +552,9 @@ def _detect_cluster(
             # check to be meaningful.
             continue
         in_cluster_tight = all(
-            ratios[i] < _CLUSTER_TOP_RATIO for i in range(k - 1)
+            ratios[i] < _CLUSTER_TOP_RATIO
+            or _is_absolute_tie(times[i], times[i + 1])
+            for i in range(k - 1)
         )
         drop_ratio = ratios[k - 1]
         if in_cluster_tight and drop_ratio > _CLUSTER_DROP_RATIO:
@@ -540,7 +563,7 @@ def _detect_cluster(
 
 
 def _classify_round(
-    n: int, spread: float, ratios: Sequence[float]
+    n: int, spread: float, times: Sequence[float], ratios: Sequence[float]
 ) -> Tuple[str, Optional[int], Optional[float]]:
     """Decide which adjustment regime applies.
 
@@ -551,24 +574,55 @@ def _classify_round(
 
     Order of precedence (largest cluster wins, then clear-winner,
     then tight). Tight short-circuits on a small overall spread —
-    the spec's "only adjust in clear cases" rule.
+    the spec's "only adjust in clear cases" rule. The clear-winner
+    fallback also defers when 1st/2nd are an absolute tie (both
+    inside the fast-zone floor with a small gap), since a 4s vs 6s
+    "win" is noise, not a runaway lead.
     """
     if spread < _TIGHT_SPREAD_THRESHOLD:
         return "tight", None, None
 
-    detected = _detect_cluster(ratios, n)
+    detected = _detect_cluster(times, ratios, n)
     if detected is not None:
         cluster_size, drop_ratio = detected
         return "cluster", cluster_size, drop_ratio
 
-    if ratios[0] > _CLEAR_WINNER_RATIO:
+    if ratios[0] > _CLEAR_WINNER_RATIO and not _is_absolute_tie(times[0], times[1]):
         return "winner", None, None
 
     return "tight", None, None
 
 
+def _adaptive_straggler_weights(distances: Sequence[float]) -> List[float]:
+    """Blend distance-from-boundary with even-split, adapting to spread.
+
+    Pure distance weighting is right when one straggler is genuinely
+    far off the back of the field (Zip-style ``[13, 51]`` past a 7s
+    boundary), but too harsh when stragglers are bunched together
+    (Tango-style ``[34, 41]`` past a 22s boundary — only 7s separates
+    them). We measure spread as ``(max - min) / max`` of the
+    distances and use that as the blend factor:
+
+    * spread → 1 (one far outlier): nearly pure distance weighting,
+      so the outlier absorbs most of the debit.
+    * spread → 0 (bunched stragglers): nearly even split, so 4th
+      and 5th lose roughly the same.
+
+    Returns one weight per straggler; caller normalises before
+    applying. Empty input returns ``[]``.
+    """
+    if not distances:
+        return []
+    if len(distances) == 1 or max(distances) <= 0:
+        return list(distances)
+    alpha = (max(distances) - min(distances)) / max(distances)
+    avg = sum(distances) / len(distances)
+    return [alpha * d + (1.0 - alpha) * avg for d in distances]
+
+
 def _apply_cluster_bonus(
     scores: List[float],
+    base_points: Sequence[float],
     times: Sequence[float],
     n: int,
     top_k: int,
@@ -578,21 +632,35 @@ def _apply_cluster_bonus(
 
     Mutates ``scores`` in place. In-cluster bonuses are time-weighted
     (``1/time_i``, normalised) so the fastest of the cluster gets the
-    biggest share. The full bonus pool is then subtracted evenly from
-    the players past the cluster, keeping the running total equal to
-    the base. ``pool`` is computed by :func:`_scaled_cluster_pool`
-    from the post-cluster drop ratio — modest drops earn small pools,
-    runaway blowouts earn the full 2.0.
+    biggest share. The bonus pool is then subtracted from the
+    stragglers using :func:`_adaptive_straggler_weights` — a blend of
+    distance-from-boundary and even split that adapts to how
+    spread-out the stragglers are. Only stragglers with non-zero base
+    points participate in the debit (positions 6+ have base 0 and are
+    spec'd to stay at 0). ``pool`` is computed by
+    :func:`_scaled_cluster_pool` from the post-cluster drop ratio.
     """
     weights = [1.0 / times[i] for i in range(top_k)]
     wsum = sum(weights)
     for i in range(top_k):
         scores[i] += pool * weights[i] / wsum
 
-    bottom_count = n - top_k
-    if bottom_count > 0:
-        per_player = pool / bottom_count
-        for i in range(top_k, n):
+    boundary = times[top_k - 1]
+    straggler_indices = [i for i in range(top_k, n) if base_points[i] > 0]
+    if not straggler_indices:
+        return
+
+    distances = [times[i] - boundary for i in straggler_indices]
+    blended = _adaptive_straggler_weights(distances)
+    bsum = sum(blended)
+    if bsum > 0:
+        for i, w in zip(straggler_indices, blended):
+            scores[i] -= pool * w / bsum
+    else:
+        # Defensive: drop_ratio > 1.3 guarantees bsum > 0, but if a
+        # caller ever bypasses that, fall back to even debit.
+        per_player = pool / len(straggler_indices)
+        for i in straggler_indices:
             scores[i] -= per_player
 
 
@@ -607,8 +675,10 @@ def _apply_clear_winner_bonus(
 
     Bonus grows with the first-to-second ratio but is capped at +2 so a
     runaway winner (r12 = 10x) doesn't blow the scale. The bonus is
-    then subtracted from the other players proportionally to their
-    base points — stronger mid-pack finishers absorb more of the hit.
+    then subtracted from the other players using
+    :func:`_adaptive_straggler_weights` — distance-from-winner blended
+    with even-split, so a far outlier absorbs most of the debit but
+    bunched stragglers split it more evenly.
 
     If multiple players are tied for 1st (same ``times[0]``) the
     bonus is shared equally — honours the "if they are far ahead
@@ -625,10 +695,22 @@ def _apply_clear_winner_bonus(
     for i in range(tied_with_1st):
         scores[i] += bonus / tied_with_1st
 
-    other_base_sum = sum(base_points[tied_with_1st:])
-    if other_base_sum > 0:
-        for i in range(tied_with_1st, n):
-            scores[i] -= bonus * base_points[i] / other_base_sum
+    winner_time = times[0]
+    debit_indices = [i for i in range(tied_with_1st, n) if base_points[i] > 0]
+    distances = [times[i] - winner_time for i in debit_indices]
+    blended = _adaptive_straggler_weights(distances)
+    bsum = sum(blended)
+    if bsum > 0:
+        for i, w in zip(debit_indices, blended):
+            scores[i] -= bonus * w / bsum
+    else:
+        # Defensive: r12 > 1.3 guarantees the runner-up is strictly
+        # slower, so bsum > 0. Fall back to base-weighted debit
+        # only if a degenerate input slips through.
+        other_base_sum = sum(base_points[i] for i in debit_indices)
+        if other_base_sum > 0:
+            for i in debit_indices:
+                scores[i] -= bonus * base_points[i] / other_base_sum
 
 
 def _floor_and_rebalance(
@@ -784,11 +866,11 @@ def competitive_score(
     # classifier picks the largest cluster that fits, falling back to
     # clear-winner and finally tight. Cluster bonus pool scales with
     # the size of the post-cluster drop.
-    regime, cluster_size, drop_ratio = _classify_round(n, spread, ratios)
+    regime, cluster_size, drop_ratio = _classify_round(n, spread, times, ratios)
     if regime == "cluster":
         assert cluster_size is not None and drop_ratio is not None
         pool = _scaled_cluster_pool(drop_ratio)
-        _apply_cluster_bonus(scores, times, n, cluster_size, pool)
+        _apply_cluster_bonus(scores, base_points, times, n, cluster_size, pool)
     elif regime == "winner":
         _apply_clear_winner_bonus(scores, base_points, times, ratios[0], n)
     # regime == "tight": fall through with base points intact.
