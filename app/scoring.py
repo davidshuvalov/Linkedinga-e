@@ -593,6 +593,33 @@ def _classify_round(
     return "tight", None, None
 
 
+def _adaptive_straggler_weights(distances: Sequence[float]) -> List[float]:
+    """Blend distance-from-boundary with even-split, adapting to spread.
+
+    Pure distance weighting is right when one straggler is genuinely
+    far off the back of the field (Zip-style ``[13, 51]`` past a 7s
+    boundary), but too harsh when stragglers are bunched together
+    (Tango-style ``[34, 41]`` past a 22s boundary — only 7s separates
+    them). We measure spread as ``(max - min) / max`` of the
+    distances and use that as the blend factor:
+
+    * spread → 1 (one far outlier): nearly pure distance weighting,
+      so the outlier absorbs most of the debit.
+    * spread → 0 (bunched stragglers): nearly even split, so 4th
+      and 5th lose roughly the same.
+
+    Returns one weight per straggler; caller normalises before
+    applying. Empty input returns ``[]``.
+    """
+    if not distances:
+        return []
+    if len(distances) == 1 or max(distances) <= 0:
+        return list(distances)
+    alpha = (max(distances) - min(distances)) / max(distances)
+    avg = sum(distances) / len(distances)
+    return [alpha * d + (1.0 - alpha) * avg for d in distances]
+
+
 def _apply_cluster_bonus(
     scores: List[float],
     base_points: Sequence[float],
@@ -606,12 +633,12 @@ def _apply_cluster_bonus(
     Mutates ``scores`` in place. In-cluster bonuses are time-weighted
     (``1/time_i``, normalised) so the fastest of the cluster gets the
     biggest share. The bonus pool is then subtracted from the
-    stragglers weighted by how far each one trails the cluster
-    boundary — the player who's way off the back absorbs most of the
-    hit, while a near-miss straggler barely loses any. Only stragglers
-    with non-zero base points participate in the debit (positions 6+
-    have base 0 and are spec'd to stay at 0). ``pool`` is computed
-    by :func:`_scaled_cluster_pool` from the post-cluster drop ratio.
+    stragglers using :func:`_adaptive_straggler_weights` — a blend of
+    distance-from-boundary and even split that adapts to how
+    spread-out the stragglers are. Only stragglers with non-zero base
+    points participate in the debit (positions 6+ have base 0 and are
+    spec'd to stay at 0). ``pool`` is computed by
+    :func:`_scaled_cluster_pool` from the post-cluster drop ratio.
     """
     weights = [1.0 / times[i] for i in range(top_k)]
     wsum = sum(weights)
@@ -623,13 +650,14 @@ def _apply_cluster_bonus(
     if not straggler_indices:
         return
 
-    straggler_weights = [times[i] - boundary for i in straggler_indices]
-    swsum = sum(straggler_weights)
-    if swsum > 0:
-        for i, w in zip(straggler_indices, straggler_weights):
-            scores[i] -= pool * w / swsum
+    distances = [times[i] - boundary for i in straggler_indices]
+    blended = _adaptive_straggler_weights(distances)
+    bsum = sum(blended)
+    if bsum > 0:
+        for i, w in zip(straggler_indices, blended):
+            scores[i] -= pool * w / bsum
     else:
-        # Defensive: drop_ratio > 1.3 guarantees swsum > 0, but if a
+        # Defensive: drop_ratio > 1.3 guarantees bsum > 0, but if a
         # caller ever bypasses that, fall back to even debit.
         per_player = pool / len(straggler_indices)
         for i in straggler_indices:
@@ -647,11 +675,10 @@ def _apply_clear_winner_bonus(
 
     Bonus grows with the first-to-second ratio but is capped at +2 so a
     runaway winner (r12 = 10x) doesn't blow the scale. The bonus is
-    then subtracted from the other players weighted by their distance
-    from the winner — the slowest player absorbs the largest share,
-    while the runner-up barely loses anything. This matches the
-    intuition that "most of the points should come from the player
-    who's furthest behind."
+    then subtracted from the other players using
+    :func:`_adaptive_straggler_weights` — distance-from-winner blended
+    with even-split, so a far outlier absorbs most of the debit but
+    bunched stragglers split it more evenly.
 
     If multiple players are tied for 1st (same ``times[0]``) the
     bonus is shared equally — honours the "if they are far ahead
@@ -670,14 +697,15 @@ def _apply_clear_winner_bonus(
 
     winner_time = times[0]
     debit_indices = [i for i in range(tied_with_1st, n) if base_points[i] > 0]
-    distance_weights = [times[i] - winner_time for i in debit_indices]
-    dwsum = sum(distance_weights)
-    if dwsum > 0:
-        for i, w in zip(debit_indices, distance_weights):
-            scores[i] -= bonus * w / dwsum
+    distances = [times[i] - winner_time for i in debit_indices]
+    blended = _adaptive_straggler_weights(distances)
+    bsum = sum(blended)
+    if bsum > 0:
+        for i, w in zip(debit_indices, blended):
+            scores[i] -= bonus * w / bsum
     else:
         # Defensive: r12 > 1.3 guarantees the runner-up is strictly
-        # slower, so dwsum > 0. Fall back to base-weighted debit
+        # slower, so bsum > 0. Fall back to base-weighted debit
         # only if a degenerate input slips through.
         other_base_sum = sum(base_points[i] for i in debit_indices)
         if other_base_sum > 0:

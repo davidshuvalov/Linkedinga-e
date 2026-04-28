@@ -996,8 +996,33 @@ class TestCompetitiveScore:
         base_C, base_D = 3.0, 2.0
         debit_C = base_C - scores[2]
         debit_D = base_D - scores[3]
-        # D's debit dwarfs C's — distance ratio 94/14 ≈ 6.7.
-        assert debit_D > debit_C * 3
+        # D's debit dwarfs C's — adaptive blend leans heavily on
+        # distance because the spread (94/14 ≈ 6.7) is very wide.
+        assert debit_D > debit_C * 2
+
+    def test_bunched_stragglers_split_debit_more_evenly(self):
+        # Tango-shaped round: top-3 cluster [19, 19, 22] then two
+        # bunched stragglers at 34s and 41s — only 7s apart with the
+        # cluster boundary at 22s. With pure distance weighting the
+        # 41s player would absorb ~60% of the pool and lose almost
+        # all their points; the adaptive blend dampens that toward
+        # an even split since the stragglers aren't really spread out.
+        out = competitive_score([
+            {"name": "A", "time": 19},
+            {"name": "B", "time": 19},
+            {"name": "C", "time": 22},
+            {"name": "D", "time": 34},
+            {"name": "E", "time": 41},
+        ])
+        scores = self._scores(out)
+        # 5th absorbs more than 4th, but not by a runaway margin.
+        debit_4 = 2.0 - scores[3]
+        debit_5 = 1.0 - scores[4]
+        assert debit_5 > debit_4              # slowest still loses more
+        assert debit_5 < debit_4 * 1.6        # but not 5x more
+        # 5th retains a non-trivial score (>= 0.2) instead of dropping
+        # to ~0.1 under pure distance weighting.
+        assert scores[4] >= 0.2
         # No score ever drops below the 0.0 hard floor, even when a
         # runaway winner triggers the maximum +2 bonus and the
         # distance-weighted debit concentrates on the slowest player.
