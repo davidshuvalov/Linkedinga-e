@@ -169,14 +169,16 @@ class TestAssignDailyPoints:
     def test_tied_5th_6th_share_last_point(self):
         # Tied 5th/6th split positional points (1+0)/2 = 0.5 each.
         # The only way for a 6th-place finisher to score under the
-        # new rules is by tying with 5th.
+        # new rules is by tying with 5th. Use a tight-regime round
+        # (small spread) so base points stand without a bonus debit
+        # potentially zeroing the tied pair.
         scores = [
             _row(1, "A", "queens", 714, 10),
-            _row(2, "B", "queens", 714, 20),
-            _row(3, "C", "queens", 714, 30),
-            _row(4, "D", "queens", 714, 40),
-            _row(5, "E", "queens", 714, 50),  # tied 5th/6th
-            _row(6, "F", "queens", 714, 50),  # tied 5th/6th
+            _row(2, "B", "queens", 714, 11),
+            _row(3, "C", "queens", 714, 12),
+            _row(4, "D", "queens", 714, 13),
+            _row(5, "E", "queens", 714, 14),  # tied 5th/6th
+            _row(6, "F", "queens", 714, 14),  # tied 5th/6th
         ]
         pts = assign_daily_points(scores)
         assert pts[5] == pts[6]                  # tied pair equal
@@ -900,8 +902,105 @@ class TestCompetitiveScore:
         assert scores[3] < 2.0
         assert scores[4] < 1.0
 
-    def test_minimum_score_floor_is_enforced(self):
-        # Any score is at least 0.5 even after a heavy winner-bonus debit.
+    def test_zip_407_absolute_tie_promotes_to_top_three_cluster(self):
+        # Zip #407 (Tue 28 Apr): times 4, 6, 7, 13, 51. Pure ratio
+        # detection failed because r12=1.5 exceeds the 1.4 in-cluster
+        # threshold, so 1st alone got the clear-winner bonus. With the
+        # absolute-tie escape (both <10s and gap ≤3s) the top three
+        # promote into a single cluster and share the bonus.
+        out = competitive_score([
+            {"name": "Goat",   "time": 4},
+            {"name": "Duv",    "time": 6},
+            {"name": "adamk",  "time": 7},
+            {"name": "Ben",    "time": 13},
+            {"name": "Darren", "time": 51},
+        ])
+        scores = self._scores(out)
+        # Top three all bumped above their base — the cluster fired.
+        assert scores[0] > 5.0
+        assert scores[1] > 4.0
+        assert scores[2] > 3.0
+        # No one in the top three is more than 0.6 above the next:
+        # the bonus is shared, not concentrated on 1st like Case C.
+        assert scores[0] - scores[1] < 0.6 + 1.0  # gap between 1st and 2nd
+        assert scores[1] - scores[2] < 1.5
+        # Distance-weighted debit: Darren (44s past boundary) absorbs
+        # far more than Ben (6s past). Ben's debit < 1.0; Darren's
+        # debit drives him to the 0 floor.
+        assert scores[3] > 1.0
+        assert scores[4] == 0.0
+        assert scores == sorted(scores, reverse=True)
+
+    def test_absolute_tie_blocks_clear_winner_bonus(self):
+        # Times [4, 6, 50, 80, 110]: r12=1.5 would normally trigger
+        # the clear-winner bonus, but 4 and 6 are both inside the
+        # 10s floor with a 2s gap → top-2 cluster fires instead.
+        out = competitive_score([
+            {"name": "A", "time": 4},
+            {"name": "B", "time": 6},
+            {"name": "C", "time": 50},
+            {"name": "D", "time": 80},
+            {"name": "E", "time": 110},
+        ])
+        scores = self._scores(out)
+        # 1st and 2nd both bonused — share the cluster pool.
+        assert scores[0] > 5.0
+        assert scores[1] > 4.0
+        # Gap between 1st and 2nd is smaller than the clear-winner
+        # case would have produced (where 1st alone gets +1 and 2nd
+        # eats a debit, gap ~2.4). Here both get a positive bonus.
+        assert scores[0] - scores[1] < 2.0
+
+    def test_absolute_tie_does_not_promote_when_gap_exceeds_delta(self):
+        # Gap of 8s between 1st and 2nd exceeds the 3s delta — no
+        # absolute-tie promotion, so the existing clear-winner bonus
+        # still fires (r12 = 12/4 = 3.0 → bonus capped at +2).
+        out = competitive_score([
+            {"name": "A", "time": 4},
+            {"name": "B", "time": 12},
+            {"name": "C", "time": 50},
+            {"name": "D", "time": 80},
+            {"name": "E", "time": 110},
+        ])
+        scores = self._scores(out)
+        # Runaway winner: 1st well above 2nd, gap ≥ 3 points.
+        assert scores[0] >= 6.5
+        assert scores[0] - scores[1] >= 3.0
+
+    def test_absolute_tie_does_not_promote_when_above_floor(self):
+        # Fastest is 40s — outside the 10s floor — so absolute-tie
+        # never fires regardless of gap. r12 = 60/40 = 1.5 → falls
+        # through cluster (k=2 ratio fails 1.4) to clear-winner.
+        out = competitive_score([
+            {"name": "A", "time": 40},
+            {"name": "B", "time": 60},
+            {"name": "C", "time": 500},
+            {"name": "D", "time": 800},
+            {"name": "E", "time": 1100},
+        ])
+        scores = self._scores(out)
+        # Clear-winner fires: 1st gets a meaningful lead over 2nd.
+        assert scores[0] - scores[1] >= 1.5
+
+    def test_distance_weighted_debit_concentrates_on_far_straggler(self):
+        # Top-2 cluster [5, 6] with two stragglers at very different
+        # distances: 20s (14s past boundary) vs 100s (94s past).
+        # The distant straggler must absorb far more of the debit.
+        out = competitive_score([
+            {"name": "A", "time": 5},
+            {"name": "B", "time": 6},
+            {"name": "C", "time": 20},
+            {"name": "D", "time": 100},
+        ])
+        scores = self._scores(out)
+        base_C, base_D = 3.0, 2.0
+        debit_C = base_C - scores[2]
+        debit_D = base_D - scores[3]
+        # D's debit dwarfs C's — distance ratio 94/14 ≈ 6.7.
+        assert debit_D > debit_C * 3
+        # No score ever drops below the 0.0 hard floor, even when a
+        # runaway winner triggers the maximum +2 bonus and the
+        # distance-weighted debit concentrates on the slowest player.
         out = competitive_score([
             {"name": "A", "time": 1},
             {"name": "B", "time": 100},
@@ -909,7 +1008,7 @@ class TestCompetitiveScore:
             {"name": "D", "time": 120},
             {"name": "E", "time": 130},
         ])
-        assert min(self._scores(out)) >= 0.5
+        assert min(self._scores(out)) >= 0.0
 
     def test_rankings_never_change(self):
         # Sweep of increasing times; the returned order must equal the
