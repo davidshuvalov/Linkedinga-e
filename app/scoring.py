@@ -443,8 +443,15 @@ _CLEAR_WINNER_RATIO = 1.3            # Case C: r12 > this  (lowered from
 _CLEAR_WINNER_MAX_BONUS = 2.0        # hard cap in Case C
 _MIN_SCORE = 0.0                     # floor for any player — only
                                      # prevents negatives from debits;
-                                     # positions 6+ naturally stay at 0
-                                     # unless they tie with 5th place
+                                     # positions 6+ are pinned to 0
+                                     # by _apply_floors_and_ceiling
+
+# Per-position minimum floors enforced after the bonus/debit pipeline.
+# Index 0 is 1st (no floor — bonused naturally), 1 is 2nd, … 4 is 5th.
+# Positions 5+ are pinned to 0.0 as a hard ceiling, not a floor: a 6th
+# (or worse) finisher always scores 0, breaking the historical
+# "tied 5th/6th share 0.5 each" convention.
+_POSITION_FLOORS: List[float] = [0.0, 3.0, 2.0, 1.0, 0.5]
 
 # Cluster bonus pool scales piecewise-linearly with the drop ratio
 # (the gap between the last in-cluster player and the first
@@ -746,23 +753,89 @@ def _floor_and_rebalance(
 
 
 def _round_and_reconcile(
-    scores: Sequence[float], total_base: int, n: int
+    scores: Sequence[float],
+    base_points: Sequence[float],
+    total_base: int,
+    n: int,
 ) -> List[float]:
-    """Round each score to 1 d.p. and absorb the residue on the last row.
+    """Round each score to 1 d.p. and absorb the residue on the last
+    *scoring* row.
 
     Rounding independently drifts the sum off ``total_base`` by up to
-    ``n * 0.05``; the spec resolves that by dumping the difference on
-    the slowest player. We clamp that back to the 0 floor if the
-    residue would drive them negative — accepts a ~0.1-pt total
-    mismatch in that rare case rather than violate the
-    "no negative scores" hard constraint.
+    ``n * 0.05``. The residue lands on the lowest-ranked player whose
+    ``base_points`` is non-zero — never on a 6th-or-worse finisher,
+    who must stay at exactly 0 (see :func:`_apply_floors_and_ceiling`).
+    Falls back to the absolute last index if every player has base 0
+    (degenerate, but defensive).
     """
     rounded = [round(s, 1) for s in scores]
+    target = n - 1
+    while target >= 0 and base_points[target] == 0:
+        target -= 1
+    if target < 0:
+        target = n - 1
     diff = total_base - sum(rounded)
-    rounded[-1] = round(rounded[-1] + diff, 1)
-    if rounded[-1] < _MIN_SCORE:
-        rounded[-1] = _MIN_SCORE
+    rounded[target] = round(rounded[target] + diff, 1)
+    if rounded[target] < _MIN_SCORE:
+        rounded[target] = _MIN_SCORE
     return rounded
+
+
+def _apply_floors_and_ceiling(
+    rounded: List[float], times: Sequence[float], n: int
+) -> List[float]:
+    """Pin 6th+ to 0 and bump 2nd–5th up to their per-position minimums.
+
+    Floors (by 0-indexed position): 1st=none, 2nd=3.0, 3rd=2.0,
+    4th=1.0, 5th=0.5. Positions strictly past 5th are pinned to 0
+    as a hard ceiling — a 6th finisher who's slower than the 5th
+    finisher always scores 0.
+
+    Ties on time are honoured: any position-6+ player whose time
+    matches the 5th-placed player is treated as co-5th and inherits
+    5th's 0.5 floor, so a tied 5th/6th pair both keep 0.5. Tied
+    groups inside the resulting scoring window share an averaged
+    floor so tied players come out equal — e.g. tied 4th/5th both
+    get floor (1.0 + 0.5) / 2 = 0.75.
+
+    Bumps land on top of the existing scores (never lowering anyone),
+    so the round total can drift up by the cumulative bump. The
+    leaderboard tolerates that drift; the floors matter more than
+    invariant sums for the "5th place isn't beaten by 6th" guarantee.
+    """
+    # Scoring window extends past 5th (index 4) only as far as the
+    # tie chain reaches. Anyone past that window is strictly slower
+    # than 5th and pins to 0.
+    scoring_end = min(n, 5)
+    while scoring_end < n and times[scoring_end] == times[4]:
+        scoring_end += 1
+
+    floors = [0.0] * n
+    for i in range(min(n, 5)):
+        floors[i] = _POSITION_FLOORS[i]
+    # Tied co-5th players inherit the 5th-place floor.
+    for i in range(5, scoring_end):
+        floors[i] = _POSITION_FLOORS[4]
+
+    # Average floors across tied groups inside the scoring window.
+    i = 0
+    while i < scoring_end:
+        j = i
+        while j + 1 < scoring_end and times[j + 1] == times[i]:
+            j += 1
+        if j > i:
+            avg = sum(floors[i : j + 1]) / (j - i + 1)
+            for k in range(i, j + 1):
+                floors[k] = avg
+        i = j + 1
+
+    result = list(rounded)
+    for i in range(n):
+        if i >= scoring_end:
+            result[i] = 0.0
+        elif result[i] < floors[i]:
+            result[i] = round(floors[i], 1)
+    return result
 
 
 def _base_points_with_tied_groups(
@@ -826,12 +899,19 @@ def competitive_score(
          * Otherwise — no adjustment.
     5. Clamp any cluster-debit-induced negative to 0, scale back to
        the base-points total, round to 1 d.p. with the residue
-       absorbed by the last player. Positions 6+ naturally stay at
-       0 unless they tie with 5th (only top 5 score; a tied 5th/6th
-       shares 0.5 each).
+       absorbed by the last *scoring* player (a 6th finisher never
+       picks up residue).
+    6. Pin 6th+ to exactly 0 and bump 2nd–5th up to per-position
+       minimums (3.0 / 2.0 / 1.0 / 0.5). A 6th-placed player tied on
+       time with 5th is treated as co-5th and shares the 0.5 floor
+       (e.g. tied 5th/6th both get 0.5); only strictly-slower 6th+
+       finishers pin to 0. Tied groups inside the scoring window
+       share averaged floors so tied players stay equal.
 
-    Rankings never change (sorted input is preserved), scores are
-    never negative, and the total is held constant (barring rounding).
+    Rankings never change (sorted input is preserved) and scores are
+    never negative. The round total is held constant by the bonus
+    pipeline but the final floor step can drift it upward by the
+    cumulative bump applied to under-floor positions.
     """
     if len(players) < 3:
         raise ValueError(
@@ -875,9 +955,11 @@ def competitive_score(
         _apply_clear_winner_bonus(scores, base_points, times, ratios[0], n)
     # regime == "tight": fall through with base points intact.
 
-    # Step 5 — floor, rebalance, round, reconcile.
+    # Step 5 — floor, rebalance, round, reconcile, then apply
+    # per-position floors and the 6th+ zero ceiling.
     scores = _floor_and_rebalance(scores, total_base, n)
-    rounded = _round_and_reconcile(scores, total_base, n)
+    rounded = _round_and_reconcile(scores, base_points, total_base, n)
+    rounded = _apply_floors_and_ceiling(rounded, times, n)
 
     return [
         {
