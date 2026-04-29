@@ -787,31 +787,41 @@ def _apply_floors_and_ceiling(
     """Pin 6th+ to 0 and bump 2nd–5th up to their per-position minimums.
 
     Floors (by 0-indexed position): 1st=none, 2nd=3.0, 3rd=2.0,
-    4th=1.0, 5th=0.5. Positions 5+ are a hard ceiling at 0 — a 6th
-    finisher always scores 0, even if tied with 5th on time.
+    4th=1.0, 5th=0.5. Positions strictly past 5th are pinned to 0
+    as a hard ceiling — a 6th finisher who's slower than the 5th
+    finisher always scores 0.
 
-    Tied groups inside the 1st–5th range share an averaged floor so
-    tied players still come out equal. Example: tied 4th/5th both get
-    floor (1.0 + 0.5) / 2 = 0.75. The 6th+ pin sits outside this
-    averaging — a tied 5th/6th pair becomes 5th=0.5, 6th=0.0 by
-    design.
+    Ties on time are honoured: any position-6+ player whose time
+    matches the 5th-placed player is treated as co-5th and inherits
+    5th's 0.5 floor, so a tied 5th/6th pair both keep 0.5. Tied
+    groups inside the resulting scoring window share an averaged
+    floor so tied players come out equal — e.g. tied 4th/5th both
+    get floor (1.0 + 0.5) / 2 = 0.75.
 
     Bumps land on top of the existing scores (never lowering anyone),
     so the round total can drift up by the cumulative bump. The
     leaderboard tolerates that drift; the floors matter more than
     invariant sums for the "5th place isn't beaten by 6th" guarantee.
     """
+    # Scoring window extends past 5th (index 4) only as far as the
+    # tie chain reaches. Anyone past that window is strictly slower
+    # than 5th and pins to 0.
+    scoring_end = min(n, 5)
+    while scoring_end < n and times[scoring_end] == times[4]:
+        scoring_end += 1
+
     floors = [0.0] * n
     for i in range(min(n, 5)):
         floors[i] = _POSITION_FLOORS[i]
+    # Tied co-5th players inherit the 5th-place floor.
+    for i in range(5, scoring_end):
+        floors[i] = _POSITION_FLOORS[4]
 
-    # Average floors across tied groups, but only within the 1st–5th
-    # window. The 6th+ pin is strict and overrides any tie.
+    # Average floors across tied groups inside the scoring window.
     i = 0
-    floor_window = min(n, 5)
-    while i < floor_window:
+    while i < scoring_end:
         j = i
-        while j + 1 < floor_window and times[j + 1] == times[i]:
+        while j + 1 < scoring_end and times[j + 1] == times[i]:
             j += 1
         if j > i:
             avg = sum(floors[i : j + 1]) / (j - i + 1)
@@ -821,7 +831,7 @@ def _apply_floors_and_ceiling(
 
     result = list(rounded)
     for i in range(n):
-        if i >= 5:
+        if i >= scoring_end:
             result[i] = 0.0
         elif result[i] < floors[i]:
             result[i] = round(floors[i], 1)
@@ -892,9 +902,11 @@ def competitive_score(
        absorbed by the last *scoring* player (a 6th finisher never
        picks up residue).
     6. Pin 6th+ to exactly 0 and bump 2nd–5th up to per-position
-       minimums (3.0 / 2.0 / 1.0 / 0.5). Tied groups in the 1st–5th
-       window share averaged floors so tied players stay equal; the
-       6th+ pin overrides ties (a tied 5th/6th becomes 0.5 / 0.0).
+       minimums (3.0 / 2.0 / 1.0 / 0.5). A 6th-placed player tied on
+       time with 5th is treated as co-5th and shares the 0.5 floor
+       (e.g. tied 5th/6th both get 0.5); only strictly-slower 6th+
+       finishers pin to 0. Tied groups inside the scoring window
+       share averaged floors so tied players stay equal.
 
     Rankings never change (sorted input is preserved) and scores are
     never negative. The round total is held constant by the bonus

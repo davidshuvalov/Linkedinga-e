@@ -170,11 +170,10 @@ class TestAssignDailyPoints:
         assert pts[7] == 0.0
         assert abs(sum(pts.values()) - 15.0) < 0.2
 
-    def test_tied_5th_6th_pin_6th_to_zero(self):
-        # The 6th-place pin is strict: a tied 5th/6th pair becomes
-        # 5th=0.5 (the 5th-place floor) and 6th=0.0, breaking the
-        # historical "tied players always equal" convention. The
-        # 5th place floor still applies regardless of tie status.
+    def test_tied_5th_6th_share_floor(self):
+        # A 6th-placed player tied on time with 5th is treated as
+        # co-5th and shares the 5th-place 0.5 floor. Only a strictly
+        # slower 6th finisher pins to 0.
         scores = [
             _row(1, "A", "queens", 714, 10),
             _row(2, "B", "queens", 714, 11),
@@ -184,8 +183,23 @@ class TestAssignDailyPoints:
             _row(6, "F", "queens", 714, 14),  # tied 5th/6th by time
         ]
         pts = assign_daily_points(scores)
-        assert pts[6] == 0.0                     # 6th-pin overrides tie
-        assert pts[5] == 0.5                     # 5th-place floor
+        assert pts[5] == pts[6]                  # tied → equal scores
+        assert pts[5] >= 0.5                     # share the 5th floor
+
+    def test_strictly_slower_6th_still_pins_to_zero(self):
+        # No tie at the 5/6 boundary — 6th is strictly slower than 5th
+        # so the hard ceiling fires and 6th scores 0.
+        scores = [
+            _row(1, "A", "queens", 714, 10),
+            _row(2, "B", "queens", 714, 11),
+            _row(3, "C", "queens", 714, 12),
+            _row(4, "D", "queens", 714, 13),
+            _row(5, "E", "queens", 714, 14),
+            _row(6, "F", "queens", 714, 15),  # strictly slower
+        ]
+        pts = assign_daily_points(scores)
+        assert pts[6] == 0.0
+        assert pts[5] >= 0.5
         assert pts[1] > pts[2] > pts[3] > pts[4] > pts[5] > pts[6]
 
     def test_tied_2nd_3rd_through_competitive(self):
