@@ -103,14 +103,18 @@ class TestAssignDailyPoints:
     def test_straight_ranking_5_players_uses_competitive_score(self):
         # 5 evenly-spaced times with r12 = 2.0 trigger the competitive
         # "clear winner" branch — bonus capped at +2 for 1st, debited
-        # proportionally from everyone else. Rankings preserved and
-        # total still sums to 15 (base 5+4+3+2+1).
+        # proportionally from everyone else. Rankings preserved.
+        # Per-position floors (3.0/2.0/1.0/0.5 for 2nd–5th) can drift
+        # the round total upward from the 15-pt base.
         scores = [_row(i, f"P{i}", "queens", 714, i * 10) for i in range(1, 6)]
         pts = assign_daily_points(scores)
-        # 1st gets the cap; 5th absorbs the rounding residue.
+        # 1st gets the cap; 5th lands on the 0.5 floor.
         assert pts[1] == 7.0
+        assert pts[5] >= 0.5
         assert pts[1] > pts[2] > pts[3] > pts[4] > pts[5]
-        assert abs(sum(pts.values()) - 15.0) < 0.05
+        # Floors only bump up, so the total never drops below the base.
+        assert sum(pts.values()) >= 15.0 - 0.05
+        assert sum(pts.values()) <= 15.0 + 1.0
 
     def test_legacy_fallback_for_pinpoint(self):
         # Pinpoint isn't a time-based game (guess counts 1–5), so the
@@ -166,24 +170,23 @@ class TestAssignDailyPoints:
         assert pts[7] == 0.0
         assert abs(sum(pts.values()) - 15.0) < 0.2
 
-    def test_tied_5th_6th_share_last_point(self):
-        # Tied 5th/6th split positional points (1+0)/2 = 0.5 each.
-        # The only way for a 6th-place finisher to score under the
-        # new rules is by tying with 5th. Use a tight-regime round
-        # (small spread) so base points stand without a bonus debit
-        # potentially zeroing the tied pair.
+    def test_tied_5th_6th_pin_6th_to_zero(self):
+        # The 6th-place pin is strict: a tied 5th/6th pair becomes
+        # 5th=0.5 (the 5th-place floor) and 6th=0.0, breaking the
+        # historical "tied players always equal" convention. The
+        # 5th place floor still applies regardless of tie status.
         scores = [
             _row(1, "A", "queens", 714, 10),
             _row(2, "B", "queens", 714, 11),
             _row(3, "C", "queens", 714, 12),
             _row(4, "D", "queens", 714, 13),
-            _row(5, "E", "queens", 714, 14),  # tied 5th/6th
-            _row(6, "F", "queens", 714, 14),  # tied 5th/6th
+            _row(5, "E", "queens", 714, 14),  # tied 5th/6th by time
+            _row(6, "F", "queens", 714, 14),  # tied 5th/6th by time
         ]
         pts = assign_daily_points(scores)
-        assert pts[5] == pts[6]                  # tied pair equal
-        assert pts[5] > 0.0                      # both get something
-        assert abs(sum(pts.values()) - 15.0) < 0.2
+        assert pts[6] == 0.0                     # 6th-pin overrides tie
+        assert pts[5] == 0.5                     # 5th-place floor
+        assert pts[1] > pts[2] > pts[3] > pts[4] > pts[5] > pts[6]
 
     def test_tied_2nd_3rd_through_competitive(self):
         # 4-player round with tied 2nd/3rd. r12 = 2.0 triggers the
@@ -214,11 +217,12 @@ class TestAssignDailyPoints:
         r = assign_daily_points(scores)
         assert r[1] == r[2] == r[3]
         assert r[1] > r[4]
-        # Total tolerance is loose because this round hits the
-        # documented floor-clamp drift: the cluster debit drives 4th
-        # to exactly 0, the rounding residue can't be absorbed there
-        # without violating the floor, so the sum can drift by ~0.1.
-        assert abs(sum(r.values()) - 14.0) < 0.15
+        # 4th-place floor (1.0) bumps the lone straggler off the 0
+        # the cluster debit drove them to. That bump drifts the
+        # round total upward from the 14-pt base.
+        assert r[4] >= 1.0
+        assert sum(r.values()) >= 14.0
+        assert sum(r.values()) <= 14.0 + 1.5
 
     def test_tied_1st_2nd_share_4_5_each(self):
         # 3 players, tied 1st/2nd, 3rd close behind. Tight regime
@@ -723,10 +727,11 @@ class TestCompetitiveScore:
         # Rankings preserved.
         assert scores == sorted(scores, reverse=True)
 
-    def test_total_points_preserved_after_adjustments(self):
-        # Base total for 5 players is 15. Rounding residue is absorbed
-        # by the last player, so the sum should land exactly on 15
-        # modulo the rounding-to-1dp noise.
+    def test_total_points_at_or_above_base(self):
+        # Base total for 5 players is 15. The bonus pipeline preserves
+        # that total; per-position floors (which only bump up) can drift
+        # the final sum upward when low-rank stragglers get bumped to
+        # their minimum. The total never drops below the base.
         out = competitive_score([
             {"name": "A", "time": 6},
             {"name": "B", "time": 15},
@@ -734,7 +739,9 @@ class TestCompetitiveScore:
             {"name": "D", "time": 25},
             {"name": "E", "time": 30},
         ])
-        assert abs(sum(self._scores(out)) - 15.0) < 0.01
+        total = sum(self._scores(out))
+        assert total >= 15.0 - 0.01
+        assert total <= 15.0 + 1.0
 
     def test_top_two_cluster_boosts_top_two(self):
         # Patches scenario: 6, 7 vs 42, 68, 97. r12=1.17 (tight),
@@ -754,9 +761,10 @@ class TestCompetitiveScore:
         assert scores[2] < 3.0
         assert scores[3] < 2.0
         assert scores[4] < 1.0
-        # Rankings preserved and total preserved (modulo rounding).
+        # Rankings preserved; total can drift up from the per-position
+        # floors (5th lands on the 0.5 floor here).
         assert scores == sorted(scores, reverse=True)
-        assert abs(sum(scores) - 15.0) < 0.05
+        assert sum(scores) >= 15.0 - 0.05
 
     def test_cluster_pool_scales_with_drop_size(self):
         # Same top-2 shape, two different drop sizes. The bigger drop
@@ -820,7 +828,9 @@ class TestCompetitiveScore:
         # Asserting the loose ceiling: 1st no greater than 7.0 (which
         # would require an unbounded pool).
         assert scores[0] < 7.0
-        assert abs(sum(scores) - 15.0) < 0.05
+        # Per-position floors can drift the total upward from the
+        # 15-pt base; never below.
+        assert sum(scores) >= 15.0 - 0.05
 
     def test_top_four_cluster_boosts_top_four(self):
         # Top 4 are all close (30/32/35/37), 5th is a clear drop (90).
@@ -840,9 +850,9 @@ class TestCompetitiveScore:
         assert scores[3] > 2.0
         # 5th absorbed the entire debit.
         assert scores[4] < 1.0
-        # Rankings + total preserved.
+        # Rankings preserved; total drifts up from per-position floors.
         assert scores == sorted(scores, reverse=True)
-        assert abs(sum(scores) - 15.0) < 0.05
+        assert sum(scores) >= 15.0 - 0.05
 
     def test_largest_cluster_wins_when_multiple_could_match(self):
         # Top 4 all tight (r12=r23=r34=1.1), r45 = 50/13 ≈ 3.85 (big
@@ -925,10 +935,11 @@ class TestCompetitiveScore:
         assert scores[0] - scores[1] < 0.6 + 1.0  # gap between 1st and 2nd
         assert scores[1] - scores[2] < 1.5
         # Distance-weighted debit: Darren (44s past boundary) absorbs
-        # far more than Ben (6s past). Ben's debit < 1.0; Darren's
-        # debit drives him to the 0 floor.
+        # far more than Ben (6s past). Ben keeps a meaningful score;
+        # Darren bottoms out and the per-position floor lifts him to
+        # the 5th-place 0.5 minimum.
         assert scores[3] > 1.0
-        assert scores[4] == 0.0
+        assert scores[4] == 0.5
         assert scores == sorted(scores, reverse=True)
 
     def test_absolute_tie_blocks_clear_winner_bonus(self):
@@ -1006,7 +1017,8 @@ class TestCompetitiveScore:
         # cluster boundary at 22s. With pure distance weighting the
         # 41s player would absorb ~60% of the pool and lose almost
         # all their points; the adaptive blend dampens that toward
-        # an even split since the stragglers aren't really spread out.
+        # an even split. The 5th-place floor (0.5) further protects
+        # the slowest player from being crushed.
         out = competitive_score([
             {"name": "A", "time": 19},
             {"name": "B", "time": 19},
@@ -1015,14 +1027,13 @@ class TestCompetitiveScore:
             {"name": "E", "time": 41},
         ])
         scores = self._scores(out)
-        # 5th absorbs more than 4th, but not by a runaway margin.
-        debit_4 = 2.0 - scores[3]
-        debit_5 = 1.0 - scores[4]
-        assert debit_5 > debit_4              # slowest still loses more
-        assert debit_5 < debit_4 * 1.6        # but not 5x more
-        # 5th retains a non-trivial score (>= 0.2) instead of dropping
-        # to ~0.1 under pure distance weighting.
-        assert scores[4] >= 0.2
+        # 4th retains a meaningful score (above their 1.0 floor) — the
+        # adaptive blend prevented the bonus pool from concentrating
+        # too heavily on them.
+        assert scores[3] >= 1.0
+        # 5th never drops below the 0.5 floor, no matter how heavy the
+        # distance-weighted debit was.
+        assert scores[4] >= 0.5
         # No score ever drops below the 0.0 hard floor, even when a
         # runaway winner triggers the maximum +2 bonus and the
         # distance-weighted debit concentrates on the slowest player.
