@@ -242,17 +242,80 @@ app = FastAPI(
 )
 
 
+# WhatsApp's per-message ceiling is 1600 chars; Twilio silently drops
+# any TwiML <Message> body that exceeds it. Leave headroom for emoji
+# rendering width and the occasional control char so we don't sit
+# right at the cliff.
+_MAX_MESSAGE_CHARS = 1500
+
+
+def _chunk_message(body: str, max_chars: int = _MAX_MESSAGE_CHARS) -> list[str]:
+    """Split ``body`` into <= ``max_chars`` chunks at section boundaries.
+
+    Long recaps (e.g. the daily recap on the last day of the month, which
+    appends Month totals + Game winners + Prizes) routinely break the
+    1600-char WhatsApp ceiling. A single oversized ``<Message>`` is
+    silently dropped by Twilio — the symptom is the bot going completely
+    quiet for ``recap`` / ``today`` after a submit. Splitting at
+    paragraph boundaries (``\\n\\n``) keeps each chunk under the limit
+    while preserving section integrity; falling back to line splits
+    handles the rare paragraph that's itself oversized.
+    """
+    if len(body) <= max_chars:
+        return [body]
+
+    chunks: list[str] = []
+    current = ""
+    for para in body.split("\n\n"):
+        candidate = f"{current}\n\n{para}" if current else para
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        # Paragraph alone exceeds the ceiling — split on lines.
+        if len(para) > max_chars:
+            for line in para.split("\n"):
+                line_candidate = f"{current}\n{line}" if current else line
+                if len(line_candidate) <= max_chars:
+                    current = line_candidate
+                else:
+                    if current:
+                        chunks.append(current)
+                    # A single line over the limit is unrealistic for
+                    # our recap shape; hard-slice it as a last resort
+                    # so we never silently drop content.
+                    while len(line) > max_chars:
+                        chunks.append(line[:max_chars])
+                        line = line[max_chars:]
+                    current = line
+        else:
+            current = para
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _twiml(reply_text: Optional[str]) -> str:
     """Wrap ``reply_text`` in a minimal TwiML envelope.
 
     When ``reply_text`` is ``None`` we return a bare ``<Response/>`` —
     Twilio reads that as "no reply" and silently accepts the message,
     which is what we want for non-upload chatter in a group.
+
+    Bodies over WhatsApp's 1600-char ceiling are split into multiple
+    ``<Message>`` verbs so the recap actually reaches the user instead
+    of being silently dropped by Twilio.
     """
     prolog = '<?xml version="1.0" encoding="UTF-8"?>'
     if reply_text is None:
         return f"{prolog}<Response/>"
-    return f"{prolog}<Response><Message>{xml_escape(reply_text)}</Message></Response>"
+    messages = "".join(
+        f"<Message>{xml_escape(chunk)}</Message>"
+        for chunk in _chunk_message(reply_text)
+    )
+    return f"{prolog}<Response>{messages}</Response>"
 
 
 @app.get("/health")
