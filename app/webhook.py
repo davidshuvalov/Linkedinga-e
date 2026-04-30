@@ -421,6 +421,12 @@ def _partial_peek_recap(
         lock_aggregates=True,
     ).rstrip()
     missing = set(enabled_games) - played
+    # ``body`` should always contain at least the header + the played
+    # games' rankings, but if it ever degraded to whitespace the f-string
+    # below would emit a leading double-newline (looks blank in WhatsApp
+    # for some clients). Lead with a friendly header instead.
+    if not body.strip():
+        body = f"Daily recap — {today.strftime('%a %d %b %Y')}"
     return (
         f"{body}\n\n"
         f"Still to play: {_pretty_game_list(missing)}\n"
@@ -481,6 +487,19 @@ def _handle_recap(
         repo, settings, day,
         include_missing_today_nag=(day == today),
     )
+    # render_daily always returns at least a header line; a blank body
+    # would silently emit ``<Message></Message>`` and the user would
+    # see no reply at all in WhatsApp. Fall back to a clear message
+    # so the symptom is at least diagnosable rather than ghostly.
+    if not body or not body.strip():
+        import logging
+
+        logging.getLogger(__name__).error(
+            "render_daily returned empty body for day=%s — "
+            "from_=%s, enabled_games=%s",
+            day, from_, sorted(settings.enabled_games),
+        )
+        return "Couldn't render the recap right now — try again in a moment."
     return body
 
 
