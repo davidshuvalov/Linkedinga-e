@@ -2480,3 +2480,131 @@ class TestNoPeekGate:
         )
         assert "No peeking" not in reply
         assert "Bob" in reply
+
+
+# ---------------------------------------------------------------------------
+# End-to-end submit-then-recap regression
+# ---------------------------------------------------------------------------
+
+
+class TestRecapAfterSubmitFlow:
+    """End-to-end regression for the bug "after you submit today's
+    scores you cannot use the prompts recap or today. It outputs nothing".
+
+    Earlier no-peek tests reach into the repo with seed helpers; these
+    drive everything through ``handle_inbound`` so the score-insert
+    path, the early-fire recap hook, and the recap-command path all
+    run for real, mirroring production wiring (``enabled_games``
+    parameter + ``expected_puzzle_no`` validator)."""
+
+    def _puzzle_no(self, game):
+        from app.puzzles import expected_puzzle_no
+        return expected_puzzle_no(game, NOW)
+
+    def _share_for(self, game):
+        """Realistic LinkedIn share-text for the puzzle LinkedIn would
+        currently be serving at NOW. Uses the raw multi-line shape the
+        parsers verify against (verified 2026-04 in parsers.py)."""
+        pno = self._puzzle_no(game)
+        if game == "queens":
+            return f"Queens #{pno}\n0:10 👑\nlnkd.in/queens."
+        if game == "tango":
+            return f"Tango #{pno}\n0:15 🌗\nlnkd.in/tango."
+        if game == "zip":
+            return f"Zip #{pno}\n0:20 🏁\nlnkd.in/zip."
+        if game == "patches":
+            return f"Patches #{pno} | 0:25 🧶\nWith no hints\nlnkd.in/patches."
+        if game == "mini_sudoku":
+            return (
+                f"Mini Sudoku #{pno} | 0:30 ✏️\n"
+                "The classic game, made mini.\n"
+                "lnkd.in/minisudoku."
+            )
+        raise AssertionError(f"unknown game {game!r}")
+
+    def _submit(self, repo, settings, game, *, sender, name):
+        from app.puzzles import expected_puzzle_no
+        return handle_inbound(
+            repo,
+            from_=sender,
+            body=self._share_for(game),
+            profile_name=name,
+            now=NOW,
+            enabled_games=settings.enabled_games,
+            expected_puzzle_no=expected_puzzle_no,
+            settings=settings,
+        )
+
+    def _ask(self, repo, settings, command, *, sender, name):
+        from app.puzzles import expected_puzzle_no
+        return handle_inbound(
+            repo,
+            from_=sender,
+            body=command,
+            profile_name=name,
+            now=NOW,
+            enabled_games=settings.enabled_games,
+            expected_puzzle_no=expected_puzzle_no,
+            settings=settings,
+        )
+
+    def test_recap_after_submitting_all_today_returns_full_recap(self, repo):
+        # Submit every enabled game via handle_inbound, then confirm
+        # both `recap` and `today` produce the full daily-recap shape.
+        # The previous regression: this path returned an empty reply.
+        settings = _settings_with_default_games()
+        sender = "whatsapp:+61400000001"
+        for game in sorted(settings.enabled_games):
+            ack = self._submit(repo, settings, game, sender=sender, name="Alice")
+            assert ack and "Got it" in ack, (game, ack)
+
+        for command in ("recap", "today"):
+            reply = self._ask(
+                repo, settings, command, sender=sender, name="Alice"
+            )
+            assert reply, f"empty reply for `{command}` after full submit"
+            assert reply.strip(), f"whitespace-only reply for `{command}`"
+            assert "No peeking" not in reply
+            assert "Daily recap" in reply
+            # Per-game block must be there.
+            assert "Queens" in reply
+            assert "Tango" in reply
+
+    def test_today_after_partial_submit_returns_partial_recap(self, repo):
+        # Submit a partial slate, then confirm `recap` / `today` aren't
+        # silent — they must return the partial-peek shape with the
+        # "Still to play" tail.
+        settings = _settings_with_default_games()
+        sender = "whatsapp:+61400000001"
+        for game in ("queens", "tango"):
+            ack = self._submit(repo, settings, game, sender=sender, name="Alice")
+            assert ack and "Got it" in ack
+
+        for command in ("recap", "today"):
+            reply = self._ask(
+                repo, settings, command, sender=sender, name="Alice"
+            )
+            assert reply, f"empty reply for `{command}` after partial submit"
+            assert reply.strip()
+            assert "Daily recap" in reply
+            assert "Queens" in reply
+            assert "Tango" in reply
+            # Aggregate blocks suppressed; tail nudges the user toward
+            # unlocking the rest.
+            body_part = reply.split("Still to play:")[0]
+            assert "Week so far" not in body_part
+            assert "Still to play" in reply
+            assert "Submit those to unlock" in reply
+
+    def test_today_before_any_submit_returns_no_peek(self, repo):
+        # Sanity check: with zero submissions today, the gate triggers
+        # the no-peek reply (non-empty by design).
+        settings = _settings_with_default_games()
+        sender = "whatsapp:+61400000001"
+        for command in ("recap", "today"):
+            reply = self._ask(
+                repo, settings, command, sender=sender, name="Alice"
+            )
+            assert reply, f"empty reply for `{command}` pre-submit"
+            assert "No peeking" in reply
+            assert "Today's games:" in reply
