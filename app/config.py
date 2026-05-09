@@ -29,6 +29,7 @@ class Settings:
     twilio_auth_token: str
     twilio_whatsapp_from: str
     twilio_recap_to: str
+    twilio_status_callback_url: str
     supabase_url: str
     supabase_key: str
     timezone_name: str
@@ -101,6 +102,7 @@ def load_settings() -> Settings:
         twilio_auth_token=_env("TWILIO_AUTH_TOKEN"),
         twilio_whatsapp_from=_env("TWILIO_WHATSAPP_FROM"),
         twilio_recap_to=_env("TWILIO_RECAP_TO"),
+        twilio_status_callback_url=_env("TWILIO_STATUS_CALLBACK_URL"),
         supabase_url=supabase_url,
         supabase_key=_env("SUPABASE_KEY"),
         timezone_name=_env("APP_TIMEZONE", "Australia/Sydney"),

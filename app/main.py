@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
-from xml.sax.saxutils import escape as xml_escape
+from xml.sax.saxutils import escape as xml_escape, quoteattr as xml_quoteattr
 
 from fastapi import Depends, FastAPI, Form, Response
 
@@ -297,7 +297,9 @@ def _chunk_message(body: str, max_chars: int = _MAX_MESSAGE_CHARS) -> list[str]:
     return chunks
 
 
-def _twiml(reply_text: Optional[str]) -> str:
+def _twiml(
+    reply_text: Optional[str], status_callback_url: Optional[str] = None
+) -> str:
     """Wrap ``reply_text`` in a minimal TwiML envelope.
 
     When ``reply_text`` is ``None`` we return a bare ``<Response/>`` —
@@ -307,12 +309,23 @@ def _twiml(reply_text: Optional[str]) -> str:
     Bodies over WhatsApp's 1600-char ceiling are split into multiple
     ``<Message>`` verbs so the recap actually reaches the user instead
     of being silently dropped by Twilio.
+
+    When ``status_callback_url`` is set, every ``<Message>`` gets a
+    ``statusCallback`` attribute pointing at it. Twilio POSTs the
+    delivery status (queued / sent / delivered / failed / undelivered)
+    of the outbound reply to that URL, which lets the bot log carrier
+    rejections (e.g. WhatsApp 63012) instead of being completely blind
+    to them — TwiML replies are otherwise fire-and-forget.
     """
     prolog = '<?xml version="1.0" encoding="UTF-8"?>'
     if reply_text is None:
         return f"{prolog}<Response/>"
+    if status_callback_url:
+        attr = f" statusCallback={xml_quoteattr(status_callback_url)}"
+    else:
+        attr = ""
     messages = "".join(
-        f"<Message>{xml_escape(chunk)}</Message>"
+        f"<Message{attr}>{xml_escape(chunk)}</Message>"
         for chunk in _chunk_message(reply_text)
     )
     return f"{prolog}<Response>{messages}</Response>"
@@ -363,7 +376,52 @@ async def webhook(
             (body or "")[:200],
         )
         reply = _ERROR_REPLY
-    return Response(content=_twiml(reply), media_type="application/xml")
+    return Response(
+        content=_twiml(reply, settings.twilio_status_callback_url or None),
+        media_type="application/xml",
+    )
+
+
+# Twilio statuses we treat as terminal failures worth logging at WARN.
+# Everything else (queued, sending, sent, delivered, read, ...) is just
+# normal lifecycle noise.
+_FAILURE_STATUSES = frozenset({"failed", "undelivered"})
+
+
+@app.post("/twilio-status")
+async def twilio_status_callback(
+    message_sid: str = Form("", alias="MessageSid"),
+    message_status: str = Form("", alias="MessageStatus"),
+    error_code: str = Form("", alias="ErrorCode"),
+    error_message: str = Form("", alias="ErrorMessage"),
+    to: str = Form("", alias="To"),
+    from_: str = Form("", alias="From"),
+) -> Response:
+    """Receive Twilio outbound-message status updates.
+
+    Wired up via the ``statusCallback`` attribute on every ``<Message>``
+    verb in :func:`_twiml`. Twilio POSTs here for each lifecycle
+    transition (queued → sent → delivered, or → failed / undelivered).
+    We log only the terminal failures — those are the ones a human
+    needs to see (typically WhatsApp 63012 "Channel provider returned
+    an internal service error", which surfaces here even though the
+    TwiML response itself returned 200).
+
+    Always returns 200 with an empty body — Twilio retries on non-2xx
+    and the only thing we'd be doing on retry is a duplicate log line.
+    """
+    if message_status in _FAILURE_STATUSES:
+        logger.warning(
+            "Twilio outbound failed: sid=%s status=%s error=%s msg=%r "
+            "to=%s from=%s",
+            message_sid,
+            message_status,
+            error_code or "(none)",
+            error_message or "",
+            to,
+            from_,
+        )
+    return Response(status_code=200)
 
 
 @app.exception_handler(Exception)
