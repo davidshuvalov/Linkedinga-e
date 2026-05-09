@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import date
 
 from app.db import InMemoryRepository, Player, ScoreRow
+
+from .conftest import TestRepo
 from app.notifications import (
     _detect_personal_history_trigger,
     gather_submission_triggers,
@@ -162,59 +164,59 @@ class TestGatherSubmissionTriggers:
         # all bow out (they need a comparison point); ``first_today``
         # is the only trigger that legitimately fires for a brand-
         # new game in a brand-new group.
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 30)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=30, today=TUE, prior_raws=[],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert kinds == {"first_today"}
 
     def test_personal_pb_fires(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice_id = self._seed(repo, 1, "Alice", "queens", 713, 25, day=MON)
         self._seed(repo, 1, "Alice", "queens", 714, 20)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[25],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "new_pb" in kinds
 
     def test_best_of_day_fires_when_player_beats_field(self):
         # Bob already played today (30s), Alice just put down 20s.
         # Alice's submission is best of today.
-        repo = InMemoryRepository()
+        repo = TestRepo()
         self._seed(repo, 2, "Bob", "queens", 714, 30)
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "best_of_day" in kinds
 
     def test_worst_of_day_fires_when_player_lags_field(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         self._seed(repo, 2, "Bob", "queens", 714, 30)
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 90)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=90, today=TUE, prior_raws=[],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "worst_of_day" in kinds
 
     def test_no_today_extreme_when_alone(self):
         # Only Alice has played queens today; "best of day" doesn't
         # fire because there's no field to beat.
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "best_of_day" not in kinds
         assert "worst_of_day" not in kinds
@@ -223,13 +225,13 @@ class TestGatherSubmissionTriggers:
         # Bob held the all-time record at 30s; Alice just hit 20s.
         # Alice's submission is the new all-time record; Bob's 30s
         # is the runner-up that gets credited as the prior holder.
-        repo = InMemoryRepository()
+        repo = TestRepo()
         self._seed(repo, 2, "Bob", "queens", 700, 30, day=MON)
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "all_time_record" in kinds
         record = next(t for t in triggers if t.kind == "all_time_record")
@@ -237,13 +239,13 @@ class TestGatherSubmissionTriggers:
 
     def test_all_time_anti_record_fires(self):
         # Bob's 30s was the all-time worst; Alice now puts up 90s.
-        repo = InMemoryRepository()
+        repo = TestRepo()
         self._seed(repo, 2, "Bob", "queens", 700, 30, day=MON)
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 90)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=90, today=TUE, prior_raws=[],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "all_time_anti_record" in kinds
 
@@ -251,7 +253,7 @@ class TestGatherSubmissionTriggers:
         # Alice's 20s is BOTH her PB AND best of today AND a new
         # all-time record. The gatherer should return all three,
         # leaving the random pick to the caller.
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice_id = self._seed(
             repo, 1, "Alice", "queens", 700, 30, day=MON
         )  # Alice's old PB
@@ -260,7 +262,7 @@ class TestGatherSubmissionTriggers:
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[30],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "new_pb" in kinds
         assert "best_of_day" in kinds
@@ -284,7 +286,7 @@ class TestPhaseDTriggers:
         return player.id
 
     def test_dow_pb_fires_on_matching_weekday(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         # Tuesday Apr 14, prior Tuesdays: Apr 7 with 30s.
         prev_tue = date(2026, 4, 7)
         self._seed(repo, 1, "Alice", "queens", 700, 30, day=prev_tue)
@@ -292,7 +294,7 @@ class TestPhaseDTriggers:
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[30],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "dow_pb" in kinds
         dow = next(t for t in triggers if t.kind == "dow_pb")
@@ -302,30 +304,30 @@ class TestPhaseDTriggers:
         # Played on a Monday; today is Tuesday — no prior Tuesday to
         # compare against. dow_pb should not fire (year_pb / new_pb
         # might still, that's fine).
-        repo = InMemoryRepository()
+        repo = TestRepo()
         self._seed(repo, 1, "Alice", "queens", 700, 30, day=MON)
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20, day=TUE)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[30],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "dow_pb" not in kinds
 
     def test_dow_worst_fires(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         prev_tue = date(2026, 4, 7)
         self._seed(repo, 1, "Alice", "queens", 700, 30, day=prev_tue)
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 80, day=TUE)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=80, today=TUE, prior_raws=[30],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "dow_worst" in kinds
 
     def test_year_pb_fires(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         # Earlier in the same year on a different weekday so the
         # year detector gets to run alone (not co-firing with
         # dow_pb).
@@ -334,7 +336,7 @@ class TestPhaseDTriggers:
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[30],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "year_pb" in kinds
         year_t = next(t for t in triggers if t.kind == "year_pb")
@@ -342,34 +344,34 @@ class TestPhaseDTriggers:
 
     def test_year_pb_silent_when_no_prior_in_year(self):
         # First-ever submission — no prior in the year to PB against.
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20, day=TUE)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "year_pb" not in kinds
 
     def test_first_today_fires_when_only_score(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20, day=TUE)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "first_today" in kinds
 
     def test_first_today_silent_when_field_exists(self):
         # Bob already played; Alice's submission isn't the first.
-        repo = InMemoryRepository()
+        repo = TestRepo()
         self._seed(repo, 2, "Bob", "queens", 714, 30, day=TUE)
         alice_id = self._seed(repo, 1, "Alice", "queens", 714, 20, day=TUE)
         triggers = gather_submission_triggers(
             repo, player_id=alice_id, game="queens",
             new_raw=20, today=TUE, prior_raws=[],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "first_today" not in kinds
 
@@ -382,7 +384,7 @@ class TestNoMilestoneCap:
     day."""
 
     def test_many_triggers_same_day_all_return_a_body(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
         bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
         # Bob plays first on each game so Alice's faster follow-up
@@ -401,7 +403,7 @@ class TestNoMilestoneCap:
             bodies.append(maybe_notify_personal_best(
                 repo, None, player=alice, game=game,
                 new_raw=20, today=TUE,
-            ))
+             group_id=repo.default_group.id,))
         assert all(b is not None for b in bodies), (
             f"some submissions returned no body: {bodies}"
         )
@@ -468,7 +470,7 @@ class TestLifetimePbTrumpsWeekday:
         # and an even slower Wednesday (40s). Today's 20s is BOTH a
         # new lifetime PB and a Tuesday PB. The picker should headline
         # the lifetime PB (drop the dow_pb candidate).
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
         bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
         repo.insert_score(
@@ -492,7 +494,7 @@ class TestLifetimePbTrumpsWeekday:
         triggers = gather_submission_triggers(
             repo, player_id=alice.id, game="queens",
             new_raw=20, today=TUE, prior_raws=[30, 40],
-        )
+         group_id=repo.default_group.id,)
         kinds = {t.kind for t in triggers}
         assert "new_pb" in kinds and "dow_pb" in kinds, (
             f"setup-bug: expected both new_pb and dow_pb, got {kinds}"
@@ -502,7 +504,7 @@ class TestLifetimePbTrumpsWeekday:
             body = maybe_notify_personal_best(
                 repo, None, player=alice, game="queens",
                 new_raw=20, today=TUE,
-            )
+             group_id=repo.default_group.id,)
             assert body is not None
             assert "Tuesday" not in body, f"dow_pb leaked into headline: {body}"
 
@@ -513,7 +515,7 @@ class TestMaybeNotifyPersonalBestIntegration:
     when at least one fires."""
 
     def test_returns_body_when_any_trigger_fires(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
         bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
         # Bob's 30s is the prior all-time fastest; Alice just hit 20s.
@@ -531,7 +533,7 @@ class TestMaybeNotifyPersonalBestIntegration:
             game="queens",
             new_raw=20,
             today=TUE,
-        )
+         group_id=repo.default_group.id,)
         assert body is not None
         assert "Alice" in body
         assert "Queens" in body
@@ -542,7 +544,7 @@ class TestMaybeNotifyPersonalBestIntegration:
         # day's best, not the day's worst (other players bracket
         # Alice today), not an all-time record, not first-of-day,
         # not a Tuesday extreme (prior Tuesday brackets her 40).
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
         bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
         charlie = repo.get_or_create_player("whatsapp:+61400000003", "Charlie")
@@ -584,7 +586,7 @@ class TestMaybeNotifyPersonalBestIntegration:
             game="queens",
             new_raw=40,
             today=TUE,
-        )
+         group_id=repo.default_group.id,)
         assert body is None
 
 
@@ -670,7 +672,7 @@ class TestDayCompleteSummary:
 
 class TestMaybeNotifyDayComplete:
     def test_fires_when_every_game_done(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+1", "Alice")
         repo.insert_score(
             player_id=alice.id, game="queens", puzzle_no=714,
@@ -686,12 +688,12 @@ class TestMaybeNotifyDayComplete:
             player=alice,
             today=TUE,
             enabled_games=enabled,
-        )
+         group_id=repo.default_group.id,)
         assert body is not None
         assert "Alice" in body
 
     def test_silent_when_games_missing(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+1", "Alice")
         repo.insert_score(
             player_id=alice.id, game="queens", puzzle_no=714,
@@ -704,16 +706,16 @@ class TestMaybeNotifyDayComplete:
             player=alice,
             today=TUE,
             enabled_games=enabled,
-        )
+         group_id=repo.default_group.id,)
         assert body is None
 
     def test_silent_when_no_enabled_games(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+1", "Alice")
         body = maybe_notify_day_complete(
             repo, None,
             player=alice,
             today=TUE,
             enabled_games=frozenset(),
-        )
+         group_id=repo.default_group.id,)
         assert body is None

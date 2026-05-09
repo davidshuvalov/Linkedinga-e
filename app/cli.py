@@ -47,10 +47,16 @@ def _seed_demo(repo: InMemoryRepository, *, today: Optional[date] = None) -> Non
     today = today or date.today()
     yesterday = today - timedelta(days=1)
 
+    # All demo players share the default group so the recap renderer
+    # has a single leaderboard to compute.
+    group = repo.get_or_create_group("default")
+
     alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
     bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
     charlie = repo.get_or_create_player("whatsapp:+61400000003", "Charlie")
     dee = repo.get_or_create_player("whatsapp:+61400000004", "Dee")
+    for p in (alice, bob, charlie, dee):
+        repo.set_player_group(p.id, group.id)
 
     fakes = [
         # Today — mix of games, one tie, pinpoint + mini_sudoku + patches
@@ -76,6 +82,7 @@ def _seed_demo(repo: InMemoryRepository, *, today: Optional[date] = None) -> Non
     for pid, game, pno, pdate, raw in fakes:
         repo.insert_score(
             player_id=pid,
+            group_id=group.id,
             game=game,
             puzzle_no=pno,
             puzzle_date=pdate,
@@ -92,14 +99,35 @@ def _get_repo_maybe_seeded(args: argparse.Namespace) -> Repository:
     return _build_repository()
 
 
+def _resolve_cli_group(repo: Repository) -> int:
+    """Pick the group the CLI should preview against. Production CLI
+    use is for the live friend group, which is on the ``default`` group
+    after the migration. Falls back to the first group if ``default``
+    isn't present (e.g. a fresh deployment that named its first group
+    something else)."""
+    group = repo.find_group_by_name("default")
+    if group is not None:
+        return group.id
+    groups = repo.list_groups()
+    if not groups:
+        raise SystemExit(
+            "No groups configured — run db/schema.sql or send `group <name>` "
+            "via the webhook before previewing."
+        )
+    return groups[0].id
+
+
 def cmd_recap(args: argparse.Namespace) -> int:
     repo = _get_repo_maybe_seeded(args)
     settings = load_settings()
     target = date.fromisoformat(args.date) if args.date else date.today()
+    group_id = _resolve_cli_group(repo)
     # daily_recap now takes the WHOLE week's scores so it can render the
     # running "Week so far" leaderboard at the bottom.
     monday, sunday = week_bounds(target)
-    scores = repo.list_scores(date_from=monday, date_to=sunday)
+    scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
     sys.stdout.write(daily_recap(target, scores, settings.enabled_games))
     return 0
 
@@ -108,8 +136,9 @@ def cmd_wrap(args: argparse.Namespace) -> int:
     repo = _get_repo_maybe_seeded(args)
     settings = load_settings()
     ref = date.fromisoformat(args.week_of) if args.week_of else date.today()
+    group_id = _resolve_cli_group(repo)
     start, end = week_bounds(ref)
-    scores = repo.list_scores(date_from=start, date_to=end)
+    scores = repo.list_scores(date_from=start, date_to=end, group_id=group_id)
     sys.stdout.write(weekly_wrap(start, end, scores, settings.enabled_games))
     return 0
 

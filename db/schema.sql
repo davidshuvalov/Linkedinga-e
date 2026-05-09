@@ -5,6 +5,28 @@
 --
 -- Safe to re-run: every statement uses IF NOT EXISTS.
 
+-- ---------- groups ----------
+-- A group is a self-contained leaderboard. Players sign up to a
+-- group via `group <name>` (creates if new, joins if existing); their
+-- scores, recaps, and per-day taunts are scoped to that group.
+-- ``name_lower`` is the case-insensitive uniqueness key (computed
+-- app-side as lower(name)) so members can spell the group however
+-- they like in DMs and still hit the same row.
+create table if not exists groups (
+    id          bigserial primary key,
+    name        text        not null,
+    name_lower  text        not null unique,
+    recap_to    text,
+    created_at  timestamptz not null default now()
+);
+
+-- Seed a default group so existing players + scores have somewhere
+-- to land during the backfill below. Idempotent — re-running is a
+-- no-op once the row exists.
+insert into groups (name, name_lower)
+values ('default', 'default')
+on conflict (name_lower) do nothing;
+
 -- ---------- players ----------
 create table if not exists players (
     id           bigserial primary key,
@@ -19,6 +41,21 @@ create table if not exists players (
 alter table players
     add column if not exists notifications_enabled boolean
     not null default true;
+
+-- ``group_id`` ties a player to their current group. Stays nullable
+-- forever: a brand-new WhatsApp number creates a ``players`` row
+-- before they've run ``group <name>``, and the webhook's onboarding
+-- gate uses NULL as the "needs to pick a group first" signal.
+alter table players
+    add column if not exists group_id bigint references groups(id) on delete restrict;
+
+-- Backfill any existing player rows into the default group so the
+-- live friend group keeps DMing the bot without re-onboarding.
+update players
+set group_id = (select id from groups where name_lower = 'default')
+where group_id is null;
+
+create index if not exists players_group_id_idx on players (group_id);
 
 -- ---------- scores ----------
 -- raw_score convention:
@@ -55,6 +92,28 @@ alter table scores add constraint scores_game_check
 create index if not exists scores_puzzle_date_idx on scores (puzzle_date);
 create index if not exists scores_game_date_idx  on scores (game, puzzle_date);
 create index if not exists scores_player_id_idx  on scores (player_id);
+
+-- ``group_id`` scopes every leaderboard / recap / PB query to a single
+-- group. Added nullable so existing rows can be backfilled, then
+-- locked NOT NULL once everyone's on the default group. The unique
+-- (player_id, game, puzzle_no) constraint above is intentionally
+-- *not* group-scoped — a player can't legitimately submit the same
+-- puzzle twice even if they switch groups.
+alter table scores
+    add column if not exists group_id bigint references groups(id) on delete restrict;
+
+update scores
+set group_id = (select id from groups where name_lower = 'default')
+where group_id is null;
+
+alter table scores alter column group_id set not null;
+
+create index if not exists scores_group_date_idx
+    on scores (group_id, puzzle_date);
+create index if not exists scores_group_game_date_idx
+    on scores (group_id, game, puzzle_date);
+create index if not exists scores_group_game_score_idx
+    on scores (group_id, game, raw_score);
 
 -- ---------- unparsed_messages ----------
 -- Stash anything that looked like a share but failed parsing, for debugging
@@ -102,3 +161,27 @@ create table if not exists recap_log (
 alter table recap_log drop constraint if exists recap_log_recap_type_check;
 
 create index if not exists recap_log_date_idx on recap_log (recap_date);
+
+-- Group-scope ``recap_log`` so per-group recaps don't collide on the
+-- (recap_date, recap_type) unique. Backfill to the default group,
+-- lock NOT NULL, drop the legacy unique constraint, replace with a
+-- (group_id, recap_date, recap_type) unique.
+alter table recap_log
+    add column if not exists group_id bigint references groups(id) on delete restrict;
+
+update recap_log
+set group_id = (select id from groups where name_lower = 'default')
+where group_id is null;
+
+alter table recap_log alter column group_id set not null;
+
+alter table recap_log
+    drop constraint if exists recap_log_recap_date_recap_type_key;
+alter table recap_log
+    drop constraint if exists recap_log_group_date_type_key;
+alter table recap_log
+    add constraint recap_log_group_date_type_key
+    unique (group_id, recap_date, recap_type);
+
+create index if not exists recap_log_group_date_idx
+    on recap_log (group_id, recap_date);

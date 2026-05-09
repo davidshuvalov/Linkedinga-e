@@ -18,6 +18,8 @@ import pytest
 from app.cli import _seed_demo
 from app.config import Settings
 from app.db import InMemoryRepository
+
+from .conftest import TestRepo
 from app.jobs import (
     PRE_RESET_STAGES,
     maybe_fire_early_recap,
@@ -50,7 +52,7 @@ SETTINGS = Settings(
 
 @pytest.fixture
 def seeded_repo() -> InMemoryRepository:
-    repo = InMemoryRepository()
+    repo = TestRepo()
     _seed_demo(repo, today=date(2026, 4, 14))
     return repo
 
@@ -105,7 +107,7 @@ class TestRunDailyRecap:
 
     @patch("app.jobs.send_recap")
     def test_empty_day_still_sends(self, mock_send):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 1, 2, 0, 0, tzinfo=LA)
         body = run_daily_recap(repo, SETTINGS, now=now)
 
@@ -170,7 +172,7 @@ class TestPeriodEndRecapBlocks:
 
     def test_last_day_of_month_appends_month_totals(self):
         # Seed a full April of scores; close out Apr 30 (Thu).
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+1", "Alice")
         for d in (date(2026, 4, 1), date(2026, 4, 15), date(2026, 4, 30)):
             repo.insert_score(
@@ -178,28 +180,28 @@ class TestPeriodEndRecapBlocks:
                 puzzle_no=700 + (d - date(2026, 4, 1)).days,
                 puzzle_date=d, raw_score=30, share_text="x",
             )
-        body, _ = render_daily(repo, SETTINGS, date(2026, 4, 30))
+        body, _ = render_daily(repo, SETTINGS, date(2026, 4, 30), group_id=repo.default_group.id)
         assert "Month totals — Apr 2026" in body
 
     def test_non_month_end_does_not_append(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+1", "Alice")
         repo.insert_score(
             player_id=alice.id, game="queens", puzzle_no=714,
             puzzle_date=date(2026, 4, 14), raw_score=30, share_text="x",
         )
-        body, _ = render_daily(repo, SETTINGS, date(2026, 4, 14))
+        body, _ = render_daily(repo, SETTINGS, date(2026, 4, 14), group_id=repo.default_group.id)
         assert "Month totals" not in body
         assert "Year totals" not in body
 
     def test_dec_31_appends_both_month_and_year(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+1", "Alice")
         repo.insert_score(
             player_id=alice.id, game="queens", puzzle_no=999,
             puzzle_date=date(2026, 12, 31), raw_score=30, share_text="x",
         )
-        body, _ = render_daily(repo, SETTINGS, date(2026, 12, 31))
+        body, _ = render_daily(repo, SETTINGS, date(2026, 12, 31), group_id=repo.default_group.id)
         assert "Month totals — Dec 2026" in body
         assert "Year totals — 2026" in body
 
@@ -209,21 +211,30 @@ class TestRenderHelpers:
     used by the webhook ``recap`` and ``wrap`` commands."""
 
     def test_render_daily_for_midweek(self, seeded_repo):
-        body, dm_targets = render_daily(seeded_repo, SETTINGS, date(2026, 4, 14))
+        body, dm_targets = render_daily(
+            seeded_repo, SETTINGS, date(2026, 4, 14),
+            group_id=seeded_repo.default_group.id,
+        )
         assert "Daily recap — Tue 14 Apr 2026" in body
         assert "Week so far" in body
         assert dm_targets  # seeded data has active players this week
 
     def test_render_daily_for_sunday_yields_wrap(self, seeded_repo):
         # Sunday is the magic day where render_daily switches format.
-        body, _ = render_daily(seeded_repo, SETTINGS, date(2026, 4, 19))
+        body, _ = render_daily(
+            seeded_repo, SETTINGS, date(2026, 4, 19),
+            group_id=seeded_repo.default_group.id,
+        )
         assert "Weekly wrap" in body
         assert "Game winners" in body
 
     def test_render_wrap_works_midweek(self, seeded_repo):
         # Lets a user pull the wrap snapshot from any day in the week,
         # showing partial leaderboard / prizes for the in-progress week.
-        body, _ = render_wrap(seeded_repo, SETTINGS, date(2026, 4, 14))
+        body, _ = render_wrap(
+            seeded_repo, SETTINGS, date(2026, 4, 14),
+            group_id=seeded_repo.default_group.id,
+        )
         assert "Weekly wrap" in body
         assert "Mon 13 Apr to Sun 19 Apr 2026" in body
 
@@ -266,35 +277,35 @@ class TestMaybeFireEarlyRecap:
     game. Marks ``recap_log`` so the cron knows to skip."""
 
     def test_does_nothing_when_no_active_players(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens"})
         now = datetime(2026, 4, 15, 18, 0, tzinfo=SYDNEY)
-        result = maybe_fire_early_recap(repo, settings, now=now)
+        result = maybe_fire_early_recap(repo, settings, now=now, group_id=repo.default_group.id)
         assert result is None
 
     @patch("app.jobs.send_recap")
     def test_does_not_fire_when_someone_still_owes_a_game(self, mock_send):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         today = date(2026, 4, 14)
         # Alice played both, Bob only played queens — Bob still owes tango.
         _seed(repo, 1, "Alice", today, ["queens", "tango"])
         _seed(repo, 2, "Bob",   today, ["queens"])
         settings = _make_settings({"queens", "tango"})
         now = datetime(2026, 4, 14, 12, 0, tzinfo=LA)
-        assert maybe_fire_early_recap(repo, settings, now=now) is None
+        assert maybe_fire_early_recap(repo, settings, now=now, group_id=repo.default_group.id) is None
         mock_send.assert_not_called()
         assert not repo.has_recap_been_sent(today, "daily")
 
     @patch("app.jobs.send_recap")
     def test_fires_when_everyone_done_and_marks_sent(self, mock_send):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         today = date(2026, 4, 14)
         _seed(repo, 1, "Alice", today, ["queens", "tango"])
         _seed(repo, 2, "Bob",   today, ["queens", "tango"])
         settings = _make_settings({"queens", "tango"})
         now = datetime(2026, 4, 14, 12, 0, tzinfo=LA)
 
-        body = maybe_fire_early_recap(repo, settings, now=now)
+        body = maybe_fire_early_recap(repo, settings, now=now, group_id=repo.default_group.id)
         assert body is not None
         assert "Daily recap — Tue 14 Apr 2026" in body
         mock_send.assert_called_once()
@@ -302,27 +313,27 @@ class TestMaybeFireEarlyRecap:
 
     @patch("app.jobs.send_recap")
     def test_does_not_double_fire(self, mock_send):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         today = date(2026, 4, 14)
         _seed(repo, 1, "Alice", today, ["queens"])
         settings = _make_settings({"queens"})
         now = datetime(2026, 4, 14, 12, 0, tzinfo=LA)
 
-        first = maybe_fire_early_recap(repo, settings, now=now)
-        second = maybe_fire_early_recap(repo, settings, now=now)
+        first = maybe_fire_early_recap(repo, settings, now=now, group_id=repo.default_group.id)
+        second = maybe_fire_early_recap(repo, settings, now=now, group_id=repo.default_group.id)
         assert first is not None
         assert second is None  # already sent
         assert mock_send.call_count == 1
 
     @patch("app.jobs.send_recap")
     def test_sunday_completion_fires_weekly_wrap(self, mock_send):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         sunday = date(2026, 4, 19)
         _seed(repo, 1, "Alice", sunday, ["queens"])
         settings = _make_settings({"queens"})
         now = datetime(2026, 4, 19, 12, 0, tzinfo=LA)
 
-        body = maybe_fire_early_recap(repo, settings, now=now)
+        body = maybe_fire_early_recap(repo, settings, now=now, group_id=repo.default_group.id)
         assert body is not None
         assert "Weekly wrap" in body
         assert repo.has_recap_been_sent(sunday, "weekly")
@@ -337,7 +348,7 @@ class TestRunDailyRecapSkipsAfterEarlyFire:
 
     @patch("app.jobs.send_recap")
     def test_cron_skips_when_recap_already_sent(self, mock_send):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         target_day = date(2026, 4, 14)
         repo.mark_recap_sent(target_day, "daily")
         # Cron fires at LA midnight on Apr 15, intends to recap Apr 14.
@@ -358,7 +369,7 @@ class TestMorningNudge:
 
     @patch("app.jobs.send_dm")
     def test_no_active_players_does_nothing(self, mock_dm):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens", "tango"})
         now = datetime(2026, 4, 14, 8, 30, tzinfo=SYDNEY)
         nudged = run_morning_nudge(repo, settings, now=now)
@@ -373,7 +384,7 @@ class TestMorningNudge:
         # before — the puzzle hasn't rolled yet), so seed against
         # that date.
         from app.puzzles import la_date
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 14, 8, 30, tzinfo=SYDNEY)
         today_la = la_date(now)
         _seed(repo, 1, "Alice", today_la, ["queens", "tango"])
@@ -389,7 +400,7 @@ class TestMorningNudge:
         # both enabled games.
         from app.puzzles import la_date
         mock_dm.return_value = True
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 14, 8, 30, tzinfo=SYDNEY)
         today_la = la_date(now)
         prev_la = today_la - timedelta(days=1)
@@ -406,7 +417,7 @@ class TestMorningNudge:
     @patch("app.jobs.send_dm")
     def test_skips_opted_out_players(self, mock_dm):
         from app.puzzles import la_date
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 14, 8, 30, tzinfo=SYDNEY)
         prev_la = la_date(now) - timedelta(days=1)
         bob = repo.get_or_create_player("whatsapp:+61400000001", "Bob")
@@ -424,7 +435,7 @@ class TestMorningNudge:
     def test_partial_progress_lists_only_missing_games(self, mock_dm):
         from app.puzzles import la_date
         mock_dm.return_value = True
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 14, 8, 30, tzinfo=SYDNEY)
         today_la = la_date(now)
         # Charlie played Queens today (LA), Tango still owed.
@@ -601,7 +612,7 @@ class TestPreResetWarning:
     @pytest.mark.parametrize("stage", PRE_RESET_STAGES)
     @patch("app.jobs.send_dm")
     def test_no_active_players_does_nothing(self, mock_dm, stage):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens", "tango"})
         now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
         warned = run_pre_reset_warning(repo, settings, stage=stage, now=now)
@@ -612,7 +623,7 @@ class TestPreResetWarning:
     @patch("app.jobs.send_dm")
     def test_skips_player_already_done(self, mock_dm, stage):
         from app.puzzles import la_date
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
         today_la = la_date(now)
         _seed(repo, 1, "Alice", today_la, ["queens", "tango"])
@@ -626,7 +637,7 @@ class TestPreResetWarning:
     def test_warns_player_with_outstanding_games(self, mock_dm, stage):
         from app.puzzles import la_date
         mock_dm.return_value = True
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
         today_la = la_date(now)
         prev_la = today_la - timedelta(days=1)
@@ -645,7 +656,7 @@ class TestPreResetWarning:
     @patch("app.jobs.send_dm")
     def test_skips_opted_out_players(self, mock_dm, stage):
         from app.puzzles import la_date
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
         prev_la = la_date(now) - timedelta(days=1)
         bob = repo.get_or_create_player("whatsapp:+61400000001", "Bob")
@@ -664,7 +675,7 @@ class TestPreResetWarning:
     def test_lists_only_missing_games(self, mock_dm, stage):
         from app.puzzles import la_date
         mock_dm.return_value = True
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
         today_la = la_date(now)
         _seed(repo, 1, "Charlie", today_la, ["queens"])  # tango still owed
@@ -677,7 +688,7 @@ class TestPreResetWarning:
         assert "Queens" not in body
 
     def test_unknown_stage_raises(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens"})
         with pytest.raises(ValueError):
             run_pre_reset_warning(repo, settings, stage="bogus")
@@ -694,7 +705,7 @@ class TestPreResetWarning:
         bodies: dict = {}
         for stage in PRE_RESET_STAGES:
             mock_dm.reset_mock()
-            repo = InMemoryRepository()
+            repo = TestRepo()
             today_la = la_date(now)
             _seed(repo, 1, "Bob", today_la - timedelta(days=1), ["queens"])
             settings = _make_settings({"queens", "tango"})
@@ -717,7 +728,7 @@ class TestNewGamesAnnouncement:
 
     @patch("app.jobs.send_recap")
     def test_no_active_players_does_nothing(self, mock_recap):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens", "tango"})
         now = datetime(2026, 4, 15, 0, 1, tzinfo=LA)
         body = run_new_games_announcement(repo, settings, now=now)
@@ -727,7 +738,7 @@ class TestNewGamesAnnouncement:
     @patch("app.jobs.send_recap")
     def test_blasts_group_when_players_active(self, mock_recap):
         from app.puzzles import la_date
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 15, 0, 1, tzinfo=LA)
         today_la = la_date(now)
         _seed(repo, 1, "Bob", today_la - timedelta(days=1), ["queens"])
@@ -748,7 +759,7 @@ class TestNewGamesAnnouncement:
         of completion state — it announces the new puzzle drop, not
         the old day's outstanding work."""
         from app.puzzles import la_date
-        repo = InMemoryRepository()
+        repo = TestRepo()
         now = datetime(2026, 4, 15, 0, 1, tzinfo=LA)
         today_la = la_date(now)
         _seed(repo, 1, "Alice", today_la, ["queens", "tango"])
@@ -762,7 +773,7 @@ class TestNewGamesAnnouncement:
         """Two consecutive LA days should hit different templates so
         the group doesn't get the exact same blast every morning."""
         from app.puzzles import la_date
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens"})
         # Seed two players on different days so each LA day has
         # someone in the active window.
@@ -854,29 +865,29 @@ class TestChampionLoserDMs:
 
     @patch("app.jobs.send_dm")
     def test_silent_on_non_sundays(self, mock_dm):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens", "tango"})
         _seed(repo, 1, "Alice", self.TUE, ["queens", "tango"])
         _seed(repo, 2, "Bob",   self.TUE, ["queens", "tango"])
         # Tuesday — not a Sunday, should not fire.
-        sent = send_champion_loser_dms(repo, settings, self.TUE)
+        sent = send_champion_loser_dms(repo, settings, self.TUE, group_id=repo.default_group.id)
         assert sent == []
         mock_dm.assert_not_called()
 
     @patch("app.jobs.send_dm")
     def test_silent_with_solo_player(self, mock_dm):
         # One player alone can't be both champ and loser — skip.
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens"})
         _seed(repo, 1, "Alice", self.MON, ["queens"])
-        sent = send_champion_loser_dms(repo, settings, self.SUN)
+        sent = send_champion_loser_dms(repo, settings, self.SUN, group_id=repo.default_group.id)
         assert sent == []
         mock_dm.assert_not_called()
 
     @patch("app.jobs.send_dm")
     def test_dms_top_and_bottom_of_leaderboard(self, mock_dm):
         mock_dm.return_value = True
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens"})
         # Alice wins the week (lower raw_score = more points),
         # Charlie loses it.
@@ -901,7 +912,7 @@ class TestChampionLoserDMs:
             game="queens", puzzle_no=713,
             puzzle_date=self.MON, raw_score=30, share_text="x",
         )
-        sent = send_champion_loser_dms(repo, settings, self.SUN)
+        sent = send_champion_loser_dms(repo, settings, self.SUN, group_id=repo.default_group.id)
         # Alice (champion) and Charlie (loser) both get a DM.
         assert set(sent) == {
             "whatsapp:+61400000001",
@@ -919,7 +930,7 @@ class TestChampionLoserDMs:
     def test_skips_opted_out_winner(self, mock_dm):
         # If the champion has notifications off, only the loser gets a DM.
         mock_dm.return_value = True
-        repo = InMemoryRepository()
+        repo = TestRepo()
         settings = _make_settings({"queens"})
         alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
         bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
@@ -932,5 +943,75 @@ class TestChampionLoserDMs:
             puzzle_date=self.MON, raw_score=30, share_text="x",
         )
         repo.set_notifications_enabled(alice.id, False)
-        sent = send_champion_loser_dms(repo, settings, self.SUN)
+        sent = send_champion_loser_dms(repo, settings, self.SUN, group_id=repo.default_group.id)
         assert sent == ["whatsapp:+61400000002"]
+
+
+# ---------------------------------------------------------------------------
+# Multi-group fan-out for the cron entry points
+# ---------------------------------------------------------------------------
+
+
+class TestCronGroupFanOut:
+    """The cron entry points loop over every group in
+    :meth:`Repository.list_groups` so each group gets its own
+    recap / morning nudge. A failure in one group is logged and
+    doesn't disturb the others."""
+
+    def _two_group_repo(self, today_la):
+        from app.db import InMemoryRepository
+        repo = InMemoryRepository()
+        a = repo.get_or_create_group("ACrew")
+        b = repo.get_or_create_group("BCrew")
+        # One queens score per group on the closed LA day so each
+        # has something to recap.
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.set_player_group(alice.id, a.id)
+        repo.set_player_group(bob.id, b.id)
+        repo.insert_score(
+            player_id=alice.id, group_id=a.id, game="queens",
+            puzzle_no=714, puzzle_date=today_la, raw_score=10,
+            share_text="x",
+        )
+        repo.insert_score(
+            player_id=bob.id, group_id=b.id, game="queens",
+            puzzle_no=714, puzzle_date=today_la, raw_score=20,
+            share_text="x",
+        )
+        return repo, a, b
+
+    @patch("app.jobs.send_recap")
+    def test_run_daily_recap_marks_each_group(self, mock_send):
+        # Cron fires at apr 15 00:00 LA → recaps apr 14 (Tue, midweek
+        # daily). Both groups should land in recap_log.
+        target = date(2026, 4, 14)
+        repo, a, b = self._two_group_repo(target)
+        run_daily_recap(repo, _make_settings({"queens"}),
+                        now=datetime(2026, 4, 15, 0, 0, tzinfo=LA))
+        assert repo.has_recap_been_sent(target, "daily", group_id=a.id)
+        assert repo.has_recap_been_sent(target, "daily", group_id=b.id)
+        # send_recap called once per group.
+        assert mock_send.call_count == 2
+
+    @patch("app.jobs.send_recap")
+    def test_run_daily_recap_continues_past_per_group_failure(self, mock_send):
+        # First call raises, second succeeds. The exception is logged
+        # and BCrew still gets its recap marked.
+        target = date(2026, 4, 14)
+        repo, a, b = self._two_group_repo(target)
+        # Inject a failure for ACrew only.
+        original = repo.has_recap_been_sent
+
+        def flaky(recap_date, recap_type, *, group_id):
+            if group_id == a.id:
+                raise RuntimeError("simulated transient failure")
+            return original(recap_date, recap_type, group_id=group_id)
+
+        repo.has_recap_been_sent = flaky
+        run_daily_recap(repo, _make_settings({"queens"}),
+                        now=datetime(2026, 4, 15, 0, 0, tzinfo=LA))
+        # ACrew didn't mark; BCrew did.
+        assert original(target, "daily", group_id=b.id)
+        # Only one successful send.
+        assert mock_send.call_count == 1
