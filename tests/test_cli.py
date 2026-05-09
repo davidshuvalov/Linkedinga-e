@@ -12,10 +12,12 @@ from datetime import date, timedelta
 from app.cli import _seed_demo, main
 from app.db import InMemoryRepository
 
+from .conftest import TestRepo
+
 
 class TestSeedDemo:
     def test_seeds_players_and_scores(self):
-        repo = InMemoryRepository()
+        repo = TestRepo()
         anchor = date(2026, 4, 14)
         _seed_demo(repo, today=anchor)
         # Multiple players, multiple games, at least two puzzle_dates

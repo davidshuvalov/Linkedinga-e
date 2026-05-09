@@ -74,6 +74,10 @@ _LEADERBOARD_PREFIX_RE = re.compile(
 # scannable — we have a lot now.
 _HELP_TEXT = (
     "Commands:\n"
+    "  Group:\n"
+    "    group <name> — create a new group or join an existing one\n"
+    "    switch <name> — move to a different existing group (past scores stay)\n"
+    "\n"
     "  Look at scores (today's results lock until you've played — past days unrestricted):\n"
     "    recap / today — full daily recap (need to have played all today's games)\n"
     "    yesterday / \"N days ago\" / recap YYYY-MM-DD — past daily recap\n"
@@ -110,6 +114,30 @@ _HELP_TEXT = (
     "  Queens #714\n"
     "  0:10"
 )
+
+# Help text shown when an un-onboarded sender runs ``help``. Kept
+# short — the only useful command before joining a group is the
+# join command itself.
+_ONBOARDING_HELP_TEXT = (
+    "Welcome! You haven't joined a group yet.\n"
+    "\n"
+    "  group <name> — create a new group or join an existing one\n"
+    "  help / ? — show this message\n"
+    "\n"
+    "Group names are case-insensitive. Pick one your friends "
+    "agreed on, then everyone runs `group <name>` to join."
+)
+
+# Maximum length for a group name. Generous enough for any real
+# friend-group nickname, short enough that it can't be used as a
+# storage abuse vector.
+_MAX_GROUP_NAME_LENGTH = 40
+
+# Group-related command parsers. Both verbs (``group`` and
+# ``switch``) accept a single name argument; case is preserved on
+# create so the original spelling shows up in replies.
+_GROUP_RE = re.compile(r"^group\s+(\S.*)$", re.IGNORECASE)
+_SWITCH_RE = re.compile(r"^switch\s+(\S.*)$", re.IGNORECASE)
 
 # Format hint when a message looks score-ish but didn't parse. Doesn't
 # dump the full command list — the user clearly meant to submit a score.
@@ -282,10 +310,12 @@ def _resolve_leaderboard_target(
 # ---------------------------------------------------------------------------
 
 
-def _handle_stats(repo: Repository, from_: str, profile_name: str) -> str:
+def _handle_stats(
+    repo: Repository, from_: str, profile_name: str, *, group_id: int
+) -> str:
     display_name = (profile_name or "").strip() or from_
     player = repo.get_or_create_player(from_, display_name)
-    scores = repo.list_player_scores(player.id)
+    scores = repo.list_player_scores(player.id, group_id=group_id)
 
     if not scores:
         return "No scores recorded yet. Submit a LinkedIn game share to get started!"
@@ -351,6 +381,8 @@ def _games_played_today_by(
     profile_name: str,
     today_la: date,
     enabled_games: FrozenSet[str],
+    *,
+    group_id: int,
 ) -> set[str]:
     """Set of enabled games the sender has submitted on the LA day
     ``today_la``. Used by the no-peek gate to decide whether a
@@ -358,7 +390,9 @@ def _games_played_today_by(
     :func:`_handle_recap` and :func:`_handle_leaderboard`."""
     display_name = (profile_name or "").strip() or whatsapp_id
     player = repo.get_or_create_player(whatsapp_id, display_name)
-    today_scores = repo.list_scores(date_from=today_la, date_to=today_la)
+    today_scores = repo.list_scores(
+        date_from=today_la, date_to=today_la, group_id=group_id
+    )
     return {
         s.game for s in today_scores
         if s.player_id == player.id and s.game in enabled_games
@@ -404,6 +438,8 @@ def _partial_peek_recap(
     today: date,
     played: "set[str]",
     enabled_games: FrozenSet[str],
+    *,
+    group_id: int,
 ) -> str:
     """Render today's recap restricted to the games the requester has
     played, with all aggregate blocks (week-so-far leaderboard,
@@ -413,7 +449,9 @@ def _partial_peek_recap(
     from .scheduler import daily_recap
 
     monday, sunday = week_bounds(today)
-    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
     body = daily_recap(
         today, week_scores,
         enabled_games=frozenset(played),
@@ -436,6 +474,7 @@ def _handle_recap(
     *,
     from_: Optional[str] = None,
     profile_name: str = "",
+    group_id: int,
 ) -> str:
     """On-demand daily recap for ``target_day`` (defaults to today LA).
 
@@ -463,14 +502,16 @@ def _handle_recap(
     # CLI preview, where gating doesn't apply.
     if day == today and from_ is not None and settings.enabled_games:
         played = _games_played_today_by(
-            repo, from_, profile_name, today, settings.enabled_games
+            repo, from_, profile_name, today, settings.enabled_games,
+            group_id=group_id,
         )
         all_games = set(settings.enabled_games)
         if not played:
             return _no_peek_zero_recap(settings.enabled_games)
         if played != all_games:
             return _partial_peek_recap(
-                repo, settings, today, played, settings.enabled_games
+                repo, settings, today, played, settings.enabled_games,
+                group_id=group_id,
             )
         # All games played → fall through to the full recap below.
 
@@ -480,6 +521,7 @@ def _handle_recap(
     body, _ = render_daily(
         repo, settings, day,
         include_missing_today_nag=(day == today),
+        group_id=group_id,
     )
     return body
 
@@ -488,6 +530,8 @@ def _handle_all_week(
     repo: Repository,
     settings: Optional[Settings],
     now: datetime,
+    *,
+    group_id: int,
 ) -> str:
     """Every round this week, day by day.
 
@@ -502,7 +546,9 @@ def _handle_all_week(
 
     today = la_date(now)
     monday, sunday = week_bounds(today)
-    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
     week_filtered = [
         s for s in week_scores if s.game in settings.enabled_games
     ]
@@ -533,6 +579,8 @@ def _handle_wrap(
     repo: Repository,
     settings: Optional[Settings],
     now: datetime,
+    *,
+    group_id: int,
 ) -> str:
     """On-demand weekly wrap for the current in-progress LA week."""
     if settings is None:
@@ -540,7 +588,7 @@ def _handle_wrap(
     from .jobs import render_wrap
 
     reference_day = la_date(now)
-    body, _ = render_wrap(repo, settings, reference_day)
+    body, _ = render_wrap(repo, settings, reference_day, group_id=group_id)
     return body
 
 
@@ -557,7 +605,7 @@ def _fmt_pts(value: float) -> str:
 
 
 def _week_filtered_scores(
-    repo: Repository, settings: Settings, now: datetime
+    repo: Repository, settings: Settings, now: datetime, *, group_id: int
 ) -> Tuple[List[ScoreRow], date, date, date]:
     """Common prologue for week-scoped commands.
 
@@ -568,7 +616,9 @@ def _week_filtered_scores(
 
     today = la_date(now)
     monday, sunday = week_bounds(today)
-    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
     filtered = [s for s in week_scores if s.game in settings.enabled_games]
     return filtered, today, monday, sunday
 
@@ -629,6 +679,7 @@ def _handle_leaderboard(
     *,
     from_: Optional[str] = None,
     profile_name: str = "",
+    group_id: int,
 ) -> str:
     """Weekly leaderboard — overall or restricted to one game.
 
@@ -659,12 +710,15 @@ def _handle_leaderboard(
         and settings.enabled_games
     ):
         played = _games_played_today_by(
-            repo, from_, profile_name, today, settings.enabled_games
+            repo, from_, profile_name, today, settings.enabled_games,
+            group_id=group_id,
         )
         if played != set(settings.enabled_games):
             return _no_peek_leaderboard(played, settings.enabled_games)
     monday, sunday = week_bounds(target_day)
-    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
     filtered = [
         s for s in week_scores
         if s.game in settings.enabled_games and s.puzzle_date <= target_day
@@ -688,7 +742,7 @@ def _handle_leaderboard(
             title=f"Week so far — {header_date}",
             prior_scores=prior,
             absent_player_names=absent_player_names_for_week(
-                repo, target_day, filtered
+                repo, target_day, filtered, group_id=group_id
             ),
         )
         return "\n".join(lines)
@@ -706,6 +760,8 @@ def _handle_times(
     settings: Optional[Settings],
     now: datetime,
     target_day: Optional[date] = None,
+    *,
+    group_id: int,
 ) -> str:
     """Per-game time-standings for the current LA week.
 
@@ -720,7 +776,9 @@ def _handle_times(
 
     target_day = target_day or la_date(now)
     monday, sunday = week_bounds(target_day)
-    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
     filtered = [
         s for s in week_scores
         if s.game in settings.enabled_games and s.puzzle_date <= target_day
@@ -771,6 +829,7 @@ def _handle_period_leaderboard(
     *,
     period: str,
     game: Optional[str] = None,
+    group_id: int,
 ) -> str:
     """Shared renderer for ``month`` / ``year`` commands.
 
@@ -794,7 +853,9 @@ def _handle_period_leaderboard(
         start, _end = year_bounds(today)
         period_label = str(today.year)
 
-    scores = repo.list_scores(date_from=start, date_to=today)
+    scores = repo.list_scores(
+        date_from=start, date_to=today, group_id=group_id
+    )
     filtered = [
         s for s in scores
         if s.game in settings.enabled_games and s.puzzle_date <= today
@@ -824,6 +885,8 @@ def _handle_missing(
     repo: Repository,
     settings: Optional[Settings],
     now: datetime,
+    *,
+    group_id: int,
 ) -> str:
     """List players who submitted earlier this week but skipped today.
 
@@ -833,7 +896,9 @@ def _handle_missing(
     """
     if settings is None:
         return "Missing-today check isn't available in this context."
-    filtered, today, _, _ = _week_filtered_scores(repo, settings, now)
+    filtered, today, _, _ = _week_filtered_scores(
+        repo, settings, now, group_id=group_id
+    )
     if not filtered:
         return "Nobody's played yet this week."
 
@@ -851,12 +916,14 @@ def _handle_missing(
     return "Still to play today:\n  " + "\n  ".join(f"- {n}" for n in missing)
 
 
-def _handle_pb(repo: Repository, from_: str, profile_name: str) -> str:
+def _handle_pb(
+    repo: Repository, from_: str, profile_name: str, *, group_id: int
+) -> str:
     """Just the personal-bests block from ``stats`` — shorter and
     more scanable when a player only cares about their PBs."""
     display_name = (profile_name or "").strip() or from_
     player = repo.get_or_create_player(from_, display_name)
-    scores = repo.list_player_scores(player.id)
+    scores = repo.list_player_scores(player.id, group_id=group_id)
     if not scores:
         return "No scores recorded yet — submit a share to set a personal best!"
 
@@ -933,6 +1000,8 @@ def _handle_prizes(
     repo: Repository,
     settings: Optional[Settings],
     now: datetime,
+    *,
+    group_id: int,
 ) -> str:
     """Live prize snapshot for the in-progress week.
 
@@ -945,7 +1014,9 @@ def _handle_prizes(
     from .scheduler import _format_seconds
     from .scoring import prize_allocations, weekly_leaderboard
 
-    filtered, _, _, _ = _week_filtered_scores(repo, settings, now)
+    filtered, _, _, _ = _week_filtered_scores(
+        repo, settings, now, group_id=group_id
+    )
     if not filtered:
         return "No scores yet this week — prizes unawarded."
     lb = weekly_leaderboard(filtered)
@@ -983,6 +1054,8 @@ def _handle_streak(
     from_: str,
     profile_name: str,
     now: datetime,
+    *,
+    group_id: int,
 ) -> str:
     """Sender's current consecutive-days submission streak.
 
@@ -993,7 +1066,7 @@ def _handle_streak(
     """
     display_name = (profile_name or "").strip() or from_
     player = repo.get_or_create_player(from_, display_name)
-    scores = repo.list_player_scores(player.id)
+    scores = repo.list_player_scores(player.id, group_id=group_id)
     if not scores:
         return f"{player.display_name}: no streak yet — submit a score to start one."
 
@@ -1032,6 +1105,8 @@ def _handle_vs(
     from_: str,
     profile_name: str,
     opponent_name_lower: str,
+    *,
+    group_id: int,
 ) -> str:
     """All-time head-to-head between the sender and a named opponent.
 
@@ -1041,7 +1116,7 @@ def _handle_vs(
     """
     display_name = (profile_name or "").strip() or from_
     me = repo.get_or_create_player(from_, display_name)
-    my_scores = repo.list_player_scores(me.id)
+    my_scores = repo.list_player_scores(me.id, group_id=group_id)
     if not my_scores:
         return "You haven't submitted any scores yet — nothing to compare."
 
@@ -1050,7 +1125,11 @@ def _handle_vs(
     # all-time comparison.
     # There isn't a "find player by name" method, so scan all-time by
     # iterating scores back to epoch — pragmatic given group size.
-    all_scores = repo.list_scores(date_from=date(2000, 1, 1), date_to=date(2100, 1, 1))
+    all_scores = repo.list_scores(
+        date_from=date(2000, 1, 1),
+        date_to=date(2100, 1, 1),
+        group_id=group_id,
+    )
     opp_candidates = {
         s.player_id: s.player_name
         for s in all_scores
@@ -1114,6 +1193,8 @@ def _handle_undo(
     from_: str,
     profile_name: str,
     now: datetime,
+    *,
+    group_id: int,
 ) -> str:
     """Delete the sender's most recent submission for today's LA date.
 
@@ -1125,7 +1206,8 @@ def _handle_undo(
     player = repo.get_or_create_player(from_, display_name)
     today = la_date(now)
     my_scores = [
-        s for s in repo.list_player_scores(player.id) if s.puzzle_date == today
+        s for s in repo.list_player_scores(player.id, group_id=group_id)
+        if s.puzzle_date == today
     ]
     if not my_scores:
         return "Nothing to undo — you haven't submitted anything today."
@@ -1217,6 +1299,8 @@ def _handle_nag(
     from_: str,
     profile_name: str,
     now: datetime,
+    *,
+    group_id: int,
 ) -> str:
     """On-demand version of the morning nudge. The sender DMs
     ``nag`` / ``blast`` / ``poke`` and the bot fan-outs the standard
@@ -1240,6 +1324,7 @@ def _handle_nag(
         sender_id=sender.id,
         sender_whatsapp_id=from_,
         now=now,
+        group_id=group_id,
     )
     if on_cooldown:
         return "You've already nagged today. Try again tomorrow."
@@ -1258,6 +1343,7 @@ def _handle_taunt(
     now: datetime,
     *,
     kind: str,
+    group_id: int,
 ) -> str:
     """Easter-egg broadcast: the sender DMs ``brag`` or ``gripe``, the
     bot fan-outs a competitive nudge to every other recently-active
@@ -1281,6 +1367,7 @@ def _handle_taunt(
         sender_name=sender.display_name,
         sender_whatsapp_id=from_,
         now=now,
+        group_id=group_id,
     )
     if body is None:
         return f"You've already used `{kind}` today. Try again tomorrow."
@@ -1301,6 +1388,133 @@ def _handle_taunt(
     return (
         f"Sent `{kind}` to {sent} player{plural}. {suffix}\n\n"
         f"They got:\n> {body}"
+    )
+
+
+def _validate_group_name(raw: str) -> Tuple[Optional[str], Optional[str]]:
+    """Strip + validate a group name. Returns ``(name, error)`` —
+    exactly one is non-None. Empty / overlong names get an explicit
+    error rather than silently truncating."""
+    name = raw.strip()
+    if not name:
+        return None, "Group name can't be empty. Use: group <name>"
+    if len(name) > _MAX_GROUP_NAME_LENGTH:
+        return (
+            None,
+            f"Group name too long ({len(name)} chars; "
+            f"max {_MAX_GROUP_NAME_LENGTH}).",
+        )
+    return name, None
+
+
+def _handle_group(
+    repo: Repository,
+    sender_player_id: int,
+    raw_name: str,
+    *,
+    sender_group_id: Optional[int],
+) -> str:
+    """Create-or-join: ``group <name>``. New name → creates a new
+    group and signs the sender in. Existing name → joins (or stays
+    in, when the sender is already in that group).
+
+    Used both as the onboarding command (``sender_group_id is None``)
+    and as a group-move shortcut. ``switch`` is the explicit
+    move-only sibling for users who want a guard against typos
+    creating new groups by accident."""
+    name, error = _validate_group_name(raw_name)
+    if error is not None:
+        return error
+    assert name is not None  # for type-checker
+    existing = repo.find_group_by_name(name)
+    if existing is None:
+        created = repo.get_or_create_group(name)
+        repo.set_player_group(sender_player_id, created.id)
+        return (
+            f"Created group `{created.name}` and signed you in. "
+            "Submit a LinkedIn share to record your first score, or "
+            "send `help` for the command list."
+        )
+    repo.set_player_group(sender_player_id, existing.id)
+    if existing.id == sender_group_id:
+        return f"You're already in `{existing.name}`."
+    return (
+        f"Joined group `{existing.name}`. Send `help` for the command "
+        "list, or paste a LinkedIn share to log a score."
+    )
+
+
+def _handle_switch(
+    repo: Repository,
+    sender_player_id: int,
+    raw_name: str,
+    *,
+    sender_group_id: Optional[int],
+    sender_group_name: Optional[str],
+) -> str:
+    """``switch <name>``: move to an existing group only. Errors with
+    a hint to use ``group <name>`` if the target doesn't exist —
+    deliberately stricter than ``group <name>`` so a typo doesn't
+    silently spawn a new group."""
+    name, error = _validate_group_name(raw_name)
+    if error is not None:
+        return error
+    assert name is not None
+    target = repo.find_group_by_name(name)
+    if target is None:
+        return (
+            f"No group called `{raw_name.strip()}`. "
+            f"Run `group {raw_name.strip()}` to create it instead."
+        )
+    if target.id == sender_group_id:
+        return f"You're already in `{target.name}`."
+    repo.set_player_group(sender_player_id, target.id)
+    old_name = sender_group_name or "your old group"
+    return (
+        f"Switched to `{target.name}`. Past scores stay with "
+        f"`{old_name}`; new submissions count for `{target.name}` "
+        "from now on."
+    )
+
+
+def _onboarding_prompt() -> str:
+    """Welcome message for un-onboarded senders. Combines the
+    group-pick instruction with a short tour of how the bot works
+    so first-timers can self-onboard from a single DM. Sized to
+    fit comfortably under WhatsApp's 1600-char ceiling."""
+    return (
+        "Welcome! This is a LinkedIn games score tracker for friend "
+        "groups. Here's how it works:\n"
+        "\n"
+        "GROUPS\n"
+        "Join a group to share a leaderboard with your friends. "
+        "Scores, recaps, and rankings stay inside your group — "
+        "people in other groups don't see your activity.\n"
+        "\n"
+        "  group <name> — create a new group or join an existing one\n"
+        "  switch <name> — move to another group later "
+        "(past scores stay where they were earned)\n"
+        "\n"
+        "Group names are case-insensitive.\n"
+        "\n"
+        "POSTING SCORES\n"
+        "Once you're in a group, paste the LinkedIn share text. "
+        "Example:\n"
+        "  Queens #714\n"
+        "  0:10\n"
+        "Any of the 7 LinkedIn games (Queens, Tango, Pinpoint, "
+        "Crossclimb, Zip, Patches, Mini Sudoku) works the same way "
+        "— just paste what LinkedIn gives you.\n"
+        "\n"
+        "WHAT TO EXPECT\n"
+        "- Daily recap when LinkedIn flips puzzles (~5pm Sydney)\n"
+        "- Sunday weekly wrap with prizes + final standings\n"
+        "- Morning nudge if you haven't played yet\n"
+        "- Escalating reminders before the daily reset\n"
+        "- `notify off` to mute recap DMs anytime\n"
+        "\n"
+        "Run `group <name>` to start. Send `help` once you've "
+        "joined for the full command list."
     )
 
 
@@ -1337,23 +1551,73 @@ def handle_inbound(
     if not body_stripped:
         return None
 
-    # Check for commands before attempting score parsing
+    # Resolve sender + their current group. ``sender_group`` is None
+    # for brand-new players and any legacy player whose ``group_id``
+    # column is still NULL — both states route to the onboarding gate
+    # below. We do this *before* any command dispatch so every
+    # downstream handler can rely on a valid group_id.
+    display_name = (profile_name or "").strip() or from_
+    sender = repo.get_or_create_player(from_, display_name)
+    sender_group = (
+        repo.get_group(sender.group_id) if sender.group_id else None
+    )
+
     lower = body_stripped.lower()
+
+    # ``42`` — Hitchhiker's-style hidden trigger that returns the
+    # creator's bio. Allowed pre-onboarding so the easter egg works
+    # even for first-time visitors poking around.
+    if lower == "42":
+        return _EASTER_EGG_42
+
+    # Group commands always run — they're the only way out of the
+    # onboarding gate, and a moved-already player still uses
+    # ``group <name>`` / ``switch <name>`` to switch.
+    group_match = _GROUP_RE.match(body_stripped)
+    if group_match is not None:
+        return _handle_group(
+            repo,
+            sender.id,
+            group_match.group(1),
+            sender_group_id=sender_group.id if sender_group else None,
+        )
+    switch_match = _SWITCH_RE.match(body_stripped)
+    if switch_match is not None:
+        return _handle_switch(
+            repo,
+            sender.id,
+            switch_match.group(1),
+            sender_group_id=sender_group.id if sender_group else None,
+            sender_group_name=sender_group.name if sender_group else None,
+        )
+
+    # Onboarding gate: anyone without a group can only run ``help``,
+    # ``42``, or the group commands above. Score submissions and every
+    # other command get redirected to ``group <name>``.
+    if sender_group is None:
+        if lower in ("help", "?", "commands"):
+            return _ONBOARDING_HELP_TEXT
+        return _onboarding_prompt()
+
+    group_id = sender_group.id
+
+    # Check for commands before attempting score parsing
     if lower in ("help", "?", "commands"):
         return _HELP_TEXT
     if lower == "stats":
-        return _handle_stats(repo, from_, profile_name)
+        return _handle_stats(repo, from_, profile_name, group_id=group_id)
     if lower in ("pb", "bests", "personal bests"):
-        return _handle_pb(repo, from_, profile_name)
+        return _handle_pb(repo, from_, profile_name, group_id=group_id)
     if lower == "unparsed":
         return _handle_unparsed(repo)
     if lower in ("wrap", "week"):
-        return _handle_wrap(repo, settings, now)
+        return _handle_wrap(repo, settings, now, group_id=group_id)
     if lower in ("all", "all week", "history"):
-        return _handle_all_week(repo, settings, now)
+        return _handle_all_week(repo, settings, now, group_id=group_id)
     if lower in ("leaderboard", "standings"):
         return _handle_leaderboard(
-            repo, settings, now, from_=from_, profile_name=profile_name
+            repo, settings, now,
+            from_=from_, profile_name=profile_name, group_id=group_id,
         )
     # ``leaderboard queens`` / ``standings tango`` — per-game variant.
     for game_key in GAMES:
@@ -1366,16 +1630,20 @@ def handle_inbound(
         ):
             return _handle_leaderboard(
                 repo, settings, now, game=game_key,
-                from_=from_, profile_name=profile_name,
+                from_=from_, profile_name=profile_name, group_id=group_id,
             )
     # ``times`` — per-game cumulative time standings across time-based games.
     if lower in ("times", "game times", "time standings"):
-        return _handle_times(repo, settings, now)
+        return _handle_times(repo, settings, now, group_id=group_id)
     # ``month`` / ``year`` — month-to-date and year-to-date summaries.
     if lower in ("month", "mtd", "month to date", "this month"):
-        return _handle_period_leaderboard(repo, settings, now, period="month")
+        return _handle_period_leaderboard(
+            repo, settings, now, period="month", group_id=group_id
+        )
     if lower in ("year", "ytd", "year to date", "this year"):
-        return _handle_period_leaderboard(repo, settings, now, period="year")
+        return _handle_period_leaderboard(
+            repo, settings, now, period="year", group_id=group_id
+        )
     # ``month <game>`` / ``year <game>`` — per-game monthly / yearly leaderboard.
     for period_key, period_aliases in (
         ("month", ("month", "mtd")),
@@ -1389,20 +1657,25 @@ def handle_inbound(
                 for name in (game_key, display_lower)
             ):
                 return _handle_period_leaderboard(
-                    repo, settings, now, period=period_key, game=game_key
+                    repo, settings, now, period=period_key,
+                    game=game_key, group_id=group_id,
                 )
     if lower in ("missing", "who", "ghosts"):
-        return _handle_missing(repo, settings, now)
+        return _handle_missing(repo, settings, now, group_id=group_id)
     if lower in ("games", "enabled"):
         return _handle_games(settings)
     if lower in ("rules", "scoring"):
         return _handle_rules()
     if lower in ("prize", "prizes"):
-        return _handle_prizes(repo, settings, now)
+        return _handle_prizes(repo, settings, now, group_id=group_id)
     if lower == "streak":
-        return _handle_streak(repo, from_, profile_name, now)
+        return _handle_streak(
+            repo, from_, profile_name, now, group_id=group_id
+        )
     if lower == "undo":
-        return _handle_undo(repo, from_, profile_name, now)
+        return _handle_undo(
+            repo, from_, profile_name, now, group_id=group_id
+        )
     if lower in ("notify on", "notifications on"):
         return _handle_notify(repo, from_, profile_name, enabled=True)
     if lower in ("notify off", "notifications off"):
@@ -1410,25 +1683,30 @@ def handle_inbound(
     # ``brag`` / ``flex`` — broadcast a competitive nudge to the
     # group telling them you're crushing today.
     if lower in ("brag", "flex"):
-        return _handle_taunt(repo, settings, from_, profile_name, now, kind="brag")
+        return _handle_taunt(
+            repo, settings, from_, profile_name, now,
+            kind="brag", group_id=group_id,
+        )
     # ``gripe`` / ``whinge`` — broadcast a self-deprecating-but-
     # competitive nudge admitting today's a write-off.
     if lower in ("gripe", "whinge"):
-        return _handle_taunt(repo, settings, from_, profile_name, now, kind="gripe")
+        return _handle_taunt(
+            repo, settings, from_, profile_name, now,
+            kind="gripe", group_id=group_id,
+        )
     # ``nag`` / ``blast`` / ``poke`` — manual fan-out of the morning
     # nudge body to anyone who hasn't finished today's games yet.
     if lower in ("nag", "blast", "poke"):
-        return _handle_nag(repo, settings, from_, profile_name, now)
-    # ``42`` — Hitchhiker's-style hidden trigger that returns the
-    # creator's bio. Intentionally NOT in the help text; finding it
-    # is the point.
-    if lower == "42":
-        return _EASTER_EGG_42
+        return _handle_nag(
+            repo, settings, from_, profile_name, now, group_id=group_id
+        )
 
     # ``vs <name>`` — all-time head-to-head against a named opponent.
     opp = _parse_vs_command(lower)
     if opp is not None:
-        return _handle_vs(repo, from_, profile_name, opp)
+        return _handle_vs(
+            repo, from_, profile_name, opp, group_id=group_id
+        )
 
     # ``name <new>`` — self-assigned display name.
     new_name = _parse_name_command(lower, body_stripped)
@@ -1445,7 +1723,7 @@ def handle_inbound(
             return error
         return _handle_leaderboard(
             repo, settings, now, target_day=target_day,
-            from_=from_, profile_name=profile_name,
+            from_=from_, profile_name=profile_name, group_id=group_id,
         )
 
     # Date-anchored recap commands: ``recap`` / ``today`` /
@@ -1459,7 +1737,7 @@ def handle_inbound(
             return error
         return _handle_recap(
             repo, settings, now, target_day=target_day,
-            from_=from_, profile_name=profile_name,
+            from_=from_, profile_name=profile_name, group_id=group_id,
         )
 
     # Try to parse as a game share
@@ -1496,8 +1774,11 @@ def handle_inbound(
                 "today's scores. (LinkedIn resets at midnight US Pacific.)"
             )
 
-    display_name = (profile_name or "").strip() or from_
-    player = repo.get_or_create_player(from_, display_name)
+    # ``sender`` was resolved at the top of the dispatcher; reuse it
+    # so the insert path doesn't re-fetch the player. The score is
+    # tied to the sender's *current* group (set above as ``group_id``)
+    # — switching groups later doesn't move existing scores.
+    player = sender
     # Anchor the puzzle day in LA time — that's when LinkedIn rolls, so a
     # 4:45pm Sydney submission (still yesterday in LA) files under
     # yesterday's LA date and a 5:15pm one lands under today's. Keeps
@@ -1506,6 +1787,7 @@ def handle_inbound(
 
     inserted = repo.insert_score(
         player_id=player.id,
+        group_id=group_id,
         game=parsed.game,
         puzzle_no=parsed.puzzle_no,
         puzzle_date=puzzle_date,
@@ -1553,6 +1835,7 @@ def handle_inbound(
             new_raw=parsed.raw_score,
             today=puzzle_date,
             deliver=False,
+            group_id=group_id,
         )
     except Exception:
         import logging
@@ -1573,6 +1856,7 @@ def handle_inbound(
             today=puzzle_date,
             enabled_games=enabled_games,
             deliver=False,
+            group_id=group_id,
         )
     except Exception:
         import logging
@@ -1591,7 +1875,7 @@ def handle_inbound(
         try:
             from .jobs import maybe_fire_early_recap
 
-            maybe_fire_early_recap(repo, settings, now=now)
+            maybe_fire_early_recap(repo, settings, now=now, group_id=group_id)
         except Exception:
             import logging
 

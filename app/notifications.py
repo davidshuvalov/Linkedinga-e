@@ -468,6 +468,7 @@ def gather_submission_triggers(
     new_raw: int,
     today: date,
     prior_raws: List[int],
+    group_id: int,
 ) -> List[Trigger]:
     """Run every detector against the just-inserted submission and
     return the list of triggers that fired. Caller picks one (at
@@ -485,7 +486,9 @@ def gather_submission_triggers(
         triggers.append(personal)
 
     try:
-        today_scores = repo.list_today_for_game(game=game, day=today)
+        today_scores = repo.list_today_for_game(
+            game=game, day=today, group_id=group_id
+        )
     except Exception:
         logger.exception(
             "list_today_for_game failed (game=%s, day=%s) — skipping today triggers",
@@ -498,7 +501,9 @@ def gather_submission_triggers(
         triggers.append(today_extreme)
 
     try:
-        fastest_top, slowest_top = repo.get_top_extremes_for_game(game=game, n=2)
+        fastest_top, slowest_top = repo.get_top_extremes_for_game(
+            game=game, n=2, group_id=group_id
+        )
     except Exception:
         logger.exception(
             "get_top_extremes_for_game failed (game=%s) — skipping all-time triggers",
@@ -517,7 +522,8 @@ def gather_submission_triggers(
     # several Phase-D triggers could match.
     try:
         player_game_history = [
-            s for s in repo.list_player_scores(player_id) if s.game == game
+            s for s in repo.list_player_scores(player_id, group_id=group_id)
+            if s.game == game
         ]
     except Exception:
         logger.exception(
@@ -709,6 +715,7 @@ def maybe_notify_personal_best(
     new_raw: int,
     today: Optional[date] = None,
     deliver: bool = True,
+    group_id: int,
 ) -> Optional[str]:
     """DM ``player`` a one-line zinger when the just-inserted submission
     fires any of the trigger detectors (PB, tied PB, personal worst,
@@ -732,7 +739,7 @@ def maybe_notify_personal_best(
     the caller to append.
     """
     try:
-        all_scores = repo.list_player_scores(player.id)
+        all_scores = repo.list_player_scores(player.id, group_id=group_id)
     except Exception:
         logger.exception(
             "Failed to load player history for trigger check (player=%s)", player.id
@@ -771,6 +778,7 @@ def maybe_notify_personal_best(
         new_raw=new_raw,
         today=today,
         prior_raws=game_raws,
+        group_id=group_id,
     )
     if not triggers:
         return None
@@ -917,6 +925,7 @@ def maybe_notify_day_complete(
     today: date,
     enabled_games: FrozenSet[str],
     deliver: bool = True,
+    group_id: int,
 ) -> Optional[str]:
     """DM ``player`` a summary when this submission means they've now
     played every enabled game for ``today``. Returns the DM body
@@ -936,7 +945,9 @@ def maybe_notify_day_complete(
     if not enabled_games:
         return None
 
-    today_scores = repo.list_scores(date_from=today, date_to=today)
+    today_scores = repo.list_scores(
+        date_from=today, date_to=today, group_id=group_id
+    )
     played = {
         s.game
         for s in today_scores
@@ -948,7 +959,9 @@ def maybe_notify_day_complete(
     # Pull the full week so the summary can render the player's
     # running weekly standing alongside today's breakdown.
     monday, sunday = week_bounds(today)
-    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
 
     body = render_day_complete_summary(
         player=player,

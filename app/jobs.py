@@ -34,7 +34,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import Settings
-from .db import Player, Repository, ScoreRow
+from .db import Group, Player, Repository, ScoreRow
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER
 from .puzzles import (
     is_last_day_of_month,
@@ -73,6 +73,7 @@ def render_daily(
     target_day: date,
     *,
     include_missing_today_nag: bool = True,
+    group_id: int,
 ) -> Tuple[str, List[str]]:
     """Build the daily-recap body + DM target list for ``target_day``.
 
@@ -88,7 +89,9 @@ def render_daily(
     apply retroactively.
     """
     monday, sunday = week_bounds(target_day)
-    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
 
     # Month / year totals are only appended on the last day of the
     # respective period. One extra repo query each, gated behind the
@@ -96,14 +99,20 @@ def render_daily(
     month_scores = None
     if is_last_day_of_month(target_day):
         m_start, m_end = month_bounds(target_day)
-        month_scores = repo.list_scores(date_from=m_start, date_to=m_end)
+        month_scores = repo.list_scores(
+            date_from=m_start, date_to=m_end, group_id=group_id
+        )
 
     year_scores = None
     if is_last_day_of_year(target_day):
         y_start, y_end = year_bounds(target_day)
-        year_scores = repo.list_scores(date_from=y_start, date_to=y_end)
+        year_scores = repo.list_scores(
+            date_from=y_start, date_to=y_end, group_id=group_id
+        )
 
-    absent = absent_player_names_for_week(repo, target_day, week_scores)
+    absent = absent_player_names_for_week(
+        repo, target_day, week_scores, group_id=group_id
+    )
 
     if _is_sunday(target_day):
         body = weekly_wrap(
@@ -124,7 +133,7 @@ def render_daily(
         )
 
     dm_targets = repo.list_active_whatsapp_ids(
-        date_from=monday, date_to=sunday
+        date_from=monday, date_to=sunday, group_id=group_id
     )
     return body, dm_targets
 
@@ -133,16 +142,18 @@ def absent_player_names_for_week(
     repo: Repository,
     reference_day: date,
     week_scores: Sequence[ScoreRow],
+    *,
+    group_id: int,
 ) -> List[str]:
     """Display names of recently-active players (last 14 days as of
     ``reference_day``) who have NO scores in ``week_scores``.
 
     Used by the weekly leaderboard renderers to make the standings
-    read as a roster — everyone in the friend group shows up,
-    whether they played this week or not. Sorted alphabetically
-    (case-insensitive) so the list reads predictably."""
+    read as a roster — everyone in the group shows up, whether they
+    played this week or not. Sorted alphabetically (case-insensitive)
+    so the list reads predictably."""
     since = reference_day - timedelta(days=_ACTIVE_WINDOW_DAYS)
-    active_players = repo.list_players_active_since(since)
+    active_players = repo.list_players_active_since(since, group_id=group_id)
     scored_pids = {s.player_id for s in week_scores}
     return sorted(
         (p.display_name for p in active_players if p.id not in scored_pids),
@@ -154,6 +165,8 @@ def render_wrap(
     repo: Repository,
     settings: Settings,
     reference_day: date,
+    *,
+    group_id: int,
 ) -> Tuple[str, List[str]]:
     """Build the weekly-wrap body regardless of which day ``reference_day`` is.
 
@@ -165,18 +178,85 @@ def render_wrap(
     a Sunday.
     """
     monday, sunday = week_bounds(reference_day)
-    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
     body = weekly_wrap(
         monday, sunday, week_scores,
         enabled_games=settings.enabled_games,
         absent_player_names=absent_player_names_for_week(
-            repo, reference_day, week_scores
+            repo, reference_day, week_scores, group_id=group_id
         ),
     )
     dm_targets = repo.list_active_whatsapp_ids(
-        date_from=monday, date_to=sunday
+        date_from=monday, date_to=sunday, group_id=group_id
     )
     return body, dm_targets
+
+
+def _group_recap_to(settings: Settings, group: Group) -> Optional[str]:
+    """Resolve the WhatsApp group post target for a group.
+
+    Per-group ``recap_to`` (if set on the row) wins. Otherwise the
+    default group falls back to the global ``settings.twilio_recap_to``
+    so the existing live friend group keeps its current group post
+    behaviour without any DB write. New groups get DM-fan-out unless
+    they explicitly set their own ``recap_to`` via SQL.
+    """
+    if group.recap_to:
+        return group.recap_to
+    if group.name_lower == "default" and settings.twilio_recap_to:
+        return settings.twilio_recap_to
+    return None
+
+
+def _iter_groups(repo: Repository) -> List[Group]:
+    """Snapshot the group list so a per-group failure in the cron
+    doesn't disturb the iteration order. Returns ``[]`` when the
+    repo is on a pre-migration schema (no groups table)."""
+    try:
+        return repo.list_groups()
+    except Exception:
+        logger.exception("list_groups failed — skipping multi-group fan-out")
+        return []
+
+
+def _run_daily_recap_for_group(
+    repo: Repository,
+    settings: Settings,
+    group: Group,
+    *,
+    now: datetime,
+) -> Optional[str]:
+    """Per-group body of :func:`run_daily_recap`. Lifted into its own
+    function so the public cron can iterate groups and continue past
+    a per-group failure."""
+    target_day = la_date(now) - timedelta(days=1)
+    recap_type = _recap_type_for(target_day)
+
+    if repo.has_recap_been_sent(target_day, recap_type, group_id=group.id):
+        logger.info(
+            "Skipping cron recap for LA day %s in group %s — already sent (%s)",
+            target_day, group.name, recap_type,
+        )
+        return None
+
+    logger.info(
+        "Running daily recap for LA day %s in group %s (sunday=%s)",
+        target_day, group.name, _is_sunday(target_day),
+    )
+
+    body, dm_targets = render_daily(
+        repo, settings, target_day, group_id=group.id
+    )
+    send_recap(
+        settings, body,
+        dm_targets=dm_targets,
+        group_recap_to=_group_recap_to(settings, group),
+    )
+    repo.mark_recap_sent(target_day, recap_type, group_id=group.id)
+    send_champion_loser_dms(repo, settings, target_day, group_id=group.id)
+    return body
 
 
 def run_daily_recap(
@@ -185,39 +265,69 @@ def run_daily_recap(
     *,
     now: Optional[datetime] = None,
 ) -> Optional[str]:
-    """Cron entry point — fire the daily recap (or weekly wrap on Sun).
+    """Cron entry point — fire the daily recap (or weekly wrap on Sun)
+    once per group.
 
-    Called by the APScheduler job at 00:00 America/Los_Angeles. At that
-    instant the new puzzle is dropping; the "target day" to recap is
-    the LA day that just closed (``la_date(now) - 1``).
+    Called by the APScheduler job at 00:00 America/Los_Angeles. At
+    that instant the new puzzle is dropping; the "target day" to
+    recap is the LA day that just closed (``la_date(now) - 1``). The
+    per-group recap is idempotent via ``recap_log``; a failure in one
+    group is logged and doesn't prevent the others from being
+    processed.
 
-    Skips silently if :func:`maybe_fire_early_recap` already sent this
-    day's recap during the day — the recap_log entry is the source of
-    truth for "has this been covered". Returns ``None`` in that case
-    so callers can distinguish "fired" from "skipped (already sent)".
+    Returns the last successfully rendered body for backwards
+    compatibility with single-group callers / tests.
     """
     now = now or datetime.now(settings.tz)
-    target_day = la_date(now) - timedelta(days=1)
-    recap_type = _recap_type_for(target_day)
+    last_body: Optional[str] = None
+    for group in _iter_groups(repo):
+        try:
+            body = _run_daily_recap_for_group(repo, settings, group, now=now)
+            if body is not None:
+                last_body = body
+        except Exception:
+            logger.exception(
+                "run_daily_recap failed for group %s (id=%s)",
+                group.name, group.id,
+            )
+    return last_body
 
-    if repo.has_recap_been_sent(target_day, recap_type):
+
+def _run_weekly_wrap_early_for_group(
+    repo: Repository,
+    settings: Settings,
+    group: Group,
+    *,
+    now: datetime,
+) -> Optional[str]:
+    target_day = la_date(now)
+    if not _is_sunday(target_day):
         logger.info(
-            "Skipping cron recap for LA day %s — already sent (%s)",
+            "weekly_wrap_early called on a non-Sunday LA day (%s) — skipping",
             target_day,
-            recap_type,
         )
         return None
-
+    if repo.has_recap_been_sent(target_day, "weekly", group_id=group.id):
+        logger.info(
+            "Skipping early weekly wrap for LA Sun %s in group %s — already sent",
+            target_day, group.name,
+        )
+        return None
     logger.info(
-        "Running daily recap for LA day %s (sunday=%s)",
-        target_day,
-        _is_sunday(target_day),
+        "Running early weekly wrap for LA Sun %s in group %s",
+        target_day, group.name,
     )
 
-    body, dm_targets = render_daily(repo, settings, target_day)
-    send_recap(settings, body, dm_targets=dm_targets)
-    repo.mark_recap_sent(target_day, recap_type)
-    send_champion_loser_dms(repo, settings, target_day)
+    body, dm_targets = render_daily(
+        repo, settings, target_day, group_id=group.id
+    )
+    send_recap(
+        settings, body,
+        dm_targets=dm_targets,
+        group_recap_to=_group_recap_to(settings, group),
+    )
+    repo.mark_recap_sent(target_day, "weekly", group_id=group.id)
+    send_champion_loser_dms(repo, settings, target_day, group_id=group.id)
     return body
 
 
@@ -236,31 +346,25 @@ def run_weekly_wrap_early(
     Sydney at 16:59 Mon, and the new-games message follows at 17:01,
     so the closing-out and the kicking-off don't collide.
 
-    Idempotent via ``recap_log`` (uses the same ``"weekly"`` key the
-    Mon 00:00 cron checks). Bails silently if it's not actually
-    Sunday LA — guards against accidental triggering.
+    Idempotent per-group via ``recap_log`` (uses the same
+    ``"weekly"`` key the Mon 00:00 cron checks). Bails silently if
+    it's not actually Sunday LA.
     """
     now = now or datetime.now(settings.tz)
-    target_day = la_date(now)
-    if not _is_sunday(target_day):
-        logger.info(
-            "weekly_wrap_early called on a non-Sunday LA day (%s) — skipping",
-            target_day,
-        )
-        return None
-    if repo.has_recap_been_sent(target_day, "weekly"):
-        logger.info(
-            "Skipping early weekly wrap for LA Sun %s — already sent",
-            target_day,
-        )
-        return None
-    logger.info("Running early weekly wrap for LA Sun %s", target_day)
-
-    body, dm_targets = render_daily(repo, settings, target_day)
-    send_recap(settings, body, dm_targets=dm_targets)
-    repo.mark_recap_sent(target_day, "weekly")
-    send_champion_loser_dms(repo, settings, target_day)
-    return body
+    last_body: Optional[str] = None
+    for group in _iter_groups(repo):
+        try:
+            body = _run_weekly_wrap_early_for_group(
+                repo, settings, group, now=now
+            )
+            if body is not None:
+                last_body = body
+        except Exception:
+            logger.exception(
+                "run_weekly_wrap_early failed for group %s (id=%s)",
+                group.name, group.id,
+            )
+    return last_body
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +456,8 @@ def send_champion_loser_dms(
     repo: Repository,
     settings: Settings,
     target_day: date,
+    *,
+    group_id: int,
 ) -> List[str]:
     """On Sunday LA only: DM the top and bottom of the week's final
     leaderboard with personalised congrats / roast copy.
@@ -359,7 +465,8 @@ def send_champion_loser_dms(
     Silent on non-Sundays so callers can invoke it unconditionally
     after ``mark_recap_sent`` without branching on the day. Returns
     the ``whatsapp_id`` list that received a DM — exposed for tests
-    and logging.
+    and logging. Scoped per-group: each group gets its own champion
+    and wooden-spoon DM.
     """
     if not _is_sunday(target_day):
         return []
@@ -367,7 +474,9 @@ def send_champion_loser_dms(
         return []
 
     monday, sunday = week_bounds(target_day)
-    week_scores = repo.list_scores(date_from=monday, date_to=sunday)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=sunday, group_id=group_id
+    )
     filtered = [s for s in week_scores if s.game in settings.enabled_games]
     lb = weekly_leaderboard(filtered)
     # Need at least two players for champion vs. wooden-spoon to
@@ -378,7 +487,7 @@ def send_champion_loser_dms(
     champion: PlayerWeeklyStats = lb[0]
     loser: PlayerWeeklyStats = lb[-1]
 
-    players = repo.list_players_active_since(monday)
+    players = repo.list_players_active_since(monday, group_id=group_id)
     by_id = {p.id: p for p in players}
     iso_week = target_day.isocalendar()[1]
 
@@ -410,19 +519,21 @@ def send_champion_loser_dms(
 
 
 def _everyone_done_today(
-    repo: Repository, settings: Settings, today: date
+    repo: Repository, settings: Settings, today: date, *, group_id: int
 ) -> bool:
-    """Has every recently-active player submitted every enabled game
-    for ``today`` (LA)? Drives the early-fire decision."""
+    """Has every recently-active player in ``group_id`` submitted every
+    enabled game for ``today`` (LA)? Drives the early-fire decision."""
     if not settings.enabled_games:
         return False
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
-    active_players = repo.list_players_active_since(since)
+    active_players = repo.list_players_active_since(since, group_id=group_id)
     if not active_players:
         return False
 
-    today_scores = repo.list_scores(date_from=today, date_to=today)
+    today_scores = repo.list_scores(
+        date_from=today, date_to=today, group_id=group_id
+    )
     games_by_player: dict[int, set[str]] = {}
     for s in today_scores:
         if s.game in settings.enabled_games:
@@ -440,31 +551,43 @@ def maybe_fire_early_recap(
     settings: Settings,
     *,
     now: Optional[datetime] = None,
+    group_id: int,
 ) -> Optional[str]:
-    """If everyone's done for today, send the recap now and mark it.
+    """If everyone in ``group_id`` is done for today, send that group's
+    recap now and mark it.
 
-    Called from the webhook after each successful score insert. Cheap
-    when nobody's done (one query for active players, one for today's
-    scores). Returns the recap body if fired, ``None`` if not.
+    Called from the webhook after each successful score insert with
+    the submitter's current group. Cheap when nobody's done (one
+    query for active players, one for today's scores). Returns the
+    recap body if fired, ``None`` if not.
     """
     now = now or datetime.now(settings.tz)
     today = la_date(now)
     recap_type = _recap_type_for(today)
 
-    if repo.has_recap_been_sent(today, recap_type):
+    if repo.has_recap_been_sent(today, recap_type, group_id=group_id):
         return None
-    if not _everyone_done_today(repo, settings, today):
+    if not _everyone_done_today(repo, settings, today, group_id=group_id):
+        return None
+
+    group = repo.get_group(group_id)
+    if group is None:
         return None
 
     logger.info(
-        "Early-firing %s recap for LA day %s — everyone has played all games",
-        recap_type,
-        today,
+        "Early-firing %s recap for LA day %s in group %s — everyone has played",
+        recap_type, today, group.name,
     )
-    body, dm_targets = render_daily(repo, settings, today)
-    send_recap(settings, body, dm_targets=dm_targets)
-    repo.mark_recap_sent(today, recap_type)
-    send_champion_loser_dms(repo, settings, today)
+    body, dm_targets = render_daily(
+        repo, settings, today, group_id=group_id
+    )
+    send_recap(
+        settings, body,
+        dm_targets=dm_targets,
+        group_recap_to=_group_recap_to(settings, group),
+    )
+    repo.mark_recap_sent(today, recap_type, group_id=group_id)
+    send_champion_loser_dms(repo, settings, today, group_id=group_id)
     return body
 
 
@@ -811,11 +934,13 @@ def _send_nudges_to_lagging_players(
     *,
     now: datetime,
     exclude_whatsapp_id: Optional[str] = None,
+    group_id: int,
 ) -> Tuple[List[Tuple[str, str]], int]:
     """Shared core for the morning cron nudge and the on-demand `nag`
-    command. DMs every recently-active player who hasn't finished
-    today's enabled games yet, optionally skipping a single
-    whatsapp_id (used to keep the nag sender from nudging themself).
+    command. DMs every recently-active player in ``group_id`` who
+    hasn't finished today's enabled games yet, optionally skipping a
+    single whatsapp_id (used to keep the nag sender from nudging
+    themself).
 
     Returns ``(nudged, active_count)`` where ``nudged`` is a list of
     ``(whatsapp_id, display_name)`` tuples for successful sends and
@@ -828,11 +953,13 @@ def _send_nudges_to_lagging_players(
         return [], 0
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
-    active_players = repo.list_players_active_since(since)
+    active_players = repo.list_players_active_since(since, group_id=group_id)
     if not active_players:
         return [], 0
 
-    today_scores = repo.list_scores(date_from=today, date_to=today)
+    today_scores = repo.list_scores(
+        date_from=today, date_to=today, group_id=group_id
+    )
     games_by_player: dict[int, set[str]] = {}
     for s in today_scores:
         if s.game in enabled:
@@ -844,12 +971,16 @@ def _send_nudges_to_lagging_players(
     # streak detector. Both are filtered to enabled games.
     monday, sunday = week_bounds(today)
     week_scores = [
-        s for s in repo.list_scores(date_from=monday, date_to=sunday)
+        s for s in repo.list_scores(
+            date_from=monday, date_to=sunday, group_id=group_id
+        )
         if s.game in enabled
     ]
     recent_scores = [
         s for s in repo.list_scores(
-            date_from=today - timedelta(days=14), date_to=today
+            date_from=today - timedelta(days=14),
+            date_to=today,
+            group_id=group_id,
         )
         if s.game in enabled
     ]
@@ -902,7 +1033,7 @@ def run_morning_nudge(
     now: Optional[datetime] = None,
 ) -> List[str]:
     """Cron entry point — DM each active player a list of games they
-    haven't played today.
+    haven't played today, fan-out per group.
 
     Skips:
     - players with ``notifications_enabled = False``
@@ -910,8 +1041,8 @@ def run_morning_nudge(
       point nudging someone who's done)
     - days when no enabled games are configured
 
-    Returns the list of whatsapp_ids that received a nudge — handy for
-    tests and for logging the daily reach.
+    Returns the flat list of whatsapp_ids that received a nudge across
+    every group — handy for tests and for logging the daily reach.
     """
     now = now or datetime.now(settings.tz)
     today = la_date(now)
@@ -919,20 +1050,30 @@ def run_morning_nudge(
         logger.info("Morning nudge: no enabled games configured, skipping")
         return []
 
-    nudged, active_count = _send_nudges_to_lagging_players(
-        repo, settings, now=now
-    )
-    if active_count == 0:
-        logger.info("Morning nudge: no recently active players, skipping")
-        return []
-
-    logger.info(
-        "Morning nudge sent to %d/%d active players (LA day %s)",
-        len(nudged),
-        active_count,
-        today,
-    )
-    return [wid for wid, _ in nudged]
+    all_nudged: List[str] = []
+    for group in _iter_groups(repo):
+        try:
+            nudged, active_count = _send_nudges_to_lagging_players(
+                repo, settings, now=now, group_id=group.id
+            )
+        except Exception:
+            logger.exception(
+                "Morning nudge failed for group %s (id=%s)",
+                group.name, group.id,
+            )
+            continue
+        if active_count == 0:
+            logger.info(
+                "Morning nudge: no recently active players in group %s, skipping",
+                group.name,
+            )
+            continue
+        logger.info(
+            "Morning nudge sent to %d/%d active players in group %s (LA day %s)",
+            len(nudged), active_count, group.name, today,
+        )
+        all_nudged.extend(wid for wid, _ in nudged)
+    return all_nudged
 
 
 def run_nag(
@@ -942,6 +1083,7 @@ def run_nag(
     sender_id: int,
     sender_whatsapp_id: str,
     now: Optional[datetime] = None,
+    group_id: int,
 ) -> Tuple[int, List[str], bool]:
     """On-demand sibling of :func:`run_morning_nudge`, triggered by a
     player DMing ``nag`` / ``blast`` / ``poke``. Same nudge body, just
@@ -950,6 +1092,9 @@ def run_nag(
     ``recap_log`` (key ``taunt:nag:<sender_id>``) keeps a bored
     player from spamming the group.
 
+    Scoped to ``group_id`` — only nudges teammates in the sender's
+    current group.
+
     Returns ``(count_sent, recipient_names, on_cooldown)``. Cooldown
     is only burned when at least one DM goes out — if everyone's
     already played, the sender keeps their daily token.
@@ -957,22 +1102,22 @@ def run_nag(
     now = now or datetime.now(settings.tz)
     today = la_date(now)
 
-    if repo.has_taunted_today(sender_id, "nag", today):
+    if repo.has_taunted_today(sender_id, "nag", today, group_id=group_id):
         return 0, [], True
 
     nudged, _ = _send_nudges_to_lagging_players(
-        repo, settings, now=now, exclude_whatsapp_id=sender_whatsapp_id
+        repo, settings, now=now,
+        exclude_whatsapp_id=sender_whatsapp_id,
+        group_id=group_id,
     )
     names = [name for _, name in nudged]
 
     if names:
-        repo.record_taunt(sender_id, "nag", today)
+        repo.record_taunt(sender_id, "nag", today, group_id=group_id)
 
     logger.info(
-        "Nag from player_id=%s reached %d players (LA day %s)",
-        sender_id,
-        len(names),
-        today,
+        "Nag from player_id=%s in group_id=%s reached %d players (LA day %s)",
+        sender_id, group_id, len(names), today,
     )
     return len(names), names, False
 
@@ -1124,49 +1269,27 @@ def _build_pre_reset_warning(
     return template.format(name=player_name, missing=", ".join(missing_games))
 
 
-def run_pre_reset_warning(
+def _run_pre_reset_warning_for_group(
     repo: Repository,
     settings: Settings,
+    group: Group,
     *,
     stage: str,
-    now: Optional[datetime] = None,
+    now: datetime,
 ) -> List[str]:
-    """Cron entry point — DM each active player who hasn't completed
-    every enabled game, with copy whose tone matches ``stage``.
-
-    Wired up to four crons in :func:`app.main._setup_scheduler`,
-    firing 2h / 1h / 30m / 5m before the LA midnight rollover. Each
-    invocation re-checks who's still outstanding so a player who
-    finishes between stages stops getting pinged.
-
-    Same skip rules as :func:`run_morning_nudge`: opted-out players,
-    players who've already finished, and days with no enabled games
-    all bail silently. Returns the ``whatsapp_id`` list that received
-    the nag — useful for tests and reach logging.
-    """
-    if stage not in _PRE_RESET_TEMPLATES:
-        raise ValueError(f"unknown pre-reset stage: {stage!r}")
-
-    now = now or datetime.now(settings.tz)
     today = la_date(now)
     enabled = settings.enabled_games
     if not enabled:
-        logger.info(
-            "Pre-reset warning [%s]: no enabled games configured, skipping",
-            stage,
-        )
         return []
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
-    active_players = repo.list_players_active_since(since)
+    active_players = repo.list_players_active_since(since, group_id=group.id)
     if not active_players:
-        logger.info(
-            "Pre-reset warning [%s]: no recently active players, skipping",
-            stage,
-        )
         return []
 
-    today_scores = repo.list_scores(date_from=today, date_to=today)
+    today_scores = repo.list_scores(
+        date_from=today, date_to=today, group_id=group.id
+    )
     games_by_player: dict[int, set[str]] = {}
     for s in today_scores:
         if s.game in enabled:
@@ -1190,13 +1313,59 @@ def run_pre_reset_warning(
             warned.append(player.whatsapp_id)
 
     logger.info(
-        "Pre-reset warning [%s] sent to %d/%d active players (LA day %s)",
-        stage,
-        len(warned),
-        len(active_players),
-        today,
+        "Pre-reset warning [%s] sent to %d/%d active players in group %s (LA day %s)",
+        stage, len(warned), len(active_players), group.name, today,
     )
     return warned
+
+
+def run_pre_reset_warning(
+    repo: Repository,
+    settings: Settings,
+    *,
+    stage: str,
+    now: Optional[datetime] = None,
+) -> List[str]:
+    """Cron entry point — DM each active player who hasn't completed
+    every enabled game, with copy whose tone matches ``stage``.
+
+    Wired up to four crons in :func:`app.main._setup_scheduler`,
+    firing 2h / 1h / 30m / 5m before the LA midnight rollover. Each
+    invocation re-checks who's still outstanding so a player who
+    finishes between stages stops getting pinged. Iterates groups so
+    each group's roster gets its own per-stage nag.
+
+    Same skip rules as :func:`run_morning_nudge`: opted-out players,
+    players who've already finished, and days with no enabled games
+    all bail silently. Returns the flat ``whatsapp_id`` list that
+    received the nag across every group — useful for tests and reach
+    logging.
+    """
+    if stage not in _PRE_RESET_TEMPLATES:
+        raise ValueError(f"unknown pre-reset stage: {stage!r}")
+
+    now = now or datetime.now(settings.tz)
+    if not settings.enabled_games:
+        logger.info(
+            "Pre-reset warning [%s]: no enabled games configured, skipping",
+            stage,
+        )
+        return []
+
+    all_warned: List[str] = []
+    for group in _iter_groups(repo):
+        try:
+            all_warned.extend(
+                _run_pre_reset_warning_for_group(
+                    repo, settings, group, stage=stage, now=now
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Pre-reset warning [%s] failed for group %s (id=%s)",
+                stage, group.name, group.id,
+            )
+    return all_warned
 
 
 # ---------------------------------------------------------------------------
@@ -1331,28 +1500,13 @@ def _new_games_blowout_context(
     )
 
 
-def run_new_games_announcement(
+def _run_new_games_announcement_for_group(
     repo: Repository,
     settings: Settings,
+    group: Group,
     *,
-    now: Optional[datetime] = None,
+    now: datetime,
 ) -> Optional[str]:
-    """Cron entry point — fire the "new games are live, get in it"
-    blast right after the daily rollover.
-
-    Group post via :func:`send_recap` (same fan-out used by the daily
-    recap), with the recently-active roster as the DM fallback so
-    nobody's missed when the group post fails. Bails silently when
-    no one's been active in the last week.
-
-    A contextual riff (last day of period / yesterday's blowout) is
-    prepended when relevant. If multiple riffs apply, one is picked
-    at random — no priority order. Falls back to the bare static
-    template when nothing fires.
-
-    Returns the body that was sent, or ``None`` if no audience.
-    """
-    now = now or datetime.now(settings.tz)
     today = la_date(now)
 
     base = _NEW_GAMES_TEMPLATES[
@@ -1368,7 +1522,9 @@ def run_new_games_announcement(
         contexts.append(last_day)
     try:
         yesterday = today - timedelta(days=1)
-        yesterday_scores = repo.list_scores(date_from=yesterday, date_to=yesterday)
+        yesterday_scores = repo.list_scores(
+            date_from=yesterday, date_to=yesterday, group_id=group.id
+        )
         blowout = _new_games_blowout_context(
             yesterday_scores, settings.enabled_games
         )
@@ -1376,8 +1532,8 @@ def run_new_games_announcement(
             contexts.append(blowout)
     except Exception:
         logger.exception(
-            "New games blowout detection failed (LA day %s) — "
-            "falling back to bare template", today,
+            "New games blowout detection failed for group %s (LA day %s) — "
+            "falling back to bare template", group.name, today,
         )
 
     if contexts:
@@ -1386,17 +1542,66 @@ def run_new_games_announcement(
         body = base
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
-    dm_targets = repo.list_active_whatsapp_ids(date_from=since, date_to=today)
+    dm_targets = repo.list_active_whatsapp_ids(
+        date_from=since, date_to=today, group_id=group.id
+    )
     if not dm_targets:
         logger.info(
-            "New games announcement: no active players, skipping (LA day %s)",
-            today,
+            "New games announcement: no active players in group %s, skipping",
+            group.name,
         )
         return None
 
-    send_recap(settings, body, dm_targets=dm_targets)
-    logger.info("New games announcement sent (LA day %s)", today)
+    send_recap(
+        settings, body,
+        dm_targets=dm_targets,
+        group_recap_to=_group_recap_to(settings, group),
+    )
+    logger.info(
+        "New games announcement sent for group %s (LA day %s)",
+        group.name, today,
+    )
     return body
+
+
+def run_new_games_announcement(
+    repo: Repository,
+    settings: Settings,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """Cron entry point — fire the "new games are live, get in it"
+    blast right after the daily rollover.
+
+    Group post via :func:`send_recap` (same fan-out used by the daily
+    recap), with the recently-active roster as the DM fallback so
+    nobody's missed when the group post fails. Bails silently for any
+    group with no active players in the last week. Iterates every
+    group so each gets its own announcement.
+
+    A contextual riff (last day of period / yesterday's blowout) is
+    prepended when relevant. If multiple riffs apply, one is picked
+    at random — no priority order. Falls back to the bare static
+    template when nothing fires.
+
+    Returns the last successfully sent body, or ``None`` if every
+    group skipped.
+    """
+    now = now or datetime.now(settings.tz)
+    last_body: Optional[str] = None
+    for group in _iter_groups(repo):
+        try:
+            body = _run_new_games_announcement_for_group(
+                repo, settings, group, now=now
+            )
+            if body is not None:
+                last_body = body
+        except Exception:
+            logger.exception(
+                "run_new_games_announcement failed for group %s (id=%s)",
+                group.name, group.id,
+            )
+    return last_body
 
 
 # ---------------------------------------------------------------------------
@@ -1526,18 +1731,27 @@ def _format_taunt_seconds(secs: int) -> str:
 
 
 def _compute_taunt_stats(
-    repo: Repository, sender_id: int, today: date, enabled_games: frozenset
+    repo: Repository,
+    sender_id: int,
+    today: date,
+    enabled_games: frozenset,
+    *,
+    group_id: int,
 ) -> _TauntStats:
     """Best-effort stat lookup for the brag/gripe template renderer.
     Returns an empty :class:`_TauntStats` when the sender hasn't
     played today and no leaderboard exists; partial data is fine —
-    template filtering handles the gaps.
+    template filtering handles the gaps. Scoped per-group so the
+    rendered "rank #/total" reflects the sender's standing in their
+    own group, not a cross-group mash-up.
     """
     stats = _TauntStats()
 
     # Today's slice: best/worst time-game submission for the sender.
     try:
-        today_scores = repo.list_scores(date_from=today, date_to=today)
+        today_scores = repo.list_scores(
+            date_from=today, date_to=today, group_id=group_id
+        )
     except Exception:
         logger.exception(
             "list_scores failed during taunt stat lookup (sender=%s, day=%s)",
@@ -1570,7 +1784,9 @@ def _compute_taunt_stats(
     try:
         monday, sunday = week_bounds(today)
         week_scores = [
-            s for s in repo.list_scores(date_from=monday, date_to=sunday)
+            s for s in repo.list_scores(
+                date_from=monday, date_to=sunday, group_id=group_id
+            )
             if s.game in enabled_games
         ]
     except Exception:
@@ -1636,6 +1852,7 @@ def run_taunt(
     sender_name: str,
     sender_whatsapp_id: str,
     now: Optional[datetime] = None,
+    group_id: int,
 ) -> Tuple[int, Optional[str], int]:
     """Broadcast a ``brag`` or ``gripe`` to every recently-active
     player except the sender.
@@ -1660,7 +1877,7 @@ def run_taunt(
     now = now or datetime.now(settings.tz)
     today = la_date(now)
 
-    if repo.has_taunted_today(sender_id, kind, today):
+    if repo.has_taunted_today(sender_id, kind, today, group_id=group_id):
         return 0, None, 0
 
     # Build the candidate template pool: plain (always) + stat-aware
@@ -1671,7 +1888,9 @@ def run_taunt(
     # leaderboard rank).
     plain = _BRAG_TEMPLATES if kind == "brag" else _GRIPE_TEMPLATES
     stat_pool = _BRAG_STAT_TEMPLATES if kind == "brag" else _GRIPE_STAT_TEMPLATES
-    stats = _compute_taunt_stats(repo, sender_id, today, settings.enabled_games)
+    stats = _compute_taunt_stats(
+        repo, sender_id, today, settings.enabled_games, group_id=group_id
+    )
     stat_candidates = [t for t in stat_pool if _template_supported(t, stats)]
     candidates: List[str] = list(plain) + stat_candidates
     template = random.choice(candidates)
@@ -1679,7 +1898,9 @@ def run_taunt(
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
     targets = [
-        wid for wid in repo.list_active_whatsapp_ids(date_from=since, date_to=today)
+        wid for wid in repo.list_active_whatsapp_ids(
+            date_from=since, date_to=today, group_id=group_id
+        )
         if wid != sender_whatsapp_id
     ]
     if not targets:
@@ -1690,9 +1911,9 @@ def run_taunt(
         if send_dm(settings, wid, body):
             sent += 1
     if sent > 0:
-        repo.record_taunt(sender_id, kind, today)
+        repo.record_taunt(sender_id, kind, today, group_id=group_id)
     logger.info(
-        "Taunt [%s] from player_id=%s reached %d/%d recipients (LA day %s)",
-        kind, sender_id, sent, len(targets), today,
+        "Taunt [%s] from player_id=%s in group_id=%s reached %d/%d recipients (LA day %s)",
+        kind, sender_id, group_id, sent, len(targets), today,
     )
     return sent, body, len(targets)

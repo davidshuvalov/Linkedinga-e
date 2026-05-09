@@ -13,12 +13,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import InMemoryRepository
+
+from .conftest import TestRepo
 from app.main import app, get_puzzle_validator, get_repository
 
 
 @pytest.fixture
 def repo() -> InMemoryRepository:
-    return InMemoryRepository()
+    return TestRepo()
 
 
 @pytest.fixture

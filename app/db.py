@@ -18,6 +18,22 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 
 @dataclass(frozen=True)
+class Group:
+    """A self-contained leaderboard.
+
+    ``name`` keeps the original casing (used in replies); ``name_lower``
+    is the case-insensitive uniqueness key (computed app-side).
+    ``recap_to`` is the optional per-group WhatsApp group post target
+    used by the sender; when ``None``, recaps fan out as DMs only.
+    """
+
+    id: int
+    name: str
+    name_lower: str
+    recap_to: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class Player:
     id: int
     whatsapp_id: str
@@ -26,6 +42,10 @@ class Player:
     # existing rows (and fresh signups) get recaps unless the player
     # runs ``notify off``. Stored as a column on ``players``.
     notifications_enabled: bool = True
+    # Current group the player is signed into. ``None`` for brand-new
+    # players who haven't run ``group <name>`` yet — the webhook's
+    # onboarding gate uses this as the "needs to pick a group" signal.
+    group_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -52,10 +72,51 @@ class Repository(Protocol):
         self, whatsapp_id: str, display_name: str
     ) -> Player: ...
 
+    # ---- groups ----------------------------------------------------------
+
+    def get_or_create_group(self, name: str) -> "Group":
+        """Find a group by case-insensitive name; create if missing.
+
+        ``name`` is stored verbatim for display; the lookup key is
+        ``lower(name)``. Trim whitespace before passing in.
+        """
+        ...
+
+    def find_group_by_name(self, name: str) -> Optional["Group"]:
+        """Return the group whose ``name_lower`` equals ``lower(name)``,
+        or ``None``. Used by ``switch`` to refuse silently creating a
+        new group on typo."""
+        ...
+
+    def get_group(self, group_id: int) -> Optional["Group"]:
+        """Resolve a group by id. Returns ``None`` if missing — callers
+        treat that as "player needs to onboard again"."""
+        ...
+
+    def list_groups(self) -> List["Group"]:
+        """Return every group. Used by scheduled jobs to iterate the
+        cron callable over all groups."""
+        ...
+
+    def set_player_group(self, player_id: int, group_id: int) -> None:
+        """Move ``player_id`` to ``group_id``. Existing scores stay in
+        whichever group they were submitted under — this only changes
+        where *future* submissions land."""
+        ...
+
+    def list_players_in_group(self, group_id: int) -> List[Player]:
+        """Return every player currently signed into ``group_id``.
+        Used by the morning nudge / pre-reset jobs to fan out per
+        group."""
+        ...
+
+    # ---- scores / recaps -------------------------------------------------
+
     def insert_score(
         self,
         *,
         player_id: int,
+        group_id: int,
         game: str,
         puzzle_no: int,
         puzzle_date: date,
@@ -65,7 +126,10 @@ class Repository(Protocol):
         """Insert a new score.
 
         Returns ``True`` on successful insert, ``False`` if a row with the
-        same ``(player_id, game, puzzle_no)`` already exists.
+        same ``(player_id, game, puzzle_no)`` already exists. Dedup is
+        intentionally per-player (not per-group) — a player can't
+        legitimately submit the same puzzle twice even after switching
+        groups.
         """
         ...
 
@@ -76,10 +140,12 @@ class Repository(Protocol):
         *,
         date_from: date,
         date_to: date,
+        group_id: int,
     ) -> List[ScoreRow]:
-        """Return all scores whose ``puzzle_date`` falls in
-        ``[date_from, date_to]`` inclusive, with each player's display name
-        joined in. Used to build daily recaps and weekly wraps.
+        """Return all scores in ``group_id`` whose ``puzzle_date`` falls
+        in ``[date_from, date_to]`` inclusive, with each player's
+        display name joined in. Used to build daily recaps and weekly
+        wraps.
         """
         ...
 
@@ -88,10 +154,11 @@ class Repository(Protocol):
         *,
         date_from: date,
         date_to: date,
+        group_id: int,
     ) -> List[str]:
-        """Return ``whatsapp_id`` for every player who submitted at least
-        one score in ``[date_from, date_to]``. Used as the DM-fallback
-        audience when the Twilio group post fails.
+        """Return ``whatsapp_id`` for every player in ``group_id`` who
+        submitted at least one score in ``[date_from, date_to]``. Used
+        as the DM-fallback audience when the Twilio group post fails.
         """
         ...
 
@@ -102,15 +169,22 @@ class Repository(Protocol):
         game: str,
         puzzle_no: int,
     ) -> Optional[int]:
-        """Return ``raw_score`` for an existing submission, or ``None``."""
+        """Return ``raw_score`` for an existing submission, or ``None``.
+        Not group-scoped — dedup is per-player."""
         ...
 
-    def list_player_scores(self, player_id: int) -> List[ScoreRow]:
-        """Return all scores for a specific player (all-time)."""
+    def list_player_scores(
+        self, player_id: int, *, group_id: int
+    ) -> List[ScoreRow]:
+        """Return scores for ``player_id`` within ``group_id`` (all-time
+        in that group). Per the group spec, scores stay in whichever
+        group they were earned in, so PB / stats / vs only consider
+        rows the player accumulated in their *current* group."""
         ...
 
     def list_recent_unparsed(self, *, limit: int = 10) -> List[Dict[str, Any]]:
-        """Return the most recent unparsed messages (newest first)."""
+        """Return the most recent unparsed messages (newest first).
+        Not group-scoped — admin debug bucket."""
         ...
 
     def delete_score(
@@ -124,7 +198,8 @@ class Repository(Protocol):
         was removed, ``False`` if nothing matched. Callers should check
         that the target row is still within the current LA puzzle day
         before invoking — deleting older submissions would retroactively
-        rewrite past recaps."""
+        rewrite past recaps. Not group-scoped: dedup is per-player so
+        only one row can match anyway."""
         ...
 
     def update_player_name(
@@ -143,67 +218,73 @@ class Repository(Protocol):
         players with the flag set to ``False``."""
         ...
 
-    def list_players_active_since(self, since: date) -> List[Player]:
-        """Return :class:`Player` rows for everyone who submitted at
-        least one score on or after ``since``. Used by the morning
-        nudge job to identify "regulars" (players who'd typically
-        be playing this week) and by the early-recap-fire check to
-        decide who counts toward "everyone's done"."""
+    def list_players_active_since(
+        self, since: date, *, group_id: int
+    ) -> List[Player]:
+        """Return :class:`Player` rows in ``group_id`` for everyone who
+        submitted at least one score on or after ``since``. Used by the
+        morning nudge job to identify "regulars" (players who'd
+        typically be playing this week) and by the early-recap-fire
+        check to decide who counts toward "everyone's done"."""
         ...
 
     def has_recap_been_sent(
-        self, recap_date: date, recap_type: str
+        self, recap_date: date, recap_type: str, *, group_id: int
     ) -> bool:
         """Has a recap of ``recap_type`` (``"daily"`` or ``"weekly"``)
-        been sent for ``recap_date`` already? Used by the scheduled
-        cron to skip a day that's already had its early-fire recap,
-        and by the early-fire path to avoid double-sending."""
+        been sent for ``recap_date`` in ``group_id`` already? Used by
+        the scheduled cron to skip a day that's already had its
+        early-fire recap, and by the early-fire path to avoid
+        double-sending."""
         ...
 
     def mark_recap_sent(
-        self, recap_date: date, recap_type: str
+        self, recap_date: date, recap_type: str, *, group_id: int
     ) -> None:
         """Record that a recap of ``recap_type`` has been sent for
-        ``recap_date``. Idempotent — calling twice for the same
-        (date, type) pair is a no-op."""
+        ``recap_date`` in ``group_id``. Idempotent — calling twice for
+        the same (group, date, type) tuple is a no-op."""
         ...
 
     def has_taunted_today(
-        self, player_id: int, kind: str, day: date
+        self, player_id: int, kind: str, day: date, *, group_id: int
     ) -> bool:
         """Has ``player_id`` already used the ``kind`` taunt
-        (``"brag"`` or ``"gripe"``) on ``day`` (LA)? Drives the
-        per-day per-command cooldown so a single player can't blast
-        the group with the same prompt 50 times in a row."""
+        (``"brag"`` or ``"gripe"``) on ``day`` (LA) within ``group_id``?
+        Drives the per-day per-command per-group cooldown so a single
+        player can't blast the group with the same prompt 50 times in
+        a row."""
         ...
 
     def record_taunt(
-        self, player_id: int, kind: str, day: date
+        self, player_id: int, kind: str, day: date, *, group_id: int
     ) -> None:
         """Record that ``player_id`` used the ``kind`` taunt on
-        ``day``. Idempotent."""
+        ``day`` within ``group_id``. Idempotent."""
         ...
 
     def list_today_for_game(
-        self, *, game: str, day: date
+        self, *, game: str, day: date, group_id: int
     ) -> List[ScoreRow]:
-        """Return every score row for ``game`` on ``day``. Used by
-        submission-time trigger detection ("best of today" /
-        "worst of today") so the writer can rank the just-inserted
-        row against everyone else's day."""
+        """Return every score row for ``game`` on ``day`` within
+        ``group_id``. Used by submission-time trigger detection
+        ("best of today" / "worst of today") so the writer can rank
+        the just-inserted row against teammates on the same day."""
         ...
 
     def get_top_extremes_for_game(
-        self, *, game: str, n: int = 2
+        self, *, game: str, n: int = 2, group_id: int
     ) -> tuple[List["ScoreRow"], List["ScoreRow"]]:
         """Return ``(fastest_top_n, slowest_top_n)`` score rows for
-        ``game`` across all players, all time. Each list is ordered
+        ``game`` within ``group_id``, all time. Each list is ordered
         most-extreme-first and contains up to ``n`` rows (fewer if
-        the game has fewer total submissions). Caller uses these
+        the group has fewer total submissions). Caller uses these
         to detect "all-time record" / "all-time worst-ever"
         triggers after an insert — by asking for top-2 the caller
         can always identify the "previous holder" even when the
-        just-inserted row claims first place."""
+        just-inserted row claims first place. Group-scoped so a
+        new group's first submission isn't compared against a legacy
+        group's records."""
         ...
 
 
@@ -218,15 +299,64 @@ class InMemoryRepository:
 
     _players: Dict[str, Player] = field(default_factory=dict)
     _next_player_id: int = 1
+    _groups: Dict[int, Group] = field(default_factory=dict)
+    _groups_by_lower: Dict[str, int] = field(default_factory=dict)
+    _next_group_id: int = 1
     _score_keys: set = field(default_factory=set)
     scores: List[Dict[str, Any]] = field(default_factory=list)
     unparsed: List[Dict[str, Any]] = field(default_factory=list)
-    # (date, type) → sent. Stores a set since the only thing we ever
-    # ask is "has this pair been recorded?".
+    # (group_id, date, type) → sent. Stores a set since the only thing
+    # we ever ask is "has this tuple been recorded?".
     _recap_sent: set = field(default_factory=set)
-    # (player_id, kind, day) → recorded. Drives the per-day
-    # per-command cooldown for the brag/gripe Easter eggs.
+    # (group_id, player_id, kind, day) → recorded. Drives the per-day
+    # per-command per-group cooldown for the brag/gripe Easter eggs.
     _taunt_log: set = field(default_factory=set)
+
+    # ---- groups ----------------------------------------------------------
+
+    def get_or_create_group(self, name: str) -> Group:
+        key = name.lower()
+        existing_id = self._groups_by_lower.get(key)
+        if existing_id is not None:
+            return self._groups[existing_id]
+        group = Group(id=self._next_group_id, name=name, name_lower=key)
+        self._next_group_id += 1
+        self._groups[group.id] = group
+        self._groups_by_lower[key] = group.id
+        return group
+
+    def find_group_by_name(self, name: str) -> Optional[Group]:
+        gid = self._groups_by_lower.get(name.lower())
+        if gid is None:
+            return None
+        return self._groups[gid]
+
+    def get_group(self, group_id: int) -> Optional[Group]:
+        return self._groups.get(group_id)
+
+    def list_groups(self) -> List[Group]:
+        return [self._groups[gid] for gid in sorted(self._groups)]
+
+    def set_player_group(self, player_id: int, group_id: int) -> None:
+        existing = self._find_player_by_id(player_id)
+        if existing is None:
+            return
+        updated = Player(
+            id=existing.id,
+            whatsapp_id=existing.whatsapp_id,
+            display_name=existing.display_name,
+            notifications_enabled=existing.notifications_enabled,
+            group_id=group_id,
+        )
+        self._players[existing.whatsapp_id] = updated
+
+    def list_players_in_group(self, group_id: int) -> List[Player]:
+        return [
+            p for p in sorted(self._players.values(), key=lambda p: p.id)
+            if p.group_id == group_id
+        ]
+
+    # ---- players ---------------------------------------------------------
 
     def get_or_create_player(
         self, whatsapp_id: str, display_name: str
@@ -259,6 +389,7 @@ class InMemoryRepository:
             whatsapp_id=existing.whatsapp_id,
             display_name=display_name,
             notifications_enabled=existing.notifications_enabled,
+            group_id=existing.group_id,
         )
         self._players[existing.whatsapp_id] = renamed
 
@@ -273,8 +404,11 @@ class InMemoryRepository:
             whatsapp_id=existing.whatsapp_id,
             display_name=existing.display_name,
             notifications_enabled=enabled,
+            group_id=existing.group_id,
         )
         self._players[existing.whatsapp_id] = updated
+
+    # ---- scores ----------------------------------------------------------
 
     def delete_score(
         self,
@@ -301,6 +435,7 @@ class InMemoryRepository:
         self,
         *,
         player_id: int,
+        group_id: int,
         game: str,
         puzzle_no: int,
         puzzle_date: date,
@@ -314,6 +449,7 @@ class InMemoryRepository:
         self.scores.append(
             {
                 "player_id": player_id,
+                "group_id": group_id,
                 "game": game,
                 "puzzle_no": puzzle_no,
                 "puzzle_date": puzzle_date,
@@ -326,38 +462,43 @@ class InMemoryRepository:
     def log_unparsed(self, whatsapp_id: str, body: str) -> None:
         self.unparsed.append({"whatsapp_id": whatsapp_id, "body": body})
 
+    def _row(self, s: Dict[str, Any], names_by_id: Dict[int, str]) -> ScoreRow:
+        return ScoreRow(
+            player_id=s["player_id"],
+            player_name=names_by_id.get(s["player_id"], ""),
+            game=s["game"],
+            puzzle_no=s["puzzle_no"],
+            puzzle_date=s["puzzle_date"],
+            raw_score=s["raw_score"],
+        )
+
     def list_scores(
         self,
         *,
         date_from: date,
         date_to: date,
+        group_id: int,
     ) -> List[ScoreRow]:
         names_by_id = {p.id: p.display_name for p in self._players.values()}
-        rows: List[ScoreRow] = []
-        for s in self.scores:
-            if date_from <= s["puzzle_date"] <= date_to:
-                rows.append(
-                    ScoreRow(
-                        player_id=s["player_id"],
-                        player_name=names_by_id.get(s["player_id"], ""),
-                        game=s["game"],
-                        puzzle_no=s["puzzle_no"],
-                        puzzle_date=s["puzzle_date"],
-                        raw_score=s["raw_score"],
-                    )
-                )
-        return rows
+        return [
+            self._row(s, names_by_id)
+            for s in self.scores
+            if s.get("group_id") == group_id
+            and date_from <= s["puzzle_date"] <= date_to
+        ]
 
     def list_active_whatsapp_ids(
         self,
         *,
         date_from: date,
         date_to: date,
+        group_id: int,
     ) -> List[str]:
         active_pids = {
             s["player_id"]
             for s in self.scores
-            if date_from <= s["puzzle_date"] <= date_to
+            if s.get("group_id") == group_id
+            and date_from <= s["puzzle_date"] <= date_to
         }
         # Exclude opted-out players — the sender uses this list to
         # decide who receives the recap DM, so we honor the opt-out
@@ -385,29 +526,26 @@ class InMemoryRepository:
                 return s["raw_score"]
         return None
 
-    def list_player_scores(self, player_id: int) -> List[ScoreRow]:
+    def list_player_scores(
+        self, player_id: int, *, group_id: int
+    ) -> List[ScoreRow]:
         names_by_id = {p.id: p.display_name for p in self._players.values()}
         return [
-            ScoreRow(
-                player_id=s["player_id"],
-                player_name=names_by_id.get(s["player_id"], ""),
-                game=s["game"],
-                puzzle_no=s["puzzle_no"],
-                puzzle_date=s["puzzle_date"],
-                raw_score=s["raw_score"],
-            )
+            self._row(s, names_by_id)
             for s in self.scores
-            if s["player_id"] == player_id
+            if s["player_id"] == player_id and s.get("group_id") == group_id
         ]
 
     def list_recent_unparsed(self, *, limit: int = 10) -> List[Dict[str, Any]]:
         return list(reversed(self.unparsed[-limit:]))
 
-    def list_players_active_since(self, since: date) -> List[Player]:
+    def list_players_active_since(
+        self, since: date, *, group_id: int
+    ) -> List[Player]:
         active_ids = {
             s["player_id"]
             for s in self.scores
-            if s["puzzle_date"] >= since
+            if s.get("group_id") == group_id and s["puzzle_date"] >= since
         }
         # Preserve player_id order so the morning-nudge sequence is
         # deterministic in tests and predictable in logs.
@@ -415,59 +553,47 @@ class InMemoryRepository:
         return [by_id[pid] for pid in sorted(active_ids) if pid in by_id]
 
     def has_recap_been_sent(
-        self, recap_date: date, recap_type: str
+        self, recap_date: date, recap_type: str, *, group_id: int
     ) -> bool:
-        return (recap_date, recap_type) in self._recap_sent
+        return (group_id, recap_date, recap_type) in self._recap_sent
 
     def mark_recap_sent(
-        self, recap_date: date, recap_type: str
+        self, recap_date: date, recap_type: str, *, group_id: int
     ) -> None:
-        self._recap_sent.add((recap_date, recap_type))
+        self._recap_sent.add((group_id, recap_date, recap_type))
 
     def has_taunted_today(
-        self, player_id: int, kind: str, day: date
+        self, player_id: int, kind: str, day: date, *, group_id: int
     ) -> bool:
-        return (player_id, kind, day) in self._taunt_log
+        return (group_id, player_id, kind, day) in self._taunt_log
 
     def record_taunt(
-        self, player_id: int, kind: str, day: date
+        self, player_id: int, kind: str, day: date, *, group_id: int
     ) -> None:
-        self._taunt_log.add((player_id, kind, day))
+        self._taunt_log.add((group_id, player_id, kind, day))
 
     def list_today_for_game(
-        self, *, game: str, day: date
+        self, *, game: str, day: date, group_id: int
     ) -> List[ScoreRow]:
         names_by_id = {p.id: p.display_name for p in self._players.values()}
         return [
-            ScoreRow(
-                player_id=s["player_id"],
-                player_name=names_by_id.get(s["player_id"], ""),
-                game=s["game"],
-                puzzle_no=s["puzzle_no"],
-                puzzle_date=s["puzzle_date"],
-                raw_score=s["raw_score"],
-            )
+            self._row(s, names_by_id)
             for s in self.scores
-            if s["game"] == game and s["puzzle_date"] == day
+            if s.get("group_id") == group_id
+            and s["game"] == game
+            and s["puzzle_date"] == day
         ]
 
     def get_top_extremes_for_game(
-        self, *, game: str, n: int = 2
+        self, *, game: str, n: int = 2, group_id: int
     ) -> tuple[List[ScoreRow], List[ScoreRow]]:
         names_by_id = {p.id: p.display_name for p in self._players.values()}
-        rows = [s for s in self.scores if s["game"] == game]
+        rows = [
+            s for s in self.scores
+            if s["game"] == game and s.get("group_id") == group_id
+        ]
         if not rows:
             return [], []
-
-        def _to_row(s: Dict[str, Any]) -> ScoreRow:
-            return ScoreRow(
-                player_id=s["player_id"],
-                player_name=names_by_id.get(s["player_id"], ""),
-                game=s["game"],
-                puzzle_no=s["puzzle_no"],
-                puzzle_date=s["puzzle_date"],
-                raw_score=s["raw_score"],
-            )
 
         # Tiebreak on player_id so the ordering is deterministic in
         # tests when multiple rows share the same raw_score.
@@ -476,8 +602,8 @@ class InMemoryRepository:
             rows, key=lambda s: (-s["raw_score"], s["player_id"])
         )
         return (
-            [_to_row(s) for s in fastest_sorted[:n]],
-            [_to_row(s) for s in slowest_sorted[:n]],
+            [self._row(s, names_by_id) for s in fastest_sorted[:n]],
+            [self._row(s, names_by_id) for s in slowest_sorted[:n]],
         )
 
 
@@ -501,6 +627,11 @@ class SupabaseRepository:
         # hitting a "column does not exist" error on every inbound
         # message if the migration hasn't been applied yet.
         self._has_notifications_column = self._detect_notifications_column()
+        # Group columns landed in a later migration too. When absent,
+        # the repo behaves as a single-default-group app: writes don't
+        # set group_id, reads ignore the kwarg. Lets the app boot on a
+        # pre-migration schema instead of dying on column-missing.
+        self._has_group_columns = self._detect_group_columns()
 
     def _detect_notifications_column(self) -> bool:
         """Probe whether ``players.notifications_enabled`` exists.
@@ -529,24 +660,150 @@ class SupabaseRepository:
             )
             return False
 
+    def _detect_group_columns(self) -> bool:
+        """Probe whether the groups table + group_id columns exist."""
+        try:
+            (
+                self._client.table("groups")
+                .select("id")
+                .limit(1)
+                .execute()
+            )
+            (
+                self._client.table("scores")
+                .select("group_id")
+                .limit(1)
+                .execute()
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Group columns missing (%s). Run `db/schema.sql` to "
+                "enable group isolation. Until then, every read/write "
+                "behaves as a single shared leaderboard.",
+                exc,
+            )
+            return False
+
     def _player_select_cols(self) -> str:
         """SELECT column list for reads against ``players`` — omits
-        ``notifications_enabled`` on old schemas so the query doesn't
-        fail with a column-does-not-exist error."""
+        ``notifications_enabled`` / ``group_id`` on old schemas so the
+        query doesn't fail with a column-does-not-exist error."""
         base = "id, whatsapp_id, display_name"
         if self._has_notifications_column:
             base += ", notifications_enabled"
+        if self._has_group_columns:
+            base += ", group_id"
         return base
 
     def _row_to_player(self, row: Dict[str, Any]) -> Player:
-        # ``notifications_enabled`` is a recent column; fall back to
-        # ``True`` when the field is missing so old schemas still load.
+        # ``notifications_enabled`` and ``group_id`` are recent
+        # columns; fall back to defaults when missing so old schemas
+        # still load.
         return Player(
             id=row["id"],
             whatsapp_id=row["whatsapp_id"],
             display_name=row["display_name"],
             notifications_enabled=row.get("notifications_enabled", True),
+            group_id=row.get("group_id"),
         )
+
+    def _row_to_group(self, row: Dict[str, Any]) -> Group:
+        return Group(
+            id=row["id"],
+            name=row["name"],
+            name_lower=row["name_lower"],
+            recap_to=row.get("recap_to"),
+        )
+
+    def get_or_create_group(self, name: str) -> Group:
+        if not self._has_group_columns:
+            raise RuntimeError(
+                "groups table missing — run db/schema.sql migration "
+                "before using group commands"
+            )
+        key = name.lower()
+        resp = (
+            self._client.table("groups")
+            .select("id, name, name_lower, recap_to")
+            .eq("name_lower", key)
+            .limit(1)
+            .execute()
+        )
+        if resp.data:
+            return self._row_to_group(resp.data[0])
+        inserted = (
+            self._client.table("groups")
+            .insert({"name": name, "name_lower": key})
+            .execute()
+        )
+        return self._row_to_group(inserted.data[0])
+
+    def find_group_by_name(self, name: str) -> Optional[Group]:
+        if not self._has_group_columns:
+            return None
+        resp = (
+            self._client.table("groups")
+            .select("id, name, name_lower, recap_to")
+            .eq("name_lower", name.lower())
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            return None
+        return self._row_to_group(resp.data[0])
+
+    def get_group(self, group_id: int) -> Optional[Group]:
+        if not self._has_group_columns:
+            return None
+        resp = (
+            self._client.table("groups")
+            .select("id, name, name_lower, recap_to")
+            .eq("id", group_id)
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            return None
+        return self._row_to_group(resp.data[0])
+
+    def list_groups(self) -> List[Group]:
+        if not self._has_group_columns:
+            return []
+        resp = (
+            self._client.table("groups")
+            .select("id, name, name_lower, recap_to")
+            .order("id")
+            .execute()
+        )
+        return [self._row_to_group(r) for r in resp.data or []]
+
+    def set_player_group(self, player_id: int, group_id: int) -> None:
+        if not self._has_group_columns:
+            raise RuntimeError(
+                "players.group_id column missing — run db/schema.sql "
+                "migration before using group commands"
+            )
+        (
+            self._client.table("players")
+            .update({"group_id": group_id})
+            .eq("id", player_id)
+            .execute()
+        )
+
+    def list_players_in_group(self, group_id: int) -> List[Player]:
+        if not self._has_group_columns:
+            return []
+        resp = (
+            self._client.table("players")
+            .select(self._player_select_cols())
+            .eq("group_id", group_id)
+            .order("id")
+            .execute()
+        )
+        return [self._row_to_player(r) for r in resp.data or []]
 
     def get_or_create_player(
         self, whatsapp_id: str, display_name: str
@@ -629,6 +886,7 @@ class SupabaseRepository:
         self,
         *,
         player_id: int,
+        group_id: int,
         game: str,
         puzzle_no: int,
         puzzle_date: date,
@@ -648,18 +906,19 @@ class SupabaseRepository:
         )
         if existing.data:
             return False
+        payload: Dict[str, Any] = {
+            "player_id": player_id,
+            "game": game,
+            "puzzle_no": puzzle_no,
+            "puzzle_date": puzzle_date.isoformat(),
+            "raw_score": raw_score,
+            "share_text": share_text,
+        }
+        if self._has_group_columns:
+            payload["group_id"] = group_id
         (
             self._client.table("scores")
-            .insert(
-                {
-                    "player_id": player_id,
-                    "game": game,
-                    "puzzle_no": puzzle_no,
-                    "puzzle_date": puzzle_date.isoformat(),
-                    "raw_score": raw_score,
-                    "share_text": share_text,
-                }
-            )
+            .insert(payload)
             .execute()
         )
         return True
@@ -676,10 +935,11 @@ class SupabaseRepository:
         *,
         date_from: date,
         date_to: date,
+        group_id: int,
     ) -> List[ScoreRow]:
         # PostgREST embedded join: ``players(display_name)`` inlines the
         # parent row under a ``players`` key on each returned score row.
-        resp = (
+        query = (
             self._client.table("scores")
             .select(
                 "player_id, game, puzzle_no, puzzle_date, raw_score, "
@@ -687,8 +947,10 @@ class SupabaseRepository:
             )
             .gte("puzzle_date", date_from.isoformat())
             .lte("puzzle_date", date_to.isoformat())
-            .execute()
         )
+        if self._has_group_columns:
+            query = query.eq("group_id", group_id)
+        resp = query.execute()
         rows: List[ScoreRow] = []
         for row in resp.data or []:
             player = row.get("players") or {}
@@ -709,6 +971,7 @@ class SupabaseRepository:
         *,
         date_from: date,
         date_to: date,
+        group_id: int,
     ) -> List[str]:
         # Embed the notifications_enabled column only if it exists —
         # otherwise this SELECT would fail with "column does not
@@ -716,13 +979,15 @@ class SupabaseRepository:
         embed_cols = "whatsapp_id"
         if self._has_notifications_column:
             embed_cols += ", notifications_enabled"
-        resp = (
+        query = (
             self._client.table("scores")
             .select(f"player_id, players({embed_cols})")
             .gte("puzzle_date", date_from.isoformat())
             .lte("puzzle_date", date_to.isoformat())
-            .execute()
         )
+        if self._has_group_columns:
+            query = query.eq("group_id", group_id)
+        resp = query.execute()
         seen: set[str] = set()
         result: List[str] = []
         for row in resp.data or []:
@@ -756,8 +1021,10 @@ class SupabaseRepository:
             return resp.data[0]["raw_score"]
         return None
 
-    def list_player_scores(self, player_id: int) -> List[ScoreRow]:
-        resp = (
+    def list_player_scores(
+        self, player_id: int, *, group_id: int
+    ) -> List[ScoreRow]:
+        query = (
             self._client.table("scores")
             .select(
                 "player_id, game, puzzle_no, puzzle_date, raw_score, "
@@ -765,8 +1032,10 @@ class SupabaseRepository:
             )
             .eq("player_id", player_id)
             .order("puzzle_date", desc=True)
-            .execute()
         )
+        if self._has_group_columns:
+            query = query.eq("group_id", group_id)
+        resp = query.execute()
         rows: List[ScoreRow] = []
         for row in resp.data or []:
             player = row.get("players") or {}
@@ -792,17 +1061,21 @@ class SupabaseRepository:
         )
         return resp.data or []
 
-    def list_players_active_since(self, since: date) -> List[Player]:
+    def list_players_active_since(
+        self, since: date, *, group_id: int
+    ) -> List[Player]:
         # Two queries on purpose: first the distinct active player_ids
         # for the date window, then the players themselves. PostgREST
         # doesn't support DISTINCT in the embed selector, so doing it
         # in Python avoids a giant deduped JSON payload.
-        scores_resp = (
+        query = (
             self._client.table("scores")
             .select("player_id")
             .gte("puzzle_date", since.isoformat())
-            .execute()
         )
+        if self._has_group_columns:
+            query = query.eq("group_id", group_id)
+        scores_resp = query.execute()
         active_ids = sorted({row["player_id"] for row in scores_resp.data or []})
         if not active_ids:
             return []
@@ -815,34 +1088,37 @@ class SupabaseRepository:
         return [self._row_to_player(r) for r in players_resp.data or []]
 
     def has_recap_been_sent(
-        self, recap_date: date, recap_type: str
+        self, recap_date: date, recap_type: str, *, group_id: int
     ) -> bool:
-        resp = (
+        query = (
             self._client.table("recap_log")
             .select("id")
             .eq("recap_date", recap_date.isoformat())
             .eq("recap_type", recap_type)
             .limit(1)
-            .execute()
         )
+        if self._has_group_columns:
+            query = query.eq("group_id", group_id)
+        resp = query.execute()
         return bool(resp.data)
 
     def mark_recap_sent(
-        self, recap_date: date, recap_type: str
+        self, recap_date: date, recap_type: str, *, group_id: int
     ) -> None:
         # Pre-check rather than relying on the unique constraint —
         # supabase-py surfaces conflict errors as raised exceptions
         # and we want this method to be quietly idempotent.
-        if self.has_recap_been_sent(recap_date, recap_type):
+        if self.has_recap_been_sent(recap_date, recap_type, group_id=group_id):
             return
+        payload: Dict[str, Any] = {
+            "recap_date": recap_date.isoformat(),
+            "recap_type": recap_type,
+        }
+        if self._has_group_columns:
+            payload["group_id"] = group_id
         (
             self._client.table("recap_log")
-            .insert(
-                {
-                    "recap_date": recap_date.isoformat(),
-                    "recap_type": recap_type,
-                }
-            )
+            .insert(payload)
             .execute()
         )
 
@@ -856,23 +1132,27 @@ class SupabaseRepository:
         return f"taunt:{kind}:{player_id}"
 
     def has_taunted_today(
-        self, player_id: int, kind: str, day: date
+        self, player_id: int, kind: str, day: date, *, group_id: int
     ) -> bool:
-        return self.has_recap_been_sent(day, self._taunt_key(player_id, kind))
+        return self.has_recap_been_sent(
+            day, self._taunt_key(player_id, kind), group_id=group_id
+        )
 
     def record_taunt(
-        self, player_id: int, kind: str, day: date
+        self, player_id: int, kind: str, day: date, *, group_id: int
     ) -> None:
-        self.mark_recap_sent(day, self._taunt_key(player_id, kind))
+        self.mark_recap_sent(
+            day, self._taunt_key(player_id, kind), group_id=group_id
+        )
 
     def list_today_for_game(
-        self, *, game: str, day: date
+        self, *, game: str, day: date, group_id: int
     ) -> List[ScoreRow]:
         # Embed the players(display_name) join so we can render the
         # caller's "you beat X by N seconds" copy without a second
         # lookup. ``puzzle_date`` is stored as ISO; eq-match works
         # natively against the date.isoformat() string.
-        resp = (
+        query = (
             self._client.table("scores")
             .select(
                 "player_id, game, puzzle_no, puzzle_date, raw_score, "
@@ -880,8 +1160,10 @@ class SupabaseRepository:
             )
             .eq("game", game)
             .eq("puzzle_date", day.isoformat())
-            .execute()
         )
+        if self._has_group_columns:
+            query = query.eq("group_id", group_id)
+        resp = query.execute()
         rows: List[ScoreRow] = []
         for row in resp.data or []:
             player = row.get("players") or {}
@@ -898,7 +1180,7 @@ class SupabaseRepository:
         return rows
 
     def get_top_extremes_for_game(
-        self, *, game: str, n: int = 2
+        self, *, game: str, n: int = 2, group_id: int
     ) -> tuple[List[ScoreRow], List[ScoreRow]]:
         # Two cheap queries (order + limit n each) instead of pulling
         # the whole game's history. PostgREST honours .order() so
@@ -907,22 +1189,25 @@ class SupabaseRepository:
             "player_id, game, puzzle_no, puzzle_date, raw_score, "
             "players(display_name)"
         )
-        fastest_resp = (
+        fastest_q = (
             self._client.table("scores")
             .select(common)
             .eq("game", game)
             .order("raw_score")
             .limit(n)
-            .execute()
         )
-        slowest_resp = (
+        slowest_q = (
             self._client.table("scores")
             .select(common)
             .eq("game", game)
             .order("raw_score", desc=True)
             .limit(n)
-            .execute()
         )
+        if self._has_group_columns:
+            fastest_q = fastest_q.eq("group_id", group_id)
+            slowest_q = slowest_q.eq("group_id", group_id)
+        fastest_resp = fastest_q.execute()
+        slowest_resp = slowest_q.execute()
 
         def _rows(resp_data: Optional[List[Dict[str, Any]]]) -> List[ScoreRow]:
             out: List[ScoreRow] = []

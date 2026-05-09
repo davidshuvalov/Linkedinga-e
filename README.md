@@ -113,14 +113,54 @@ Schema lives in [`db/schema.sql`](db/schema.sql). To apply it:
 1. Open your Supabase project → **SQL Editor**.
 2. Paste the contents of `db/schema.sql` and run.
 
+The file is **idempotent** — every statement uses `IF NOT EXISTS`,
+backfill `UPDATE`s, or guarded `DROP CONSTRAINT IF EXISTS`. Re-running
+it on a populated database is safe.
+
 Tables:
 
-- `players(id, whatsapp_id, display_name, created_at)`
-- `scores(id, player_id, game, puzzle_no, puzzle_date, raw_score, share_text, created_at)`
-  with `UNIQUE(player_id, game, puzzle_no)` for dedup.
+- `groups(id, name, name_lower, recap_to, created_at)` — each group is
+  a self-contained leaderboard. `name_lower` is the case-insensitive
+  uniqueness key. `recap_to` is an optional per-group WhatsApp group
+  post target (overrides `TWILIO_RECAP_TO` for that group).
+- `players(id, whatsapp_id, display_name, group_id, notifications_enabled, created_at)`
+  — `group_id` references the player's *current* group. Stays nullable;
+  brand-new players have `group_id IS NULL` until they run `group <name>`.
+- `scores(id, player_id, group_id, game, puzzle_no, puzzle_date, raw_score, share_text, created_at)`
+  with `UNIQUE(player_id, game, puzzle_no)` for dedup. `group_id` is
+  set at insert time and never moved — switching groups doesn't
+  rewrite history.
+- `recap_log(id, group_id, recap_date, recap_type, sent_at)` with
+  `UNIQUE(group_id, recap_date, recap_type)` so per-group recap
+  idempotency doesn't collide across groups.
 - `unparsed_messages(id, whatsapp_id, body, created_at)` — captures share-text
   that looked like a score but failed parsing, so we can tune regexes when
   LinkedIn changes their format.
+
+### Migrating an existing single-group deployment
+
+The migration is automatic — running the updated `db/schema.sql` will:
+
+1. Create the `groups` table and seed a row called `default`.
+2. Add `group_id` to `players`, `scores`, and `recap_log`.
+3. Backfill every existing row to the `default` group.
+4. Lock `scores.group_id` and `recap_log.group_id` to NOT NULL.
+
+Existing players don't re-onboard — they're already attached to the
+default group, so their next message lands in the default group's
+leaderboard exactly as before. To rename the default group later:
+
+```sql
+update groups set name = 'My Crew', name_lower = 'my crew'
+where name_lower = 'default';
+```
+
+To wire a per-group WhatsApp group post target (instead of the global
+`TWILIO_RECAP_TO`):
+
+```sql
+update groups set recap_to = 'whatsapp:+...' where name_lower = '...';
+```
 
 `raw_score` convention:
 
@@ -355,6 +395,24 @@ drill:
 ## Bot commands
 
 Players can DM the bot (case-insensitive) with these keywords:
+
+**Groups**
+
+Every player belongs to exactly one group. Scores, recaps, leaderboards,
+nudges, and taunt broadcasts are scoped per-group — players in
+different groups don't see each other's data. A brand-new player has
+to run `group <name>` before any other command works.
+
+The first DM from a brand-new WhatsApp number — anything from "hi" to
+a score share — gets a **welcome intro**: a short tour of how groups
+work, an example score share, and the notification rhythm to expect.
+Once they've joined, that intro is replaced by the regular command
+dispatch.
+
+| Command           | Response |
+| ----------------- | -------- |
+| `group <name>`    | Create a new group with that name **or** join an existing one (case-insensitive lookup). Onboards the sender so the rest of the commands unlock. |
+| `switch <name>`   | Move to a different existing group. Errors with a hint to use `group <name>` if the target doesn't exist. **Past scores stay in the group they were earned in** — switching is forward-only. |
 
 **Look at scores**
 

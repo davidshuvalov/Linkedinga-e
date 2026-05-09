@@ -11,17 +11,22 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.db import InMemoryRepository
 from app.parsers import format_raw_score
 from app.webhook import handle_inbound
+
+from .conftest import TestRepo
 
 SYDNEY = ZoneInfo("Australia/Sydney")
 NOW = datetime(2026, 4, 14, 19, 0, tzinfo=SYDNEY)
 
 
 @pytest.fixture
-def repo() -> InMemoryRepository:
-    return InMemoryRepository()
+def repo() -> TestRepo:
+    """Test repo seeded with a default group + auto-onboarding so
+    existing webhook tests don't need to hit the onboarding gate
+    explicitly. Group-isolation tests still spin up extra groups via
+    :func:`make_extra_group`."""
+    return TestRepo()
 
 
 # ---------------------------------------------------------------------------
@@ -1638,6 +1643,7 @@ class TestTauntCommands:
                 repo, _settings_with_default_games(),
                 kind="bogus", sender_id=1, sender_name="Alice",
                 sender_whatsapp_id="whatsapp:+61400000001", now=NOW,
+                group_id=repo.default_group.id,
             )
 
     def test_brag_broadcasts_to_other_active_players(self, repo):
@@ -2608,3 +2614,343 @@ class TestRecapAfterSubmitFlow:
             assert reply, f"empty reply for `{command}` pre-submit"
             assert "No peeking" in reply
             assert "Today's games:" in reply
+
+
+# ---------------------------------------------------------------------------
+# Group commands + onboarding gate
+# ---------------------------------------------------------------------------
+
+
+class TestGroupOnboarding:
+    """`group <name>` is the create-or-join verb every brand-new player
+    must run before anything else. A player whose ``group_id`` is
+    ``None`` (as in the raw :class:`InMemoryRepository`) is treated
+    as un-onboarded; until they join a group, the dispatcher refuses
+    every other command and every score submission."""
+
+    def _raw_repo(self):
+        # Bypass the conftest auto-onboarding so we can exercise the
+        # un-onboarded state explicitly.
+        from app.db import InMemoryRepository
+        return InMemoryRepository()
+
+    def test_brand_new_player_gets_onboarding_prompt(self):
+        repo = self._raw_repo()
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000999",
+            body="recap",
+            profile_name="Newbie",
+            now=NOW,
+        )
+        assert reply is not None
+        # Full welcome intro — covers groups, posting scores, and
+        # the notification rhythm so first-timers can self-onboard.
+        assert "Welcome!" in reply
+        assert "group <name>" in reply
+        assert "GROUPS" in reply
+        assert "POSTING SCORES" in reply
+        assert "Queens #714" in reply  # the example
+        assert "WHAT TO EXPECT" in reply
+        assert "Daily recap" in reply
+        assert "weekly wrap" in reply.lower()
+        # Comfortably under WhatsApp's 1600-char ceiling.
+        assert len(reply) <= 1500
+
+    def test_help_pre_onboarding_shows_short_help(self):
+        repo = self._raw_repo()
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000999",
+            body="help",
+            profile_name="Newbie",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "haven't joined a group" in reply
+        assert "group <name>" in reply
+
+    def test_42_easter_egg_works_pre_onboarding(self):
+        repo = self._raw_repo()
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000999",
+            body="42",
+            profile_name="Newbie",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "Easter Egg" in reply
+
+    def test_score_submission_blocked_pre_onboarding(self):
+        repo = self._raw_repo()
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000999",
+            body="Queens #714 | 0:30",
+            profile_name="Newbie",
+            now=NOW,
+        )
+        assert reply is not None
+        # Same welcome intro as any other pre-onboarding command.
+        assert "Welcome!" in reply
+        assert "group <name>" in reply
+        # Critically, no score row was created.
+        assert len(repo.scores) == 0
+
+    def test_group_creates_new_group(self):
+        repo = self._raw_repo()
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000999",
+            body="group Crew",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "Created group" in reply
+        assert "Crew" in reply
+        # Player is onboarded.
+        player = repo._players["whatsapp:+61400000999"]
+        assert player.group_id is not None
+        # Group exists with original casing preserved.
+        group = repo.find_group_by_name("crew")
+        assert group is not None
+        assert group.name == "Crew"
+
+    def test_group_joins_existing_case_insensitive(self):
+        repo = self._raw_repo()
+        repo.get_or_create_group("Crew")
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000999",
+            body="GROUP crew",
+            profile_name="Bob",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "Joined group" in reply
+        assert "Crew" in reply  # original casing in reply
+        player = repo._players["whatsapp:+61400000999"]
+        assert player.group_id is not None
+        # Lookup confirms exactly one group was created.
+        assert len(repo.list_groups()) == 1
+
+    def test_group_empty_name_rejected(self):
+        repo = self._raw_repo()
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000999",
+            body="group ",
+            profile_name="Alice",
+            now=NOW,
+        )
+        # Trailing whitespace doesn't match _GROUP_RE → falls through
+        # to the onboarding prompt, which is the right behaviour.
+        assert reply is not None
+        assert "Welcome!" in reply or "can't be empty" in reply
+
+    def test_group_too_long_rejected(self):
+        repo = self._raw_repo()
+        long_name = "x" * 60
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000999",
+            body=f"group {long_name}",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "too long" in reply
+
+    def test_score_submission_attaches_to_current_group(self):
+        repo = self._raw_repo()
+        # Onboard.
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="group Crew",
+            profile_name="Alice",
+            now=NOW,
+        )
+        # Submit.
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #365 | 1:23",
+            profile_name="Alice",
+            now=NOW,
+        )
+        crew = repo.find_group_by_name("Crew")
+        assert crew is not None
+        assert len(repo.scores) == 1
+        assert repo.scores[0]["group_id"] == crew.id
+
+
+class TestSwitchCommand:
+    """`switch <name>` requires an existing group — the safer sibling
+    of `group <name>` for users who don't want a typo to silently
+    create a new group."""
+
+    def _raw_repo(self):
+        from app.db import InMemoryRepository
+        return InMemoryRepository()
+
+    def test_switch_to_missing_group_errors_with_hint(self):
+        repo = self._raw_repo()
+        # Pre-onboard so we hit the switch path rather than the
+        # onboarding gate.
+        repo.get_or_create_group("Crew")
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="group Crew",
+            profile_name="Alice",
+            now=NOW,
+        )
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="switch Nonexistent",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "No group called" in reply
+        assert "group Nonexistent" in reply  # hint to use create-verb
+
+    def test_switch_to_existing_group_moves_player(self):
+        repo = self._raw_repo()
+        repo.get_or_create_group("OriginalCrew")
+        repo.get_or_create_group("NewCrew")
+        # Onboard into OriginalCrew + submit a score there.
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="group OriginalCrew",
+            profile_name="Alice",
+            now=NOW,
+        )
+        handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #365 | 1:23",
+            profile_name="Alice",
+            now=NOW,
+        )
+        original = repo.find_group_by_name("OriginalCrew")
+        assert original is not None
+        assert repo.scores[0]["group_id"] == original.id
+        # Switch.
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="switch NewCrew",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "Switched to" in reply
+        assert "NewCrew" in reply
+        assert "OriginalCrew" in reply  # mentions the old group
+        # Old score stays in OriginalCrew.
+        assert repo.scores[0]["group_id"] == original.id
+
+
+class TestCrossGroupIsolation:
+    """Players in different groups don't see each other's scores in
+    any of the read commands (recap, leaderboard, stats, pb, vs)."""
+
+    def _two_group_repo(self):
+        """Set up: two groups A and B, one player each, one queens
+        score per player. Different puzzle numbers so the dedup
+        constraint doesn't intervene."""
+        from app.db import InMemoryRepository
+        repo = InMemoryRepository()
+        a = repo.get_or_create_group("ACrew")
+        b = repo.get_or_create_group("BCrew")
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.set_player_group(alice.id, a.id)
+        repo.set_player_group(bob.id, b.id)
+        repo.insert_score(
+            player_id=alice.id, group_id=a.id, game="queens",
+            puzzle_no=714, puzzle_date=NOW.date(), raw_score=10,
+            share_text="Queens #714 (Alice)",
+        )
+        repo.insert_score(
+            player_id=bob.id, group_id=b.id, game="queens",
+            puzzle_no=714, puzzle_date=NOW.date(), raw_score=20,
+            share_text="Queens #714 (Bob)",
+        )
+        return repo, a, b
+
+    def test_stats_only_shows_own_group(self):
+        repo, _, _ = self._two_group_repo()
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+1",
+            body="stats",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "Alice" in reply
+        # 1 submission total (alice's own; bob's is in the other group).
+        assert "Submissions: 1" in reply
+
+    def test_pb_only_shows_own_group_history(self):
+        repo, _, _ = self._two_group_repo()
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+1",
+            body="pb",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is not None
+        assert "Alice" in reply
+        assert "Queens" in reply
+
+    def test_vs_only_finds_opponents_in_same_group(self):
+        repo, _, _ = self._two_group_repo()
+        # Alice tries to compare with Bob — Bob's in the other group,
+        # so vs should report no shared rounds (or "not found").
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+1",
+            body="vs Bob",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert reply is not None
+        # Either "couldn't find" (Bob isn't visible) or "no shared
+        # rounds" — both indicate isolation.
+        assert "Couldn't find" in reply or "No shared rounds" in reply
+
+    def test_recap_only_aggregates_own_group(self):
+        repo, _, _ = self._two_group_repo()
+        # Configure alice as a sender who's "played all" in her group
+        # so the recap unlocks. Her group has only one enabled game —
+        # queens — once we restrict settings.
+        from app.config import Settings
+        settings = Settings(
+            twilio_account_sid="", twilio_auth_token="",
+            twilio_whatsapp_from="", twilio_recap_to="",
+            supabase_url="", supabase_key="",
+            timezone_name="Australia/Sydney",
+            enabled_games=frozenset({"queens"}),
+        )
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+1",
+            body="recap",
+            profile_name="Alice",
+            now=NOW,
+            settings=settings,
+        )
+        assert reply is not None
+        # Alice's group — only her queens row should appear; Bob is
+        # in the other group.
+        assert "Alice" in reply
+        assert "Bob" not in reply

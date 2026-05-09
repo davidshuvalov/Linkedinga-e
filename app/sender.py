@@ -20,6 +20,14 @@ from .config import Settings
 logger = logging.getLogger(__name__)
 
 
+# Sentinel for ``send_recap``'s ``group_recap_to`` kwarg so we can tell
+# "caller didn't pass anything" (legacy single-group callers, treat as
+# settings.twilio_recap_to) from "caller explicitly passed None" (a
+# per-group caller for a group with no group post target — skip the
+# group post and DM-fan-out).
+_UNSET = object()
+
+
 def _get_twilio_client(settings: Settings):
     """Lazily import and construct the Twilio REST client."""
     from twilio.rest import Client  # type: ignore
@@ -48,6 +56,7 @@ def send_recap(
     body: str,
     *,
     dm_targets: List[str] | None = None,
+    group_recap_to=_UNSET,
 ) -> None:
     """Post ``body`` to the group, falling back to per-player DMs.
 
@@ -56,7 +65,17 @@ def send_recap(
         body: The formatted recap or wrap text.
         dm_targets: Optional list of ``whatsapp:+…`` IDs. Used as the
             fallback audience when group posting fails **and** as the
-            primary audience when ``TWILIO_RECAP_TO`` is not configured.
+            primary audience when no group target is configured.
+        group_recap_to: Per-group WhatsApp group post target. Three
+            states:
+
+            * ``_UNSET`` (default; legacy single-group callers) — use
+              ``settings.twilio_recap_to`` if set, else DM-fan-out.
+            * a string ``"whatsapp:+..."`` — post to that target,
+              falling back to DMs on failure.
+            * ``None`` — skip the group post entirely and DM-fan-out.
+              Used by per-group cron jobs for groups that don't have
+              their own group post target configured.
     """
     if not settings.twilio_account_sid:
         logger.warning(
@@ -65,13 +84,18 @@ def send_recap(
         print(body)
         return
 
-    # Try group post first if a group target is configured.
-    if settings.twilio_recap_to:
-        if _send_one(settings, settings.twilio_recap_to, body):
+    # Resolve the actual group post target, distinguishing the three
+    # caller states above.
+    if group_recap_to is _UNSET:
+        target_recap_to = settings.twilio_recap_to or None
+    else:
+        target_recap_to = group_recap_to  # may be None → skip group post
+    if target_recap_to:
+        if _send_one(settings, target_recap_to, body):
             return
         logger.warning(
             "Group post to %s failed; falling back to per-player DMs.",
-            settings.twilio_recap_to,
+            target_recap_to,
         )
 
     # Fallback: DM each player individually.
