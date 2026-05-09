@@ -2644,8 +2644,18 @@ class TestGroupOnboarding:
             now=NOW,
         )
         assert reply is not None
-        assert "Pick a group first" in reply
+        # Full welcome intro — covers groups, posting scores, and
+        # the notification rhythm so first-timers can self-onboard.
+        assert "Welcome!" in reply
         assert "group <name>" in reply
+        assert "GROUPS" in reply
+        assert "POSTING SCORES" in reply
+        assert "Queens #714" in reply  # the example
+        assert "WHAT TO EXPECT" in reply
+        assert "Daily recap" in reply
+        assert "weekly wrap" in reply.lower()
+        # Comfortably under WhatsApp's 1600-char ceiling.
+        assert len(reply) <= 1500
 
     def test_help_pre_onboarding_shows_short_help(self):
         repo = self._raw_repo()
@@ -2682,7 +2692,9 @@ class TestGroupOnboarding:
             now=NOW,
         )
         assert reply is not None
-        assert "Pick a group first" in reply
+        # Same welcome intro as any other pre-onboarding command.
+        assert "Welcome!" in reply
+        assert "group <name>" in reply
         # Critically, no score row was created.
         assert len(repo.scores) == 0
 
@@ -2736,7 +2748,7 @@ class TestGroupOnboarding:
         # Trailing whitespace doesn't match _GROUP_RE → falls through
         # to the onboarding prompt, which is the right behaviour.
         assert reply is not None
-        assert "Pick a group first" in reply or "can't be empty" in reply
+        assert "Welcome!" in reply or "can't be empty" in reply
 
     def test_group_too_long_rejected(self):
         repo = self._raw_repo()

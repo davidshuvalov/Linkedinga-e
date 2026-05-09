@@ -1478,16 +1478,43 @@ def _handle_switch(
 
 
 def _onboarding_prompt() -> str:
-    """Reply for un-onboarded senders who run any non-onboarding
-    command. Tells them what to do without dumping the full help
-    text — that's available behind ``help``."""
+    """Welcome message for un-onboarded senders. Combines the
+    group-pick instruction with a short tour of how the bot works
+    so first-timers can self-onboard from a single DM. Sized to
+    fit comfortably under WhatsApp's 1600-char ceiling."""
     return (
-        "Pick a group first.\n"
+        "Welcome! This is a LinkedIn games score tracker for friend "
+        "groups. Here's how it works:\n"
+        "\n"
+        "GROUPS\n"
+        "Join a group to share a leaderboard with your friends. "
+        "Scores, recaps, and rankings stay inside your group — "
+        "people in other groups don't see your activity.\n"
         "\n"
         "  group <name> — create a new group or join an existing one\n"
-        "  help — what's possible before you join a group\n"
+        "  switch <name> — move to another group later "
+        "(past scores stay where they were earned)\n"
         "\n"
-        "Group names are case-insensitive."
+        "Group names are case-insensitive.\n"
+        "\n"
+        "POSTING SCORES\n"
+        "Once you're in a group, paste the LinkedIn share text. "
+        "Example:\n"
+        "  Queens #714\n"
+        "  0:10\n"
+        "Any of the 7 LinkedIn games (Queens, Tango, Pinpoint, "
+        "Crossclimb, Zip, Patches, Mini Sudoku) works the same way "
+        "— just paste what LinkedIn gives you.\n"
+        "\n"
+        "WHAT TO EXPECT\n"
+        "- Daily recap when LinkedIn flips puzzles (~5pm Sydney)\n"
+        "- Sunday weekly wrap with prizes + final standings\n"
+        "- Morning nudge if you haven't played yet\n"
+        "- Escalating reminders before the daily reset\n"
+        "- `notify off` to mute recap DMs anytime\n"
+        "\n"
+        "Run `group <name>` to start. Send `help` once you've "
+        "joined for the full command list."
     )
 
 

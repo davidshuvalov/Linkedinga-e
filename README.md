@@ -403,6 +403,12 @@ nudges, and taunt broadcasts are scoped per-group — players in
 different groups don't see each other's data. A brand-new player has
 to run `group <name>` before any other command works.
 
+The first DM from a brand-new WhatsApp number — anything from "hi" to
+a score share — gets a **welcome intro**: a short tour of how groups
+work, an example score share, and the notification rhythm to expect.
+Once they've joined, that intro is replaced by the regular command
+dispatch.
+
 | Command           | Response |
 | ----------------- | -------- |
 | `group <name>`    | Create a new group with that name **or** join an existing one (case-insensitive lookup). Onboards the sender so the rest of the commands unlock. |
