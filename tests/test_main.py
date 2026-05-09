@@ -202,6 +202,40 @@ class TestTwimlChunking:
         assert "<Response/>" in out
         assert "<Message>" not in out
 
+    def test_status_callback_url_emits_attribute_on_every_message(self):
+        # When TWILIO_STATUS_CALLBACK_URL is configured, every <Message>
+        # gets a statusCallback so Twilio POSTs delivery status (and
+        # carrier rejections like 63012) back to /twilio-status.
+        from app.main import _twiml
+
+        url = "https://example.test/twilio-status"
+        out = _twiml("hello", url)
+        assert (
+            f'<Message statusCallback="{url}">hello</Message>' in out
+        )
+
+    def test_status_callback_attribute_is_xml_attr_escaped(self):
+        # Defensive: a URL with an ampersand (rare but legal) must not
+        # break TwiML parsing. quoteattr handles &, <, >, and quotes.
+        from app.main import _twiml
+
+        url = "https://example.test/cb?a=1&b=2"
+        out = _twiml("hi", url)
+        # & in the attribute value must appear as &amp;
+        assert "?a=1&amp;b=2" in out
+        # And the whole document must still parse as valid XML.
+        ET.fromstring(out)
+
+    def test_no_status_callback_when_url_empty(self):
+        # Empty / missing callback URL → no attribute, identical to the
+        # pre-callback behaviour. Keeps local dev (no public URL) clean.
+        from app.main import _twiml
+
+        out = _twiml("hello")
+        assert "statusCallback" not in out
+        out2 = _twiml("hello", "")
+        assert "statusCallback" not in out2
+
     def test_oversized_body_splits_at_paragraph_boundaries(self):
         from app.main import _MAX_MESSAGE_CHARS, _chunk_message, _twiml
 
@@ -253,6 +287,7 @@ class TestTwimlChunking:
         settings = Settings(
             twilio_account_sid="", twilio_auth_token="",
             twilio_whatsapp_from="", twilio_recap_to="",
+            twilio_status_callback_url="",
             supabase_url="", supabase_key="",
             timezone_name="Australia/Sydney",
             enabled_games=frozenset(
@@ -483,3 +518,146 @@ class TestPuzzleValidation:
             assert len(repo.scores) == 0
         finally:
             app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Twilio status callback — the bot has zero visibility into outbound
+# delivery failures (e.g. WhatsApp 63012) because TwiML replies are
+# fire-and-forget. Wiring statusCallback on every <Message> + a
+# /twilio-status receiver lets carrier rejections land in the logs.
+# ---------------------------------------------------------------------------
+
+
+class TestStatusCallbackWiring:
+    def _client_with_callback_url(self, repo, url):
+        from app.config import Settings
+        from app.main import get_settings
+
+        def _settings():
+            return Settings(
+                twilio_account_sid="",
+                twilio_auth_token="",
+                twilio_whatsapp_from="",
+                twilio_recap_to="",
+                twilio_status_callback_url=url,
+                supabase_url="",
+                supabase_key="",
+                timezone_name="Australia/Sydney",
+                enabled_games=frozenset(
+                    {"queens", "tango", "zip", "patches", "mini_sudoku"}
+                ),
+            )
+
+        app.dependency_overrides[get_repository] = lambda: repo
+        app.dependency_overrides[get_puzzle_validator] = lambda: None
+        app.dependency_overrides[get_settings] = _settings
+        return TestClient(app)
+
+    def test_webhook_reply_includes_status_callback_when_configured(
+        self, repo
+    ):
+        client = self._client_with_callback_url(
+            repo, "https://example.test/twilio-status"
+        )
+        try:
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "Queens #1 | 0:30",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            assert (
+                'statusCallback="https://example.test/twilio-status"' in r.text
+            )
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_webhook_reply_omits_status_callback_when_unset(self, repo):
+        client = self._client_with_callback_url(repo, "")
+        try:
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "Queens #1 | 0:30",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            assert "statusCallback" not in r.text
+        finally:
+            app.dependency_overrides.clear()
+
+
+class TestTwilioStatusEndpoint:
+    def test_failure_status_is_logged_at_warning(self, caplog):
+        client = TestClient(app)
+        with caplog.at_level("WARNING", logger="app.main"):
+            r = client.post(
+                "/twilio-status",
+                data={
+                    "MessageSid": "SMfake123",
+                    "MessageStatus": "undelivered",
+                    "ErrorCode": "63012",
+                    "ErrorMessage": "Channel provider returned an internal "
+                                    "service error",
+                    "To": "whatsapp:+61400000001",
+                    "From": "whatsapp:+14155238886",
+                },
+            )
+        assert r.status_code == 200
+        # The log must mention the failure code so it's grep-able.
+        joined = " ".join(rec.message for rec in caplog.records)
+        assert "63012" in joined
+        assert "undelivered" in joined
+        assert "SMfake123" in joined
+
+    def test_failed_status_is_also_logged(self, caplog):
+        client = TestClient(app)
+        with caplog.at_level("WARNING", logger="app.main"):
+            r = client.post(
+                "/twilio-status",
+                data={
+                    "MessageSid": "SMfail",
+                    "MessageStatus": "failed",
+                    "ErrorCode": "30007",
+                    "To": "whatsapp:+61400000002",
+                    "From": "whatsapp:+14155238886",
+                },
+            )
+        assert r.status_code == 200
+        joined = " ".join(rec.message for rec in caplog.records)
+        assert "SMfail" in joined
+        assert "failed" in joined
+
+    def test_delivered_status_is_not_logged_at_warning(self, caplog):
+        # Successful deliveries are normal lifecycle noise; logging every
+        # one would drown the failures we actually care about.
+        client = TestClient(app)
+        with caplog.at_level("WARNING", logger="app.main"):
+            r = client.post(
+                "/twilio-status",
+                data={
+                    "MessageSid": "SMok",
+                    "MessageStatus": "delivered",
+                    "To": "whatsapp:+61400000001",
+                    "From": "whatsapp:+14155238886",
+                },
+            )
+        assert r.status_code == 200
+        assert not any(
+            "SMok" in rec.message for rec in caplog.records
+        )
+
+    def test_endpoint_accepts_missing_optional_fields(self):
+        # Twilio sends different field sets per status (ErrorCode only on
+        # failures, etc.). Endpoint must tolerate any subset without 422.
+        client = TestClient(app)
+        r = client.post(
+            "/twilio-status",
+            data={"MessageStatus": "queued"},
+        )
+        assert r.status_code == 200

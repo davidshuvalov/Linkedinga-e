@@ -1197,6 +1197,7 @@ def _settings_with_default_games():
         twilio_auth_token="",
         twilio_whatsapp_from="",
         twilio_recap_to="",
+        twilio_status_callback_url="",
         supabase_url="",
         supabase_key="",
         timezone_name="Australia/Sydney",
@@ -2937,6 +2938,7 @@ class TestCrossGroupIsolation:
         settings = Settings(
             twilio_account_sid="", twilio_auth_token="",
             twilio_whatsapp_from="", twilio_recap_to="",
+            twilio_status_callback_url="",
             supabase_url="", supabase_key="",
             timezone_name="Australia/Sydney",
             enabled_games=frozenset({"queens"}),
