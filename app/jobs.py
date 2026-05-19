@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -54,6 +54,14 @@ logger = logging.getLogger(__name__)
 # (and therefore expected to play today). Seven days catches anyone
 # in the natural weekly rhythm of LinkedIn games.
 _ACTIVE_WINDOW_DAYS = 7
+
+
+def _settings_for_group(settings: Settings, group: Group) -> Settings:
+    """Return ``settings`` with ``enabled_games`` overridden by the group's
+    own game list when the group has one configured, otherwise unchanged."""
+    if group.enabled_games is not None:
+        return _dc_replace(settings, enabled_games=group.enabled_games)
+    return settings
 
 
 def _is_sunday(day: date) -> bool:
@@ -231,6 +239,7 @@ def _run_daily_recap_for_group(
     """Per-group body of :func:`run_daily_recap`. Lifted into its own
     function so the public cron can iterate groups and continue past
     a per-group failure."""
+    settings = _settings_for_group(settings, group)
     target_day = la_date(now) - timedelta(days=1)
     recap_type = _recap_type_for(target_day)
 
@@ -308,6 +317,7 @@ def _run_weekly_wrap_early_for_group(
     *,
     now: datetime,
 ) -> Optional[str]:
+    settings = _settings_for_group(settings, group)
     target_day = la_date(now)
     if not _is_sunday(target_day):
         logger.info(
@@ -1104,11 +1114,13 @@ def maybe_fire_early_recap(
 
     if repo.has_recap_been_sent(today, recap_type, group_id=group_id):
         return None
-    if not _everyone_done_today(repo, settings, today, group_id=group_id):
-        return None
 
     group = repo.get_group(group_id)
     if group is None:
+        return None
+    settings = _settings_for_group(settings, group)
+
+    if not _everyone_done_today(repo, settings, today, group_id=group_id):
         return None
 
     logger.info(

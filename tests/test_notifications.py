@@ -719,3 +719,163 @@ class TestMaybeNotifyDayComplete:
             enabled_games=frozenset(),
          group_id=repo.default_group.id,)
         assert body is None
+
+
+# ---------------------------------------------------------------------------
+# Rivalry trigger
+# ---------------------------------------------------------------------------
+
+
+class TestRivalryTrigger:
+    """``_detect_rivalry_trigger`` fires when two players have been
+    within _RIVALRY_THRESHOLD points for ≥ 2 of the last 3 completed
+    weeks, then cools down (no re-fire on the same day).
+
+    Test strategy:
+    - Build completed-week scores via ``insert_score`` + ``weekly_leaderboard``
+      by inserting into the previous 3 weeks relative to a fixed ``today``.
+    - today = 2026-04-14 (Tuesday); current week Mon 2026-04-13.
+      last 3 weeks: 2026-03-30, 2026-04-06, 2026-04-13 (wait — we want
+      strictly *before* current week).
+      So completed weeks:
+        week-1: Mon 2026-04-06 – Sun 2026-04-12
+        week-2: Mon 2026-03-30 – Sun 2026-04-05
+        week-3: Mon 2026-03-23 – Sun 2026-03-29
+    """
+
+    from app.notifications import _detect_rivalry_trigger
+
+    # Convenience dates for the 3 completed weeks
+    TODAY = date(2026, 4, 14)
+    W1_MON = date(2026, 4, 6)   # week-1 Monday
+    W2_MON = date(2026, 3, 30)  # week-2 Monday
+    W3_MON = date(2026, 3, 23)  # week-3 Monday
+
+    def _make_settings(self):
+        from app.config import Settings
+        return Settings(
+            twilio_account_sid="", twilio_auth_token="",
+            twilio_whatsapp_from="", twilio_recap_to="",
+            twilio_status_callback_url="",
+            supabase_url="", supabase_key="",
+            timezone_name="Australia/Sydney",
+            enabled_games=frozenset({"queens"}),
+        )
+
+    def _insert_week(self, repo, alice, bob, monday, alice_raw, bob_raw):
+        """Insert one queens score for Alice and Bob on the given Monday."""
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=700 + (monday - self.W3_MON).days,
+            puzzle_date=monday, raw_score=alice_raw, share_text="",
+        )
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=700 + (monday - self.W3_MON).days,
+            puzzle_date=monday, raw_score=bob_raw, share_text="",
+        )
+
+    def test_rivalry_fires_when_two_close_weeks(self):
+        from app.notifications import _detect_rivalry_trigger
+
+        repo = TestRepo()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+
+        # Seed 2 weeks where Alice and Bob are within threshold.
+        # With 1 game each, 5pt for winner and 3pt for loser (2 players).
+        # Bob wins week-1: Bob=5, Alice=3 → gap=2 ≤ 3.0
+        self._insert_week(repo, alice, bob, self.W1_MON, alice_raw=40, bob_raw=20)
+        # Bob wins week-2: same
+        self._insert_week(repo, alice, bob, self.W2_MON, alice_raw=40, bob_raw=20)
+
+        trigger = _detect_rivalry_trigger(
+            repo, alice.id, repo.default_group.id, self.TODAY,
+            self._make_settings(),
+        )
+        assert trigger is not None
+        assert trigger.kind == "rivalry"
+        assert trigger.format_data["rival"] == "Bob"
+        assert trigger.format_data["weeks"] == "2"
+
+    def test_rivalry_does_not_fire_when_only_one_close_week(self):
+        from app.notifications import _detect_rivalry_trigger
+
+        repo = TestRepo()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        # Charlie is a 3rd player to widen the Alice–Bob gap in week-2.
+        charlie = repo.get_or_create_player("whatsapp:+3", "Charlie")
+
+        # Only 1 close week; week-2 is far apart.
+        # Week 1: 2 players → gap=1.0 (within threshold).
+        self._insert_week(repo, alice, bob, self.W1_MON, alice_raw=40, bob_raw=20)
+        # Week 2: 3 players → Alice dominates (gap ~5 pts > threshold of 3.0).
+        repo.insert_score(
+            player_id=alice.id, game="queens",
+            puzzle_no=701, puzzle_date=self.W2_MON, raw_score=5, share_text="",
+        )
+        repo.insert_score(
+            player_id=bob.id, game="queens",
+            puzzle_no=701, puzzle_date=self.W2_MON, raw_score=300, share_text="",
+        )
+        repo.insert_score(
+            player_id=charlie.id, game="queens",
+            puzzle_no=701, puzzle_date=self.W2_MON, raw_score=150, share_text="",
+        )
+
+        trigger = _detect_rivalry_trigger(
+            repo, alice.id, repo.default_group.id, self.TODAY,
+            self._make_settings(),
+        )
+        assert trigger is None
+
+    def test_rivalry_cooldown_prevents_double_fire(self):
+        from app.notifications import _detect_rivalry_trigger
+
+        repo = TestRepo()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+
+        self._insert_week(repo, alice, bob, self.W1_MON, alice_raw=40, bob_raw=20)
+        self._insert_week(repo, alice, bob, self.W2_MON, alice_raw=40, bob_raw=20)
+
+        settings = self._make_settings()
+        # First call should fire.
+        t1 = _detect_rivalry_trigger(
+            repo, alice.id, repo.default_group.id, self.TODAY, settings
+        )
+        assert t1 is not None
+        # Second call same day should be suppressed by cooldown.
+        t2 = _detect_rivalry_trigger(
+            repo, alice.id, repo.default_group.id, self.TODAY, settings
+        )
+        assert t2 is None
+
+    def test_rivalry_suppressed_by_new_pb(self):
+        """When ``new_pb`` is in the trigger pool, rivalry is removed by
+        the trump rule before the random pick."""
+        from app.notifications import (
+            Trigger,
+            _pick_trigger,
+        )
+
+        pb = Trigger(kind="new_pb", format_data={"_new_raw": "10", "_prior_raw": "20"})
+        rivalry = Trigger(
+            kind="rivalry",
+            format_data={"rival": "Bob", "weeks": "3", "gap": "1.5"},
+        )
+        # _pick_trigger should only return new_pb — rivalry is trumped.
+        for _ in range(20):
+            chosen = _pick_trigger([pb, rivalry])
+            assert chosen.kind == "new_pb", f"Expected new_pb, got {chosen.kind}"
+
+    def test_rivalry_render_includes_rival_and_weeks(self):
+        """``render_trigger`` correctly substitutes rivalry template keys."""
+        from app.notifications import Trigger, render_trigger
+
+        t = Trigger(
+            kind="rivalry",
+            format_data={"rival": "Bob", "weeks": "3", "gap": "1.2"},
+        )
+        body = render_trigger(t, player_name="Alice", game="queens")
+        assert "Bob" in body
+        assert "3" in body

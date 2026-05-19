@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .config import Settings
@@ -384,6 +384,30 @@ _ABOVE_FLOOR_TODAY_TEMPLATES = (
 )
 
 
+_RIVALRY_TEMPLATES = (
+    "You and {rival} have been within {gap} pts for {weeks} weeks. That's not a gap — that's a rivalry.",
+    "{rival} is your shadow on the leaderboard. {weeks} weeks running, neck and neck, {name}.",
+    "Fun fact: you and {rival} have finished within {gap} pts of each other for {weeks} weeks straight.",
+    "{weeks} weeks. You. {rival}. {gap} pts. The leaderboard is basically a two-horse race at this point.",
+    "{name}, {rival} is following you so closely on the leaderboard they could be your echo. {weeks} weeks and counting.",
+    "Statistically, you and {rival} are the same person. {weeks} weeks within {gap} pts. Rivalry confirmed.",
+    "Just so you know: {rival} has finished within {gap} pts of you for {weeks} weeks in a row. Might want to do something about that.",
+    "{name} and {rival}: {weeks} weeks, {gap} pts average gap. The algorithm is enjoying this more than you are.",
+    "You've been {gap} pts from {rival} for {weeks} weeks. Either you're evenly matched or one of you is very annoying.",
+    "The data wants you to know that {rival} is within {gap} pts. {weeks} weeks of this. Act accordingly, {name}.",
+    "{rival} is {gap} pts behind you on average. For {weeks} weeks. That's not background noise — that's a rival.",
+    "Friendly reminder: {rival} has been in your pocket for {weeks} weeks. {gap} pts is uncomfortably close.",
+    "{name}: {weeks} weeks, {rival} nipping at your heels within {gap} pts. This is what competition looks like.",
+    "Your week-to-week nemesis has been confirmed: {rival}. {weeks} consecutive weeks within {gap} pts.",
+    "The leaderboard doesn't lie: {name} and {rival} have been inseparable for {weeks} weeks. {gap} pts apart.",
+    "This is getting personal. {rival} has tracked you within {gap} pts for {weeks} straight weeks, {name}.",
+    "{rival} keeps showing up right behind you. {weeks} weeks, {gap} pts. Suspicious, frankly.",
+    "It appears {rival} has adopted you as their personal benchmark. {weeks} weeks within {gap} pts. You're welcome?",
+    "The closest thing to a rivalry you didn't know you had: {name} vs {rival}. {weeks} weeks within {gap} pts.",
+    "Filed under: unwanted competition. {rival} within {gap} pts for {weeks} weeks. They're not going anywhere.",
+)
+
+
 _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "new_pb": _NEW_PB_TEMPLATES,
     "tied_pb": _TIED_PB_TEMPLATES,
@@ -403,6 +427,7 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "dow_top_quartile_personal": _DOW_TOP_QUARTILE_TEMPLATES,
     "dow_bottom_quartile_personal": _DOW_BOTTOM_QUARTILE_TEMPLATES,
     "above_floor_today": _ABOVE_FLOOR_TODAY_TEMPLATES,
+    "rivalry": _RIVALRY_TEMPLATES,
 }
 
 
@@ -416,10 +441,12 @@ _TRIGGER_TRUMPS: Dict[str, frozenset] = {
     "new_pb": frozenset({
         "dow_pb", "year_pb",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
+        "rivalry",
     }),
     "tied_pb": frozenset({
         "dow_pb", "year_pb",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
+        "rivalry",
     }),
     "new_worst": frozenset({
         "dow_worst",
@@ -433,6 +460,7 @@ _TRIGGER_TRUMPS: Dict[str, frozenset] = {
         "new_pb", "tied_pb", "best_of_day",
         "dow_pb", "year_pb",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
+        "rivalry",
     }),
     "all_time_anti_record": frozenset({
         "new_worst", "tied_worst", "worst_of_day",
@@ -442,11 +470,13 @@ _TRIGGER_TRUMPS: Dict[str, frozenset] = {
     "best_of_day": frozenset({
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
         "above_floor_today",
+        "rivalry",
     }),
     "worst_of_day": frozenset({
         "bottom_quartile_personal", "dow_bottom_quartile_personal",
         "above_floor_today",
     }),
+    "rivalry": frozenset(),  # rivalry doesn't trump anything
 }
 
 
@@ -728,6 +758,118 @@ def _detect_above_floor_today_trigger(
     )
 
 
+_RIVALRY_THRESHOLD = 3.0  # pts; within this margin = "close"
+
+
+def _detect_rivalry_trigger(
+    repo: "Repository",
+    player_id: int,
+    group_id: int,
+    today: date,
+    settings: "Settings",
+) -> Optional["Trigger"]:
+    """Fire when a player has finished within ``_RIVALRY_THRESHOLD`` points
+    of the same rival in ≥ 2 of the last 3 completed weeks.
+
+    Uses the ``recap_log`` cooldown keyed on both player IDs so it fires at
+    most once per day per pair — submitting multiple games shouldn't spam.
+    """
+    monday_now, _ = week_bounds(today)
+
+    # Collect the 3 most-recent Mon–Sun blocks strictly before this week.
+    completed_weeks: List[Tuple[date, date]] = []
+    cursor = monday_now
+    for _ in range(3):
+        cursor = cursor - timedelta(weeks=1)
+        completed_weeks.append((cursor, cursor + timedelta(days=6)))
+
+    # Build {player_id: points} and {player_id: name} per completed week.
+    week_maps: List[Dict[int, float]] = []
+    name_map: Dict[int, str] = {}  # accumulated across weeks
+    for mon, sun in completed_weeks:
+        try:
+            week_scores = repo.list_scores(
+                date_from=mon, date_to=sun, group_id=group_id
+            )
+        except Exception:
+            logger.exception(
+                "rivalry: list_scores failed (week %s) — skipping", mon
+            )
+            week_maps.append({})
+            continue
+        game_keys = list(settings.enabled_games) if settings.enabled_games else []
+        if game_keys:
+            week_scores = [s for s in week_scores if s.game in game_keys]
+        lb = weekly_leaderboard(week_scores)
+        wm: Dict[int, float] = {}
+        for entry in lb:
+            pid = entry.player_id
+            wm[pid] = entry.total_points
+            if pid not in name_map:
+                name_map[pid] = entry.player_name
+        week_maps.append(wm)
+
+    # Find this player's points in each week.
+    player_pts_by_week: List[Optional[float]] = [
+        wm.get(player_id) for wm in week_maps
+    ]
+
+    # For each rival, count weeks where gap ≤ threshold.
+    rival_stats: Dict[int, Tuple[int, float]] = {}  # rival_id → (close_weeks, total_gap)
+    for week_idx, wm in enumerate(week_maps):
+        my_pts = player_pts_by_week[week_idx]
+        if my_pts is None:
+            continue
+        for rival_id, rival_pts in wm.items():
+            if rival_id == player_id:
+                continue
+            gap = abs(my_pts - rival_pts)
+            if gap > _RIVALRY_THRESHOLD:
+                continue
+            if rival_id not in rival_stats:
+                rival_stats[rival_id] = (0, 0.0)
+            close_weeks, total_gap = rival_stats[rival_id]
+            rival_stats[rival_id] = (close_weeks + 1, total_gap + gap)
+
+    if not rival_stats:
+        return None
+
+    # Require ≥ 2 close weeks.
+    candidates = {
+        rid: stats for rid, stats in rival_stats.items() if stats[0] >= 2
+    }
+    if not candidates:
+        return None
+
+    # Pick closest rival: most close weeks, tie-break by avg gap.
+    best_rival_id = min(
+        candidates,
+        key=lambda rid: (-candidates[rid][0], candidates[rid][1] / candidates[rid][0]),
+    )
+    close_weeks, total_gap = candidates[best_rival_id]
+    avg_gap = total_gap / close_weeks
+    rival_name = name_map.get(best_rival_id, "—")
+
+    # Cooldown: fire at most once per day per pair.
+    cooldown_key = f"rivalry:{min(player_id, best_rival_id)}:{max(player_id, best_rival_id)}"
+    try:
+        if repo.has_recap_been_sent(today, cooldown_key, group_id=group_id):
+            return None
+        repo.mark_recap_sent(today, cooldown_key, group_id=group_id)
+    except Exception:
+        logger.exception("rivalry: cooldown check failed — skipping trigger")
+        return None
+
+    return Trigger(
+        kind="rivalry",
+        format_data={
+            "rival": rival_name,
+            "weeks": str(close_weeks),
+            "gap": f"{avg_gap:.1f}",
+        },
+    )
+
+
 def gather_submission_triggers(
     repo: Repository,
     *,
@@ -737,6 +879,7 @@ def gather_submission_triggers(
     today: date,
     prior_raws: List[int],
     group_id: int,
+    settings: Optional[Settings] = None,
 ) -> List[Trigger]:
     """Run every detector against the just-inserted submission and
     return the list of triggers that fired. Caller picks one (at
@@ -829,6 +972,17 @@ def gather_submission_triggers(
     above_floor = _detect_above_floor_today_trigger(today_scores, new_raw, player_id)
     if above_floor is not None:
         triggers.append(above_floor)
+
+    # Phase F: social / cross-player triggers — rivalry (weekly standings).
+    if settings is not None:
+        try:
+            rivalry = _detect_rivalry_trigger(repo, player_id, group_id, today, settings)
+            if rivalry is not None:
+                triggers.append(rivalry)
+        except Exception:
+            logger.exception(
+                "rivalry detector failed (player=%s) — skipping", player_id
+            )
 
     return triggers
 
@@ -970,7 +1124,7 @@ def render_trigger(trigger: Trigger, *, player_name: str, game: str) -> str:
         subs["new"] = format_raw_score(game, int(fd["_new_raw"]))
     if "_prior_raw" in fd:
         subs["prior"] = format_raw_score(game, int(fd["_prior_raw"]))
-    for key in ("prior_holder", "weekday", "year", "rank"):
+    for key in ("prior_holder", "weekday", "year", "rank", "rival", "weeks", "gap"):
         if key in fd:
             subs[key] = fd[key]
     return template.format(**subs)
@@ -1065,6 +1219,7 @@ def maybe_notify_personal_best(
         today=today,
         prior_raws=game_raws,
         group_id=group_id,
+        settings=settings,
     )
     if not triggers:
         return None

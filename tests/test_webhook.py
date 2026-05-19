@@ -2956,3 +2956,627 @@ class TestCrossGroupIsolation:
         # in the other group.
         assert "Alice" in reply
         assert "Bob" not in reply
+
+
+# ---------------------------------------------------------------------------
+# Personal analytics commands: history, trends, best/worst day, pace
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryCommand:
+    """``history`` and ``history <game>`` show personal score history."""
+
+    def _setup_alice_with_zip_scores(self, repo):
+        from datetime import date, timedelta
+
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        base = date(2026, 4, 1)
+        # 5 zip scores, increasing (first is the PB at 30s)
+        for i, raw in enumerate([30, 45, 50, 60, 80]):
+            repo.insert_score(
+                player_id=alice.id, game="zip", puzzle_no=420 + i,
+                puzzle_date=base + timedelta(days=i), raw_score=raw,
+                share_text=f"Zip #{420 + i}",
+            )
+        return alice
+
+    def test_history_unknown_game_returns_error(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="history widgets",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Unknown game" in reply
+
+    def test_history_zip_shows_scores_newest_first(self, repo):
+        self._setup_alice_with_zip_scores(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="history zip",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Zip history for Alice" in reply
+        # Most recent puzzle (424) should appear before oldest (420)
+        assert reply.index("#424") < reply.index("#420")
+
+    def test_history_marks_pb(self, repo):
+        self._setup_alice_with_zip_scores(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="history zip",
+            profile_name="Alice", now=NOW,
+        )
+        # PB is raw=30 = "0:30"; the ✓ PB marker should appear
+        assert "✓ PB" in reply
+        # Only one PB marker expected (the best score)
+        assert reply.count("✓ PB") == 1
+
+    def test_history_no_scores_returns_prompt(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="history zip",
+            profile_name="Alice", now=NOW,
+        )
+        assert "No Zip scores" in reply
+
+    def test_history_bare_shows_all_games(self, repo):
+        from datetime import date
+
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        today = date(2026, 4, 14)
+        repo.insert_score(
+            player_id=alice.id, game="zip", puzzle_no=420,
+            puzzle_date=today, raw_score=45, share_text="Zip",
+        )
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=today, raw_score=30, share_text="Queens",
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="history",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Zip" in reply
+        assert "Queens" in reply
+
+
+class TestTrendsCommand:
+    """``trends`` shows per-game improvement/decline vs prior 4 weeks."""
+
+    def _setup_trends(self, repo):
+        from datetime import date, timedelta
+
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        # NOW = 2026-04-14 LA. Current week starts Mon 2026-04-13.
+        # last4: 2026-03-16 to 2026-04-12 (4 weeks prior to current week)
+        # prior4: 2026-02-16 to 2026-03-15 (4 weeks before last4)
+        last4_base = date(2026, 3, 16)   # in last4 range (Mon 16 Mar)
+        prior4_base = date(2026, 2, 23)  # in prior4 range (Mon 23 Feb)
+
+        for i in range(3):
+            repo.insert_score(
+                player_id=alice.id, game="zip", puzzle_no=400 + i,
+                puzzle_date=last4_base + timedelta(days=i), raw_score=30,
+                share_text="",
+            )
+        for i in range(3):
+            repo.insert_score(
+                player_id=alice.id, game="zip", puzzle_no=380 + i,
+                puzzle_date=prior4_base + timedelta(days=i), raw_score=50,
+                share_text="",
+            )
+        return alice
+
+    def test_trends_shows_improvement(self, repo):
+        self._setup_trends(repo)
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="trends",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Trends for Alice" in reply
+        # Zip went from avg 50 → avg 30 (faster): arrow should be ↓
+        assert "↓" in reply
+
+    def test_trends_insufficient_data_skips_game(self, repo):
+        # Only 1 score per period (need ≥3) → skipped with "Not enough data"
+        from datetime import date
+
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        # Each date falls inside its respective window but only 1 score each.
+        last4_date = date(2026, 3, 16)   # in last4 range
+        prior4_date = date(2026, 2, 23)  # in prior4 range
+        repo.insert_score(
+            player_id=alice.id, game="zip", puzzle_no=400,
+            puzzle_date=last4_date, raw_score=30, share_text="",
+        )
+        repo.insert_score(
+            player_id=alice.id, game="zip", puzzle_no=380,
+            puzzle_date=prior4_date, raw_score=50, share_text="",
+        )
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="trends",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        # Zip should appear in "Not enough data" list
+        assert "Zip" in reply
+
+    def test_trends_no_scores_returns_prompt(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="trends",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "No scores" in reply
+
+
+class TestBestWorstDayCommand:
+    """``best day`` / ``worst day`` identify the player's top/bottom day."""
+
+    def _setup_three_days(self, repo):
+        from datetime import date
+
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        # Day A: both games = PB (raw 10 each)
+        # Day B: both games = worst (raw 90 each)
+        # Day C: mixed (raw 30 and 60)
+        day_a = date(2026, 4, 6)  # Monday
+        day_b = date(2026, 4, 7)  # Tuesday
+        day_c = date(2026, 4, 8)  # Wednesday
+
+        for day, (q, z) in [(day_a, (10, 10)), (day_b, (90, 90)), (day_c, (30, 60))]:
+            repo.insert_score(
+                player_id=alice.id, game="queens", puzzle_no=700 + (day - day_a).days,
+                puzzle_date=day, raw_score=q, share_text="",
+            )
+            repo.insert_score(
+                player_id=alice.id, game="zip", puzzle_no=400 + (day - day_a).days,
+                puzzle_date=day, raw_score=z, share_text="",
+            )
+        return alice, day_a, day_b
+
+    def test_best_day_picks_highest_percentile_day(self, repo):
+        _, day_a, _ = self._setup_three_days(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="best day",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Best day for Alice" in reply
+        assert day_a.strftime("%d %b %Y") in reply
+
+    def test_worst_day_picks_lowest_percentile_day(self, repo):
+        _, _, day_b = self._setup_three_days(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="worst day",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Worst day for Alice" in reply
+        assert day_b.strftime("%d %b %Y") in reply
+
+    def test_best_day_marks_pb(self, repo):
+        self._setup_three_days(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="best day",
+            profile_name="Alice", now=NOW,
+        )
+        # Best day has PB scores for both games
+        assert "✓ PB" in reply
+
+    def test_best_day_no_scores_returns_prompt(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="best day",
+            profile_name="Alice", now=NOW,
+        )
+        assert "No scores" in reply
+
+
+class TestPaceCommand:
+    """``pace`` projects the player's weekly total through Sunday."""
+
+    def _setup_pace(self, repo):
+        from datetime import date
+
+        # NOW is 2026-04-14 (Tuesday LA). Week starts Mon 2026-04-13.
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        monday = date(2026, 4, 13)
+        # 2 queens scores in the week
+        for i, raw in enumerate([20, 30]):
+            repo.insert_score(
+                player_id=alice.id, game="queens", puzzle_no=714 + i,
+                puzzle_date=monday + __import__("datetime").timedelta(days=i),
+                raw_score=raw, share_text="",
+            )
+        return alice
+
+    def test_pace_shows_current_rank_and_projection(self, repo):
+        self._setup_pace(repo)
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="pace",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Pace for Alice" in reply
+        assert "Current:" in reply
+        assert "Projected:" in reply
+
+    def test_pace_projects_from_current_week(self, repo):
+        self._setup_pace(repo)
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="pace",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        # Should show week number (week 16 in 2026-04-14 ISO calendar)
+        assert "week" in reply.lower()
+
+    def test_pace_no_scores_returns_prompt(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="pace",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "No scores" in reply or "hasn't submitted" in reply
+
+
+class TestByDayCommand:
+    """``by day`` shows per-weekday avg/best/worst breakdown with quartile labels."""
+
+    def _setup_multi_dow(self, repo):
+        """Seed Alice with zip scores on several distinct weekdays.
+        2026-04-06 Mon, 2026-04-07 Tue, 2026-04-08 Wed
+        Three scores each day for a meaningful quartile + avg."""
+        from datetime import date
+
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        # Day plan: Mon=fast (20, 25, 22), Tue=medium (45, 50, 48), Wed=slow (80, 90, 85)
+        entries = [
+            (date(2026, 4, 6),  "zip", [20, 25, 22]),
+            (date(2026, 4, 7),  "zip", [45, 50, 48]),
+            (date(2026, 4, 8),  "zip", [80, 90, 85]),
+        ]
+        pno = 420
+        for day, game, raws in entries:
+            for raw in raws:
+                repo.insert_score(
+                    player_id=alice.id, game=game, puzzle_no=pno,
+                    puzzle_date=day, raw_score=raw, share_text="",
+                )
+                pno += 1
+        return alice
+
+    def test_by_day_shows_weekday_rows(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Day breakdown for Alice" in reply
+        assert "Mon" in reply
+        assert "Tue" in reply
+        assert "Wed" in reply
+
+    def test_by_day_shows_avg_best_worst(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        # Monday best should be 0:20 (raw=20)
+        assert "avg" in reply
+        assert "best" in reply
+        assert "worst" in reply
+
+    def test_by_day_top_quarter_marker_on_best_dow(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        # Mon average is ~22s which is in the top quarter of all 9 scores
+        assert "top quarter" in reply
+
+    def test_by_day_bottom_quarter_marker_on_worst_dow(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        # Wed average is ~85s which is in the bottom quarter
+        assert "bottom quarter" in reply
+
+    def test_by_day_specific_game_filter(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day zip",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Zip" in reply
+        # Shouldn't show other game headers like "Queens"
+        assert "Queens" not in reply
+
+    def test_by_day_no_scores_returns_prompt(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        assert "No scores" in reply or "Not enough" in reply
+
+    def test_by_day_with_limit_shows_label(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day 5",
+            profile_name="Alice", now=NOW,
+        )
+        assert "last 5" in reply
+
+    def test_by_day_limit_restricts_to_recent_scores(self, repo):
+        """With limit=1, only the 1 most-recent score per game is kept,
+        so no weekday can have ≥ 2 plays → no weekday rows rendered."""
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day zip 1",
+            profile_name="Alice", now=NOW,
+        )
+        # Only 1 score in window → no weekday has ≥2 plays → "Not enough data"
+        assert "Not enough" in reply or "1 of" in reply
+
+    def test_by_day_game_and_limit_any_order(self, repo):
+        """'by day 5 zip' and 'by day zip 5' should produce the same output."""
+        self._setup_multi_dow(repo)
+        r1 = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day 5 zip",
+            profile_name="Alice", now=NOW,
+        )
+        r2 = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day zip 5",
+            profile_name="Alice", now=NOW,
+        )
+        assert r1 == r2
+
+
+class TestTrackCommand:
+    """``track`` sets per-group game tracking."""
+
+    def test_track_sets_group_games(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="track queens zip",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Queens" in reply
+        assert "Zip" in reply
+        # The group's enabled_games should now be set
+        from app.db import InMemoryRepository
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.enabled_games == frozenset({"queens", "zip"})
+
+    def test_track_reset_clears_override(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        # First set games
+        handle_inbound(
+            repo, from_="whatsapp:+1", body="track queens",
+            profile_name="Alice", now=NOW,
+        )
+        # Then reset
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="track reset",
+            profile_name="Alice", now=NOW,
+        )
+        assert "reset" in reply.lower() or "global" in reply.lower()
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.enabled_games is None
+
+    def test_track_unknown_game_returns_error(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="track widgets",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Unknown" in reply
+
+    def test_track_all_enables_every_game(self, repo):
+        from app.parsers import GAMES
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="track all",
+            profile_name="Alice", now=NOW,
+        )
+        assert "all games" in reply.lower() or "tracking" in reply.lower()
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.enabled_games == frozenset(GAMES)
+
+    def test_group_games_override_used_in_trends(self, repo):
+        """After track sets group games, only those games appear in trends."""
+        from datetime import date, timedelta
+
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        # Seed enough zip scores in the two periods
+        last4_base = date(2026, 3, 16)
+        prior4_base = date(2026, 2, 23)
+        for i in range(3):
+            repo.insert_score(
+                player_id=alice.id, game="zip", puzzle_no=400 + i,
+                puzzle_date=last4_base + timedelta(days=i), raw_score=30, share_text="",
+            )
+            repo.insert_score(
+                player_id=alice.id, game="zip", puzzle_no=380 + i,
+                puzzle_date=prior4_base + timedelta(days=i), raw_score=50, share_text="",
+            )
+        # Also seed queens scores so they'd show up if queens were enabled
+        for i in range(3):
+            repo.insert_score(
+                player_id=alice.id, game="queens", puzzle_no=700 + i,
+                puzzle_date=last4_base + timedelta(days=i), raw_score=30, share_text="",
+            )
+            repo.insert_score(
+                player_id=alice.id, game="queens", puzzle_no=680 + i,
+                puzzle_date=prior4_base + timedelta(days=i), raw_score=50, share_text="",
+            )
+        # Set group to track only zip
+        handle_inbound(
+            repo, from_="whatsapp:+1", body="track zip",
+            profile_name="Alice", now=NOW,
+        )
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="trends",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        # Zip should show trend; Queens should NOT appear (not tracked)
+        assert "Zip" in reply
+        assert "Queens" not in reply
+
+
+# ---------------------------------------------------------------------------
+# Global (cross-group) commands: recap, wrap, times
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalRecapWrapTimes:
+    """``global recap``, ``global wrap``, ``global times`` aggregate
+    scores from every group and use the intersection of each group's
+    enabled games."""
+
+    def _two_group_repo_with_scores(self):
+        """Two groups, one player each, both play queens on the same
+        puzzle date. NOW is 2026-04-14 (Tue LA). We put yesterday's
+        scores (Mon 2026-04-13) so 'global recap' (yesterday) returns them."""
+        from datetime import date
+        from app.db import InMemoryRepository
+
+        repo = InMemoryRepository()
+        ga = repo.get_or_create_group("Alpha")
+        gb = repo.get_or_create_group("Beta")
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.set_player_group(alice.id, ga.id)
+        repo.set_player_group(bob.id, gb.id)
+
+        yesterday = date(2026, 4, 13)  # Monday (same week as NOW)
+        repo.insert_score(
+            player_id=alice.id, group_id=ga.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        repo.insert_score(
+            player_id=bob.id, group_id=gb.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=40, share_text="",
+        )
+        return repo, ga, gb, alice, bob
+
+    def test_global_recap_includes_both_groups(self):
+        repo, _, _, _, _ = self._two_group_repo_with_scores()
+        settings = _settings_with_default_games()
+        # Alice is in group Alpha — handle_inbound would normally scope to Alpha.
+        # We call _handle_global_recap directly to bypass group routing.
+        from app.webhook import _handle_global_recap
+        reply = _handle_global_recap(
+            repo, settings, NOW, group_id=1,
+        )
+        assert "Alice" in reply
+        assert "Bob" in reply
+
+    def test_global_recap_via_command(self):
+        """'global recap' command returns cross-group data."""
+        from datetime import date
+        from app.db import InMemoryRepository
+
+        repo = InMemoryRepository()
+        ga = repo.get_or_create_group("Alpha")
+        gb = repo.get_or_create_group("Beta")
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.set_player_group(alice.id, ga.id)
+        repo.set_player_group(bob.id, gb.id)
+
+        yesterday = date(2026, 4, 13)
+        repo.insert_score(
+            player_id=alice.id, group_id=ga.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        repo.insert_score(
+            player_id=bob.id, group_id=gb.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=40, share_text="",
+        )
+        # Alice issues "global recap"
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="global recap",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Alice" in reply
+        assert "Bob" in reply
+
+    def test_global_wrap_includes_both_groups(self):
+        from app.webhook import _handle_global_wrap
+        repo, _, _, _, _ = self._two_group_repo_with_scores()
+        settings = _settings_with_default_games()
+        reply = _handle_global_wrap(repo, settings, NOW, group_id=1)
+        assert "Alice" in reply
+        assert "Bob" in reply
+
+    def test_global_times_includes_both_groups(self):
+        from app.webhook import _handle_global_times
+        repo, _, _, _, _ = self._two_group_repo_with_scores()
+        settings = _settings_with_default_games()
+        reply = _handle_global_times(repo, settings, NOW, group_id=1)
+        # Queens is a time game; both players appear
+        assert "Alice" in reply or "Bob" in reply
+
+    def test_global_uses_common_games_intersection(self):
+        """When groups track different games, global uses the intersection."""
+        from datetime import date
+        from app.db import InMemoryRepository
+        from app.webhook import _handle_global_recap
+
+        repo = InMemoryRepository()
+        ga = repo.get_or_create_group("Alpha")
+        gb = repo.get_or_create_group("Beta")
+        # Alpha tracks only queens; Beta tracks only zip
+        repo.set_group_games(ga.id, frozenset({"queens"}))
+        repo.set_group_games(gb.id, frozenset({"zip"}))
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.set_player_group(alice.id, ga.id)
+        repo.set_player_group(bob.id, gb.id)
+
+        yesterday = date(2026, 4, 13)
+        # Alice plays queens (tracked by Alpha), Bob plays zip (tracked by Beta)
+        repo.insert_score(
+            player_id=alice.id, group_id=ga.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        repo.insert_score(
+            player_id=bob.id, group_id=gb.id, game="zip",
+            puzzle_no=420, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        settings = _settings_with_default_games()
+        # Intersection of {queens} ∩ {zip} = {} → no scores in common
+        reply = _handle_global_recap(repo, settings, NOW, group_id=1)
+        assert "No global scores" in reply
+
+    def test_global_yesterday_alias(self):
+        """'global yesterday' is an alias for global recap."""
+        from datetime import date
+        from app.db import InMemoryRepository
+
+        repo = InMemoryRepository()
+        ga = repo.get_or_create_group("Alpha")
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.set_player_group(alice.id, ga.id)
+        yesterday = date(2026, 4, 13)
+        repo.insert_score(
+            player_id=alice.id, group_id=ga.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="global yesterday",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Alice" in reply

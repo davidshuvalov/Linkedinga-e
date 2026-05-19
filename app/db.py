@@ -31,6 +31,7 @@ class Group:
     name: str
     name_lower: str
     recap_to: Optional[str] = None
+    enabled_games: Optional[frozenset] = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,15 @@ class Repository(Protocol):
         """Return every player currently signed into ``group_id``.
         Used by the morning nudge / pre-reset jobs to fan out per
         group."""
+        ...
+
+    def set_group_games(self, group_id: int, games: Optional[frozenset]) -> None:
+        """Set the enabled games for ``group_id``.
+
+        Pass ``None`` to remove the override and fall back to the global
+        ``Settings.enabled_games`` value. Games are stored as a frozenset
+        of game keys (e.g. ``frozenset({'queens', 'zip', 'tango'})``).
+        """
         ...
 
     # ---- scores / recaps -------------------------------------------------
@@ -355,6 +365,19 @@ class InMemoryRepository:
             p for p in sorted(self._players.values(), key=lambda p: p.id)
             if p.group_id == group_id
         ]
+
+    def set_group_games(self, group_id: int, games: Optional[frozenset]) -> None:
+        existing = self._groups.get(group_id)
+        if existing is None:
+            return
+        updated = Group(
+            id=existing.id,
+            name=existing.name,
+            name_lower=existing.name_lower,
+            recap_to=existing.recap_to,
+            enabled_games=frozenset(games) if games else None,
+        )
+        self._groups[group_id] = updated
 
     # ---- players ---------------------------------------------------------
 
@@ -711,11 +734,20 @@ class SupabaseRepository:
         )
 
     def _row_to_group(self, row: Dict[str, Any]) -> Group:
+        import json
+        raw_games = row.get("enabled_games")
+        enabled_games: Optional[frozenset] = None
+        if raw_games:
+            try:
+                enabled_games = frozenset(json.loads(raw_games))
+            except Exception:
+                pass
         return Group(
             id=row["id"],
             name=row["name"],
             name_lower=row["name_lower"],
             recap_to=row.get("recap_to"),
+            enabled_games=enabled_games,
         )
 
     def get_or_create_group(self, name: str) -> Group:
@@ -727,7 +759,7 @@ class SupabaseRepository:
         key = name.lower()
         resp = (
             self._client.table("groups")
-            .select("id, name, name_lower, recap_to")
+            .select("id, name, name_lower, recap_to, enabled_games")
             .eq("name_lower", key)
             .limit(1)
             .execute()
@@ -746,7 +778,7 @@ class SupabaseRepository:
             return None
         resp = (
             self._client.table("groups")
-            .select("id, name, name_lower, recap_to")
+            .select("id, name, name_lower, recap_to, enabled_games")
             .eq("name_lower", name.lower())
             .limit(1)
             .execute()
@@ -760,7 +792,7 @@ class SupabaseRepository:
             return None
         resp = (
             self._client.table("groups")
-            .select("id, name, name_lower, recap_to")
+            .select("id, name, name_lower, recap_to, enabled_games")
             .eq("id", group_id)
             .limit(1)
             .execute()
@@ -774,7 +806,7 @@ class SupabaseRepository:
             return []
         resp = (
             self._client.table("groups")
-            .select("id, name, name_lower, recap_to")
+            .select("id, name, name_lower, recap_to, enabled_games")
             .order("id")
             .execute()
         )
@@ -804,6 +836,20 @@ class SupabaseRepository:
             .execute()
         )
         return [self._row_to_player(r) for r in resp.data or []]
+
+    def set_group_games(self, group_id: int, games: Optional[frozenset]) -> None:
+        if not self._has_group_columns:
+            raise RuntimeError(
+                "groups table missing — run schema migration before using group commands"
+            )
+        import json
+        value = json.dumps(sorted(games)) if games else None
+        (
+            self._client.table("groups")
+            .update({"enabled_games": value})
+            .eq("id", group_id)
+            .execute()
+        )
 
     def get_or_create_player(
         self, whatsapp_id: str, display_name: str

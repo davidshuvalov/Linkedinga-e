@@ -33,7 +33,7 @@ from datetime import date, datetime, timedelta
 from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from .config import Settings
-from .db import Repository, ScoreRow
+from .db import Group, Repository, ScoreRow
 from .parsers import (
     GAME_DISPLAY,
     GAME_DISPLAY_ORDER,
@@ -823,6 +823,210 @@ def _handle_leaderboard(
     return rendered
 
 
+# ---------------------------------------------------------------------------
+# Global (cross-group) helpers and handlers
+# ---------------------------------------------------------------------------
+
+
+def _collect_global_scores(
+    repo: Repository,
+    *,
+    date_from: "date",
+    date_to: "date",
+    grps: Optional[List] = None,
+) -> List[ScoreRow]:
+    """Return all scores across every group for the given date range.
+
+    Deduplicates by ``(player_id, game, puzzle_no)`` so a player who
+    switched groups mid-period isn't counted twice.
+    """
+    if grps is None:
+        grps = repo.list_groups()
+    all_scores: List[ScoreRow] = []
+    seen: set = set()
+    for grp in grps:
+        for s in repo.list_scores(date_from=date_from, date_to=date_to, group_id=grp.id):
+            key = (s.player_id, s.game, s.puzzle_no)
+            if key not in seen:
+                seen.add(key)
+                all_scores.append(s)
+    return all_scores
+
+
+def _common_games(
+    grps: List,
+    settings: Optional["Settings"],
+) -> frozenset:
+    """Intersection of enabled_games across all groups.
+
+    Groups without an override contribute ``settings.enabled_games``.
+    Falls back to the global settings when there are no groups.
+    """
+    fallback = settings.enabled_games if settings else frozenset(GAMES)
+    if not grps:
+        return fallback
+    return frozenset.intersection(*(
+        (grp.enabled_games if grp.enabled_games is not None else fallback)
+        for grp in grps
+    ))
+
+
+def _handle_global_recap(
+    repo: Repository,
+    settings: Optional["Settings"],
+    now: "datetime",
+    target_day: Optional["date"] = None,
+    *,
+    group_id: int,
+) -> str:
+    """Daily (or weekly-wrap) recap aggregated across every group.
+
+    ``target_day`` defaults to yesterday's LA date. Deduplicates
+    scores so cross-group players aren't double-counted. Uses the
+    intersection of all groups' enabled games.
+    """
+    if settings is None:
+        return "Global recap isn't available in this context."
+    from .puzzles import is_last_day_of_month, is_last_day_of_year, month_bounds, year_bounds
+    from .scheduler import daily_recap, weekly_wrap
+
+    today = la_date(now)
+    if target_day is None:
+        target_day = today - timedelta(days=1)
+
+    monday, sunday = week_bounds(target_day)
+    grps = repo.list_groups()
+    common = _common_games(grps, settings)
+
+    week_scores = [
+        s for s in _collect_global_scores(repo, date_from=monday, date_to=sunday, grps=grps)
+        if s.game in common
+    ]
+    if not week_scores:
+        return (
+            f"No global scores for week of {monday.strftime('%a %d %b %Y')}."
+        )
+
+    month_scores = None
+    if is_last_day_of_month(target_day):
+        m_start, m_end = month_bounds(target_day)
+        month_scores = [
+            s for s in _collect_global_scores(repo, date_from=m_start, date_to=m_end, grps=grps)
+            if s.game in common
+        ]
+
+    year_scores = None
+    if is_last_day_of_year(target_day):
+        y_start, y_end = year_bounds(target_day)
+        year_scores = [
+            s for s in _collect_global_scores(repo, date_from=y_start, date_to=y_end, grps=grps)
+            if s.game in common
+        ]
+
+    if target_day.weekday() == 6:  # Sunday → weekly wrap
+        return weekly_wrap(
+            monday, sunday, week_scores,
+            enabled_games=frozenset(common),
+            month_scores=month_scores,
+            year_scores=year_scores,
+            absent_player_names=[],
+        )
+    return daily_recap(
+        target_day, week_scores,
+        enabled_games=frozenset(common),
+        month_scores=month_scores,
+        year_scores=year_scores,
+        include_missing_today_nag=False,
+        absent_player_names=[],
+    )
+
+
+def _handle_global_wrap(
+    repo: Repository,
+    settings: Optional["Settings"],
+    now: "datetime",
+    *,
+    group_id: int,
+) -> str:
+    """Weekly-wrap format aggregated across every group for the current week."""
+    if settings is None:
+        return "Global wrap isn't available in this context."
+    from .scheduler import weekly_wrap
+
+    today = la_date(now)
+    monday, sunday = week_bounds(today)
+    grps = repo.list_groups()
+    common = _common_games(grps, settings)
+
+    week_scores = [
+        s for s in _collect_global_scores(repo, date_from=monday, date_to=sunday, grps=grps)
+        if s.game in common and s.puzzle_date <= today
+    ]
+    if not week_scores:
+        return f"No global scores yet for week of {monday.strftime('%a %d %b %Y')}."
+
+    return weekly_wrap(
+        monday, sunday, week_scores,
+        enabled_games=frozenset(common),
+        absent_player_names=[],
+    )
+
+
+def _handle_global_times(
+    repo: Repository,
+    settings: Optional["Settings"],
+    now: "datetime",
+    *,
+    group_id: int,
+) -> str:
+    """Per-game time-standings aggregated across all groups for the current week."""
+    if settings is None:
+        return "Global times aren't available in this context."
+    from .scoring import _NON_TIME_GAMES
+    from .scheduler import _format_seconds
+
+    today = la_date(now)
+    monday, sunday = week_bounds(today)
+    grps = repo.list_groups()
+    common = _common_games(grps, settings)
+
+    all_scores = [
+        s for s in _collect_global_scores(repo, date_from=monday, date_to=sunday, grps=grps)
+        if s.game in common and s.puzzle_date <= today
+    ]
+    if not all_scores:
+        return f"No global scores yet for week of {monday.strftime('%a %d %b %Y')}."
+
+    per_game: Dict[str, Dict[int, List[int]]] = {}
+    player_names: Dict[int, str] = {}
+    for s in all_scores:
+        if s.game in _NON_TIME_GAMES:
+            continue
+        bucket = per_game.setdefault(s.game, {})
+        acc = bucket.setdefault(s.player_id, [0, 0])
+        acc[0] += s.raw_score
+        acc[1] += 1
+        player_names[s.player_id] = s.player_name
+
+    if not per_game:
+        return f"No time-based global scores yet for week of {monday.strftime('%a %d %b %Y')}."
+
+    header_date = today.strftime("%a %d %b %Y")
+    lines: List[str] = [f"Global game times — week so far ({header_date}):"]
+    for game in GAME_DISPLAY_ORDER:
+        stats = per_game.get(game)
+        if not stats:
+            continue
+        lines.append("")
+        lines.append(f"{GAME_DISPLAY[game]}:")
+        ranked = sorted(stats.items(), key=lambda kv: (kv[1][0], kv[0]))
+        for i, (pid, (total, subs)) in enumerate(ranked, start=1):
+            lines.append(
+                f"  {i}. {player_names[pid]}: {_format_seconds(total)} (G:{subs})"
+            )
+    return "\n".join(lines)
+
+
 def _handle_global_leaderboard(
     repo: Repository,
     settings: Optional[Settings],
@@ -849,17 +1053,28 @@ def _handle_global_leaderboard(
     from .scoring import prize_allocations, weekly_leaderboard as _score_weekly_lb
 
     today = la_date(now)
-    if from_ is not None and settings.enabled_games:
-        played = _games_played_today_by(
-            repo, from_, profile_name, today, settings.enabled_games,
-            group_id=group_id,
-        )
-        if played != set(settings.enabled_games):
-            return _no_peek_leaderboard(played, settings.enabled_games)
-
-    monday, sunday = week_bounds(today)
     grps = repo.list_groups()
 
+    # Effective games for the global view: intersection of every group's
+    # tracked games. Groups with no override use settings.enabled_games.
+    group_game_sets = [
+        (grp.enabled_games if grp.enabled_games is not None else settings.enabled_games)
+        for grp in grps
+    ]
+    if group_game_sets:
+        common_games = frozenset.intersection(*group_game_sets)
+    else:
+        common_games = settings.enabled_games
+
+    if from_ is not None and common_games:
+        played = _games_played_today_by(
+            repo, from_, profile_name, today, common_games,
+            group_id=group_id,
+        )
+        if played != set(common_games):
+            return _no_peek_leaderboard(played, common_games)
+
+    monday, sunday = week_bounds(today)
     all_scores: List[ScoreRow] = []
     seen: set = set()
     for grp in grps:
@@ -871,7 +1086,7 @@ def _handle_global_leaderboard(
 
     filtered = [
         s for s in all_scores
-        if s.game in settings.enabled_games
+        if s.game in common_games
         and s.puzzle_date <= today
         and (games is None or s.game in games)
     ]
@@ -888,6 +1103,12 @@ def _handle_global_leaderboard(
     if games:
         game_labels = " · ".join(GAME_DISPLAY[g] for g in games)
         title = f"Global ({game_labels}) — week so far ({header_date})"
+    elif frozenset(common_games) != frozenset(settings.enabled_games):
+        # Show which games are in the intersection when groups differ
+        common_labels = " · ".join(
+            GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in common_games
+        )
+        title = f"Global ({common_labels}) — week so far ({header_date})"
     else:
         title = f"Global — week so far ({header_date})"
     prior = [s for s in filtered if s.puzzle_date < today]
@@ -1095,19 +1316,30 @@ def _handle_pb(
     return "\n".join(lines)
 
 
-def _handle_games(settings: Optional[Settings]) -> str:
+def _handle_games(
+    settings: Optional[Settings],
+    group: Optional[Group] = None,
+) -> str:
     """Show which games count toward the leaderboard vs which are
-    parsed-but-untracked. Helps new players understand why their
-    Pinpoint score didn't show up in the wrap."""
+    parsed-but-untracked. When the group has its own game list, shows
+    the override and the global default side by side."""
     if settings is None:
         return "Game list isn't available in this context."
+    # Use group override if present, else global settings
+    effective = (
+        group.enabled_games if (group is not None and group.enabled_games is not None)
+        else settings.enabled_games
+    )
     enabled_display = [
-        GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in settings.enabled_games
+        GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in effective
     ]
     disabled_display = [
-        GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g not in settings.enabled_games
+        GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g not in effective
     ]
-    lines = [f"Tracked games ({len(enabled_display)}):"]
+    header = "Tracked games (this group):" if (
+        group is not None and group.enabled_games is not None
+    ) else f"Tracked games ({len(enabled_display)}):"
+    lines = [header]
     for g in enabled_display:
         lines.append(f"  - {g}")
     if disabled_display:
@@ -1115,7 +1347,64 @@ def _handle_games(settings: Optional[Settings]) -> str:
         lines.append("Not tracked (scores still stored, not scored):")
         for g in disabled_display:
             lines.append(f"  - {g}")
+    if group is not None and group.enabled_games is not None:
+        global_display = [
+            GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in settings.enabled_games
+        ]
+        if frozenset(effective) != frozenset(settings.enabled_games):
+            lines.append(f"\nGlobal default: {', '.join(global_display)}")
     return "\n".join(lines)
+
+
+def _handle_track(
+    repo: Repository,
+    settings: Optional[Settings],
+    group: Group,
+    raw_words: str,
+) -> str:
+    """Set this group's tracked games.
+
+    ``track queens zip tango`` — set exact game list for this group.
+    ``track reset`` / ``track default`` — remove override, use global setting.
+    ``track all`` — track every known game.
+    """
+    words = raw_words.strip().lower().split()
+    if not words:
+        return (
+            "Usage: track <game1> <game2> ...\n"
+            "E.g. track queens zip tango\n"
+            "Or: track reset (use global default)"
+        )
+    if words[0] in ("reset", "default", "off"):
+        repo.set_group_games(group.id, None)
+        fallback = (
+            ", ".join(GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER
+                      if settings and g in settings.enabled_games)
+            if settings else "global default"
+        )
+        return f"Game tracking reset to global default: {fallback}"
+
+    if words[0] == "all":
+        repo.set_group_games(group.id, frozenset(GAMES))
+        names = ", ".join(GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in GAMES)
+        return f"Now tracking all games for this group: {names}"
+
+    resolved: List[str] = []
+    unknown: List[str] = []
+    for w in words:
+        key = _parse_single_game_key(w)
+        if key is not None:
+            resolved.append(key)
+        else:
+            unknown.append(w)
+    if unknown:
+        return (
+            f"Unknown game(s): {', '.join(unknown)}. "
+            f"Known games: {', '.join(GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER)}"
+        )
+    repo.set_group_games(group.id, frozenset(resolved))
+    names = ", ".join(GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in resolved)
+    return f"Now tracking for this group: {names}"
 
 
 # Static scoring explanation. Stable text — kept inline so it's easy
@@ -1335,7 +1624,539 @@ def _handle_vs(
 
 
 # ---------------------------------------------------------------------------
-# Mutating commands
+# Personal analytics commands
+# ---------------------------------------------------------------------------
+
+
+def _parse_single_game_key(word: str) -> Optional[str]:
+    """Return a game key for ``word`` (exact key or display-name match),
+    or ``None`` if not recognised."""
+    if word in GAMES:
+        return word
+    display_to_key = {GAME_DISPLAY[k].lower(): k for k in GAMES}
+    return display_to_key.get(word)
+
+
+def _parse_history_command(lower: str) -> Tuple[bool, Optional[str]]:
+    """Parse ``history`` or ``history <game>``.
+
+    Returns ``(is_history, game_key_or_None)``. ``game_key_or_None`` is
+    ``None`` for the bare ``history`` command (show all games).
+    Returns ``(False, None)`` when the text doesn't start with
+    ``history``.
+    """
+    if lower == "history":
+        return True, None
+    if not lower.startswith("history "):
+        return False, None
+    word = lower[len("history "):].strip()
+    key = _parse_single_game_key(word)
+    if key is not None:
+        return True, key
+    return True, "__bad__"  # recognised prefix, unrecognised game
+
+
+def _handle_history(
+    repo: Repository,
+    from_: str,
+    profile_name: str,
+    game_key: Optional[str],
+    *,
+    group_id: int,
+    settings: Optional[Settings] = None,
+) -> str:
+    """Show personal score history — last 20 entries for a game (or
+    all enabled games over the last 30 days when no game specified)."""
+    display_name = (profile_name or "").strip() or from_
+    player = repo.get_or_create_player(from_, display_name)
+    all_scores = repo.list_player_scores(player.id, group_id=group_id)
+
+    enabled = settings.enabled_games if settings else frozenset(GAMES)
+
+    if game_key is not None:
+        # Single-game history
+        rows = sorted(
+            [s for s in all_scores if s.game == game_key],
+            key=lambda s: s.puzzle_date,
+            reverse=True,
+        )[:20]
+        if not rows:
+            return (
+                f"No {GAME_DISPLAY[game_key]} scores recorded yet. "
+                "Submit a share to get started!"
+            )
+        pb = min(s.raw_score for s in all_scores if s.game == game_key)
+        header = (
+            f"{GAME_DISPLAY[game_key]} history for {display_name} "
+            f"({len([s for s in all_scores if s.game == game_key])} scores):"
+        )
+        lines = [header]
+        for s in rows:
+            marker = " ✓ PB" if s.raw_score == pb else ""
+            lines.append(
+                f"  #{s.puzzle_no} {s.puzzle_date.strftime('%a %d %b')} "
+                f"— {format_raw_score(game_key, s.raw_score)}{marker}"
+            )
+        return "\n".join(lines)
+
+    # All-games summary: last 30 days, per enabled game
+    cutoff = (
+        max(s.puzzle_date for s in all_scores) if all_scores else None
+    )
+    if cutoff is None:
+        return "No scores recorded yet. Submit a LinkedIn game share to get started!"
+    from_date = cutoff - timedelta(days=30)
+    recent = [
+        s for s in all_scores
+        if s.game in enabled and s.puzzle_date >= from_date
+    ]
+    if not recent:
+        return f"No scores in the last 30 days for {display_name}."
+    pb_by_game = {
+        g: min(s.raw_score for s in all_scores if s.game == g)
+        for g in GAMES
+        if any(s.game == g for s in all_scores)
+    }
+    lines = [f"Recent scores for {display_name} (last 30 days):"]
+    for game in GAME_DISPLAY_ORDER:
+        game_rows = sorted(
+            [s for s in recent if s.game == game],
+            key=lambda s: s.puzzle_date,
+            reverse=True,
+        )
+        if not game_rows:
+            continue
+        lines.append(f"\n{GAME_DISPLAY[game]}:")
+        for s in game_rows:
+            marker = " ✓ PB" if s.raw_score == pb_by_game.get(game) else ""
+            lines.append(
+                f"  #{s.puzzle_no} {s.puzzle_date.strftime('%a %d %b')} "
+                f"— {format_raw_score(game, s.raw_score)}{marker}"
+            )
+    return "\n".join(lines)
+
+
+def _handle_trends(
+    repo: Repository,
+    from_: str,
+    profile_name: str,
+    now: datetime,
+    settings: Settings,
+    *,
+    group_id: int,
+) -> str:
+    """Compare last 4 weeks vs prior 4 weeks per game.
+
+    Shows ↓ (improving), ↑ (declining), → (steady) for each game
+    that has enough data in both halves. Time games: lower is better.
+    Pinpoint: lower guesses is better.
+    """
+    display_name = (profile_name or "").strip() or from_
+    player = repo.get_or_create_player(from_, display_name)
+    all_scores = repo.list_player_scores(player.id, group_id=group_id)
+
+    if not all_scores:
+        return "No scores recorded yet. Submit some shares first!"
+
+    today = la_date(now)
+    monday, _ = week_bounds(today)
+    # "Last 4 weeks" = the 4 completed weeks before the current week.
+    last4_end = monday - timedelta(days=1)
+    last4_start = monday - timedelta(weeks=4)
+    prior4_end = last4_start - timedelta(days=1)
+    prior4_start = last4_start - timedelta(weeks=4)
+
+    MIN_PLAYS = 3  # minimum plays in each period to show a trend
+
+    enabled = settings.enabled_games
+    lines = [f"Trends for {display_name} (last 4 wks vs prior 4 wks):"]
+    no_data: List[str] = []
+
+    for game in GAME_DISPLAY_ORDER:
+        if game not in enabled:
+            continue
+        game_scores = [s for s in all_scores if s.game == game]
+        last4 = [
+            s.raw_score for s in game_scores
+            if last4_start <= s.puzzle_date <= last4_end
+        ]
+        prior4 = [
+            s.raw_score for s in game_scores
+            if prior4_start <= s.puzzle_date <= prior4_end
+        ]
+        if len(last4) < MIN_PLAYS or len(prior4) < MIN_PLAYS:
+            no_data.append(GAME_DISPLAY[game])
+            continue
+
+        avg_last = sum(last4) / len(last4)
+        avg_prior = sum(prior4) / len(prior4)
+        pct_change = (avg_last - avg_prior) / avg_prior  # negative = improved
+
+        if abs(pct_change) < 0.05:
+            arrow = "→"
+            label = "steady"
+        elif pct_change < 0:
+            arrow = "↓"  # faster / fewer guesses
+            label = "faster" if game != "pinpoint" else "fewer guesses"
+        else:
+            arrow = "↑"  # slower / more guesses
+            label = "slower" if game != "pinpoint" else "more guesses"
+
+        fmt_last = format_raw_score(game, int(round(avg_last)))
+        fmt_prior = format_raw_score(game, int(round(avg_prior)))
+        name_col = f"{GAME_DISPLAY[game]}:"
+        lines.append(f"  {name_col:<14} {arrow}  {fmt_prior} → {fmt_last}  ({label})")
+
+    if not no_data and len(lines) == 1:
+        return f"Not enough history yet to show trends for {display_name}."
+    if no_data:
+        lines.append(f"\nNot enough data: {', '.join(no_data)}")
+    return "\n".join(lines)
+
+
+def _handle_best_worst_day(
+    repo: Repository,
+    from_: str,
+    profile_name: str,
+    kind: str,
+    *,
+    group_id: int,
+) -> str:
+    """Show the player's single best or worst performance day.
+
+    Quality of a day is measured by the average percentile of each
+    game's score within the player's personal history for that game
+    (1.0 = PB on everything, 0.0 = worst-ever on everything).
+    Requires at least 2 games on the candidate day and 2+ prior
+    scores per game to compute a meaningful percentile.
+    """
+    display_name = (profile_name or "").strip() or from_
+    player = repo.get_or_create_player(from_, display_name)
+    all_scores = repo.list_player_scores(player.id, group_id=group_id)
+
+    if not all_scores:
+        return "No scores recorded yet. Submit some shares first!"
+
+    from collections import defaultdict
+    by_game: Dict[str, List[int]] = defaultdict(list)
+    for s in all_scores:
+        by_game[s.game].append(s.raw_score)
+
+    by_date: Dict[date, List[ScoreRow]] = defaultdict(list)
+    for s in all_scores:
+        by_date[s.puzzle_date].append(s)
+
+    date_quality: Dict[date, float] = {}
+    for day, day_scores in by_date.items():
+        if len(day_scores) < 2:
+            continue
+        percentiles: List[float] = []
+        for s in day_scores:
+            history = sorted(by_game[s.game])  # asc = better first
+            if len(history) < 2:
+                continue
+            rank = history.index(s.raw_score)  # 0 = best (PB)
+            pct = 1.0 - rank / (len(history) - 1)  # 1.0 = PB, 0.0 = worst
+            percentiles.append(pct)
+        if percentiles:
+            date_quality[day] = sum(percentiles) / len(percentiles)
+
+    if not date_quality:
+        return (
+            f"Not enough history yet to determine your {kind} day. "
+            "Keep submitting!"
+        )
+
+    if kind == "best":
+        target_day = max(date_quality, key=lambda d: date_quality[d])
+        title = f"Best day for {display_name}:"
+    else:
+        target_day = min(date_quality, key=lambda d: date_quality[d])
+        title = f"Worst day for {display_name}:"
+
+    pb_by_game = {
+        g: min(raws) for g, raws in by_game.items()
+    }
+
+    day_rows = sorted(by_date[target_day], key=lambda s: GAME_DISPLAY_ORDER.index(s.game)
+                      if s.game in GAME_DISPLAY_ORDER else 99)
+    lines = [
+        title,
+        f"  {target_day.strftime('%a %d %b %Y')} ({len(day_rows)} games):",
+    ]
+    for s in day_rows:
+        marker = " ✓ PB" if s.raw_score == pb_by_game.get(s.game) else ""
+        lines.append(
+            f"  {GAME_DISPLAY[s.game]:<14} — "
+            f"{format_raw_score(s.game, s.raw_score)}{marker}"
+        )
+    return "\n".join(lines)
+
+
+def _handle_pace(
+    repo: Repository,
+    from_: str,
+    profile_name: str,
+    now: datetime,
+    settings: Settings,
+    *,
+    group_id: int,
+) -> str:
+    """Project the sender's weekly points total through Sunday.
+
+    Uses the current week's submissions-per-day rate to estimate
+    how many more games the player will play, then applies their
+    current points-per-game rate to project a final total.
+    """
+    from .scoring import weekly_leaderboard
+    display_name = (profile_name or "").strip() or from_
+    player = repo.get_or_create_player(from_, display_name)
+
+    today = la_date(now)
+    monday, sunday = week_bounds(today)
+    week_scores = repo.list_scores(
+        date_from=monday, date_to=today, group_id=group_id
+    )
+    filtered = [s for s in week_scores if s.game in settings.enabled_games]
+
+    lb = weekly_leaderboard(filtered)
+    if not lb:
+        return "No scores this week yet — nothing to project from."
+
+    # Find player in leaderboard
+    my_entry = next((e for e in lb if e.player_id == player.id), None)
+    if my_entry is None:
+        return (
+            f"{display_name} hasn't submitted anything this week yet — "
+            "play some games first!"
+        )
+
+    current_pts = my_entry.total_points
+    submissions = my_entry.submissions
+    rank = next(i + 1 for i, e in enumerate(lb) if e.player_id == player.id)
+
+    days_elapsed = max(1, (today - monday).days + 1)
+    days_remaining = (sunday - today).days
+    games_per_day = submissions / days_elapsed
+    pts_per_game = current_pts / submissions if submissions else 0.0
+    projected_extra = pts_per_game * games_per_day * days_remaining
+    projected_lo = round(current_pts + projected_extra * 0.8, 1)
+    projected_hi = round(current_pts + projected_extra * 1.2, 1)
+
+    from .jobs import _fmt_weekly_points
+    lines = [
+        f"Pace for {display_name} — week {today.isocalendar()[1]}:",
+        (
+            f"  Current:   {_fmt_weekly_points(current_pts)} "
+            f"(rank {rank} of {len(lb)}, {submissions} games played)"
+        ),
+    ]
+    if days_remaining == 0:
+        lines.append("  Week complete — no projection needed.")
+    else:
+        lines.append(
+            f"  Projected: ~{_fmt_weekly_points(projected_lo)}–"
+            f"{_fmt_weekly_points(projected_hi)} by Sunday"
+        )
+
+    # Gap to nearest neighbours
+    if rank > 1:
+        above = lb[rank - 2]
+        gap_above = above.total_points - current_pts
+        lines.append(
+            f"  Gap to {rank - 1}{_ordinal_suffix(rank - 1)} place: "
+            f"{_fmt_weekly_points(gap_above)} behind"
+        )
+    if rank < len(lb):
+        below = lb[rank]
+        gap_below = current_pts - below.total_points
+        lines.append(
+            f"  Ahead of {rank + 1}{_ordinal_suffix(rank + 1)} place: "
+            f"{_fmt_weekly_points(gap_below)}"
+        )
+
+    return "\n".join(lines)
+
+
+def _ordinal_suffix(n: int) -> str:
+    if 11 <= n % 100 <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
+_DOW_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_DOW_FULL = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+_BY_DAY_BARE = frozenset({"by day", "byday", "day stats", "daystats", "days"})
+_BY_DAY_PREFIX = ("by day ", "byday ", "day stats ", "daystats ", "days ")
+
+
+def _parse_by_day_command(
+    lower: str,
+) -> Optional[Tuple[Optional[str], Optional[int]]]:
+    """Parse ``by day [game] [n]`` variants.
+
+    Accepts tokens in any order: game name and integer limit are
+    distinguished by type. Returns ``(game_key_or_None, limit_or_None)``
+    on a match, ``None`` if the input isn't a by-day command at all.
+
+    Examples:
+      ``by day``        → (None, None)
+      ``by day 20``     → (None, 20)
+      ``by day zip``    → ('zip', None)
+      ``by day zip 20`` → ('zip', 20)
+      ``by day 20 zip`` → ('zip', 20)
+    """
+    if lower in _BY_DAY_BARE:
+        return None, None
+    rest: Optional[str] = None
+    for prefix in _BY_DAY_PREFIX:
+        if lower.startswith(prefix):
+            rest = lower[len(prefix):].strip()
+            break
+    if rest is None:
+        return None  # not a by-day command
+
+    game_key: Optional[str] = None
+    limit: Optional[int] = None
+    for part in rest.split():
+        if part.isdigit() and limit is None:
+            limit = int(part)
+        else:
+            key = _parse_single_game_key(part)
+            if key is not None and game_key is None:
+                game_key = key
+    return game_key, limit
+
+
+def _handle_dow_stats(
+    repo: Repository,
+    from_: str,
+    profile_name: str,
+    game_filter: Optional[str],  # None = all games; else specific game key
+    *,
+    group_id: int,
+    settings: Optional[Settings] = None,
+    limit: Optional[int] = None,  # restrict to last N scores per game
+) -> str:
+    """Per-day-of-week breakdown for each game.
+
+    For every (game, weekday) pair with ≥ 2 plays, shows:
+      - play count
+      - average score
+      - personal best (day's best)
+      - personal worst (day's worst)
+      - quartile label: the average falls in Q1 (top 25%), Q2, Q3, or
+        Q4 (bottom 25%) relative to ALL of the player's scores for
+        that game.
+
+    ``limit`` restricts analysis to the last N scores per game (sorted
+    by puzzle_date descending). The quartile boundaries are computed on
+    that same window, not the full history.
+
+    Requires ≥ 4 total scores per game to compute a meaningful quartile.
+    """
+    display_name = (profile_name or "").strip() or from_
+    player = repo.get_or_create_player(from_, display_name)
+    all_scores = repo.list_player_scores(player.id, group_id=group_id)
+
+    if not all_scores:
+        return "No scores recorded yet. Submit some shares first!"
+
+    enabled = settings.enabled_games if settings else frozenset(GAMES)
+
+    games_to_show: List[str] = []
+    if game_filter is not None:
+        if game_filter in enabled:
+            games_to_show = [game_filter]
+        else:
+            return f"{GAME_DISPLAY[game_filter]} isn't in the enabled games list."
+    else:
+        games_to_show = [g for g in GAME_DISPLAY_ORDER if g in enabled]
+
+    limit_label = f" — last {limit}" if limit else ""
+    header = f"Day breakdown for {display_name}{limit_label}:"
+    sections: List[str] = [header]
+    no_data: List[str] = []
+
+    for game in games_to_show:
+        # Sort newest-first so limit keeps the most recent scores.
+        game_scores_all = sorted(
+            [s for s in all_scores if s.game == game],
+            key=lambda s: s.puzzle_date, reverse=True,
+        )
+        if not game_scores_all:
+            continue
+        game_scores = game_scores_all[:limit] if limit else game_scores_all
+
+        total_count = len(game_scores)
+        all_raws = sorted(s.raw_score for s in game_scores)
+
+        # Group by weekday (0=Mon … 6=Sun)
+        by_dow: Dict[int, List[int]] = {}
+        for s in game_scores:
+            dow = s.puzzle_date.weekday()
+            by_dow.setdefault(dow, []).append(s.raw_score)
+
+        # Quartile boundaries on the full distribution (lower = better).
+        # Q1 = top 25% (best), Q4 = bottom 25% (worst).
+        def _quartile_label(avg_raw: float) -> str:
+            if total_count < 4:
+                return ""
+            q1_cut = all_raws[total_count // 4]          # 25th pct = top quarter
+            q3_cut = all_raws[int(total_count * 0.75)]   # 75th pct = bottom quarter
+            if avg_raw <= q1_cut:
+                return " ✦ top quarter"
+            if avg_raw >= q3_cut:
+                return " ✧ bottom quarter"
+            return ""
+
+        rows: List[Tuple[int, List[int]]] = sorted(by_dow.items())
+        # Skip games where no weekday has ≥ 2 plays
+        if not any(len(v) >= 2 for _, v in rows):
+            no_data.append(GAME_DISPLAY[game])
+            continue
+
+        total_all = len(game_scores_all)
+        count_label = (
+            f"{total_count} of {total_all}"
+            if (limit and total_count < total_all)
+            else str(total_count)
+        )
+        name_col = f"{GAME_DISPLAY[game]} ({count_label} plays):"
+        sections.append(f"\n{name_col}")
+
+        for dow, raws in rows:
+            if len(raws) < 2:
+                # Single-play days: show raw data but no quartile
+                fmt = format_raw_score(game, raws[0])
+                sections.append(
+                    f"  {_DOW_NAMES[dow]}  1 play   {fmt}"
+                )
+                continue
+            avg = sum(raws) / len(raws)
+            best = min(raws)
+            worst = max(raws)
+            ql = _quartile_label(avg)
+            sections.append(
+                f"  {_DOW_NAMES[dow]}  "
+                f"{len(raws)} plays  "
+                f"avg {format_raw_score(game, int(round(avg)))}  "
+                f"best {format_raw_score(game, best)}  "
+                f"worst {format_raw_score(game, worst)}"
+                f"{ql}"
+            )
+
+    if len(sections) == 1:
+        return (
+            f"Not enough data yet to show a day breakdown for {display_name}. "
+            "Keep submitting!"
+        )
+    if no_data:
+        sections.append(f"\nNot enough data (need ≥ 2 plays per day): {', '.join(no_data)}")
+    return "\n".join(sections)
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -1752,6 +2573,13 @@ def handle_inbound(
 
     group_id = sender_group.id
 
+    # Override settings.enabled_games with this group's specific game list
+    # if the group has its own games configured. This propagates automatically
+    # to every handler that receives ``settings``.
+    if settings is not None and sender_group.enabled_games is not None:
+        from dataclasses import replace as _dc_replace
+        settings = _dc_replace(settings, enabled_games=sender_group.enabled_games)
+
     # Check for commands before attempting score parsing
     if lower in ("help", "?", "commands"):
         return _HELP_TEXT
@@ -1765,7 +2593,7 @@ def handle_inbound(
         return _handle_unparsed(repo)
     if lower in ("wrap", "week"):
         return _handle_wrap(repo, settings, now, group_id=group_id)
-    if lower in ("all", "all week", "history"):
+    if lower in ("all", "all week"):
         return _handle_all_week(repo, settings, now, group_id=group_id)
     if lower in ("leaderboard", "standings"):
         return _handle_leaderboard(
@@ -1804,14 +2632,44 @@ def handle_inbound(
             for g in multi_games
         ]
         return "\n\n".join(parts)
-    # ``global`` / ``global leaderboard`` — leaderboard across all groups.
-    # Optional game filter: ``global leaderboard zip tango`` etc.
-    _GLOBAL_PREFIXES = (
-        "global leaderboard ", "global ", "all groups leaderboard ", "all groups ",
-    )
-    for _gpfx in _GLOBAL_PREFIXES:
+    # ``global`` / ``all groups`` — cross-group commands.
+    # Sub-commands are checked first, then the game-filter leaderboard.
+    _GLOBAL_BARE_CMDS = frozenset({
+        "global", "global leaderboard", "all groups", "all groups leaderboard",
+    })
+    _GLOBAL_RECAP_CMDS = frozenset({
+        "global recap", "global yesterday", "global daily",
+        "all groups recap", "all groups yesterday",
+    })
+    _GLOBAL_WRAP_CMDS = frozenset({
+        "global wrap", "global week", "global weekly",
+        "all groups wrap", "all groups week",
+    })
+    _GLOBAL_TIMES_CMDS = frozenset({
+        "global times", "global time", "global speed",
+        "all groups times", "all groups time",
+    })
+
+    if lower in _GLOBAL_RECAP_CMDS:
+        return _handle_global_recap(repo, settings, now, group_id=group_id)
+    if lower in _GLOBAL_WRAP_CMDS:
+        return _handle_global_wrap(repo, settings, now, group_id=group_id)
+    if lower in _GLOBAL_TIMES_CMDS:
+        return _handle_global_times(repo, settings, now, group_id=group_id)
+
+    # ``global <date>`` — global recap for a specific date.
+    _GLOBAL_DATE_PFXS = ("global ", "all groups ")
+    for _gpfx in _GLOBAL_DATE_PFXS:
         if lower.startswith(_gpfx):
             _grest = lower[len(_gpfx):].strip()
+            # Try as a date first (YYYY-MM-DD or relative "yesterday")
+            _date_target = _resolve_leaderboard_target(_grest, la_date(now))
+            if _date_target is not None:
+                _gday, _gerr = _date_target
+                if _gerr is not None:
+                    return _gerr
+                return _handle_global_recap(repo, settings, now, _gday, group_id=group_id)
+            # Try as game filter for global leaderboard
             _ggames = _parse_game_names_from_words(_grest.split()) if _grest else []
             if _ggames is not None:
                 return _handle_global_leaderboard(
@@ -1819,8 +2677,9 @@ def handle_inbound(
                     games=_ggames or None,
                     from_=from_, profile_name=profile_name, group_id=group_id,
                 )
-            break  # unrecognised words → fall through
-    if lower in ("global", "global leaderboard", "all groups", "all groups leaderboard"):
+            break
+
+    if lower in _GLOBAL_BARE_CMDS:
         return _handle_global_leaderboard(
             repo, settings, now,
             from_=from_, profile_name=profile_name, group_id=group_id,
@@ -1856,7 +2715,10 @@ def handle_inbound(
     if lower in ("missing", "who", "ghosts"):
         return _handle_missing(repo, settings, now, group_id=group_id)
     if lower in ("games", "enabled"):
-        return _handle_games(settings)
+        return _handle_games(settings, group=sender_group)
+    if lower in ("track", "tracking") or lower.startswith("track "):
+        raw_args = lower[len("track"):].strip() if lower.startswith("track") else ""
+        return _handle_track(repo, settings, sender_group, raw_args)
     if lower in ("rules", "scoring"):
         return _handle_rules()
     if lower in ("prize", "prizes"):
@@ -1899,6 +2761,52 @@ def handle_inbound(
     if opp is not None:
         return _handle_vs(
             repo, from_, profile_name, opp, group_id=group_id
+        )
+
+    # ``history`` / ``history <game>`` — personal score history.
+    _hist_match, _hist_game = _parse_history_command(lower)
+    if _hist_match:
+        if _hist_game == "__bad__":
+            return (
+                "Unknown game. Try: history zip, history tango, history queens, "
+                "history pinpoint, history crossclimb, history patches, "
+                "history mini sudoku — or just 'history' for all games."
+            )
+        return _handle_history(
+            repo, from_, profile_name, _hist_game,
+            group_id=group_id, settings=settings,
+        )
+
+    # ``trends`` — last 4 weeks vs prior 4 weeks.
+    if lower in ("trends", "trend") and settings is not None:
+        return _handle_trends(
+            repo, from_, profile_name, now, settings, group_id=group_id
+        )
+
+    # ``best day`` / ``worst day`` — single best/worst performance day.
+    if lower in ("best day", "bestday", "my best day"):
+        return _handle_best_worst_day(
+            repo, from_, profile_name, "best", group_id=group_id
+        )
+    if lower in ("worst day", "worstday", "my worst day"):
+        return _handle_best_worst_day(
+            repo, from_, profile_name, "worst", group_id=group_id
+        )
+
+    # ``pace`` — current-week projection to Sunday.
+    if lower in ("pace", "projection", "projected") and settings is not None:
+        return _handle_pace(
+            repo, from_, profile_name, now, settings, group_id=group_id
+        )
+
+    # ``by day [game] [n]`` — per-DOW breakdown with optional game filter
+    # and optional recency limit (last N scores).
+    _byd = _parse_by_day_command(lower)
+    if _byd is not None:
+        _byd_game, _byd_limit = _byd
+        return _handle_dow_stats(
+            repo, from_, profile_name, _byd_game,
+            group_id=group_id, settings=settings, limit=_byd_limit,
         )
 
     # ``name <new>`` — self-assigned display name.
