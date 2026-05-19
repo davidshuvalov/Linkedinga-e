@@ -781,6 +781,35 @@ def _round_and_reconcile(
     return rounded
 
 
+def _equalize_tied_groups(
+    scores: List[float], times: Sequence[float], n: int
+) -> List[float]:
+    """Average the final scores within each tied-time group.
+
+    After rounding and reconciliation, two players who finished at the
+    same time can end up with different scores (e.g. 1.1 vs 1.0) because
+    ``_round_and_reconcile`` drops the rounding residue on only the last
+    player in the group. This pass re-averages every tied group so they
+    come out equal.  The round total may drift by at most 0.05 * group_size
+    but the per-player fairness invariant is more important than exact sums.
+    """
+    result = list(scores)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and times[j + 1] == times[i]:
+            j += 1
+        if j > i:
+            group = result[i : j + 1]
+            if len(set(group)) > 1:
+                avg = sum(group) / len(group)
+                equal_score = round(avg, 1)
+                for k in range(i, j + 1):
+                    result[k] = equal_score
+        i = j + 1
+    return result
+
+
 def _apply_floors_and_ceiling(
     rounded: List[float], times: Sequence[float], n: int
 ) -> List[float]:
@@ -960,6 +989,7 @@ def competitive_score(
     scores = _floor_and_rebalance(scores, total_base, n)
     rounded = _round_and_reconcile(scores, base_points, total_base, n)
     rounded = _apply_floors_and_ceiling(rounded, times, n)
+    rounded = _equalize_tied_groups(rounded, times, n)
 
     return [
         {
