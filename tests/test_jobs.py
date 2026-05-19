@@ -31,6 +31,7 @@ from app.jobs import (
     run_pre_reset_warning,
     run_weekly_wrap_early,
     send_champion_loser_dms,
+    send_period_champion_loser_dms,
 )
 
 SYDNEY = ZoneInfo("Australia/Sydney")
@@ -1017,3 +1018,404 @@ class TestCronGroupFanOut:
         assert original(target, "daily", group_id=b.id)
         # Only one successful send.
         assert mock_send.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# End-of-day recap: fires when all players done OR at the deadline
+# ---------------------------------------------------------------------------
+
+
+class TestRecapDeadlineFire:
+    """The recap has two firing paths:
+      1. Event-driven early-fire — the moment the last player submits.
+      2. Scheduled deadline — 00:00 LA daily (Mon–Sat) or 23:59 LA Sunday.
+
+    Both paths must produce a recap even when not every player has
+    submitted (the cron is a hard deadline, not a poll).
+    """
+
+    # ---- early-fire path ------------------------------------------------
+
+    @patch("app.jobs.send_recap")
+    def test_early_fire_triggers_when_last_player_submits(self, mock_send):
+        """maybe_fire_early_recap fires immediately when every active
+        player has submitted all enabled games — the 'everyone done'
+        path."""
+        mock_send.return_value = None
+        repo = TestRepo()
+        today = date(2026, 4, 14)
+        settings = _make_settings({"queens", "tango"})
+        now = datetime(2026, 4, 14, 14, 0, tzinfo=LA)
+
+        # After Alice submits both games → she is the only active player → done.
+        _seed(repo, 1, "Alice", today, ["queens", "tango"])
+        body = maybe_fire_early_recap(repo, settings, now=now,
+                                      group_id=repo.default_group.id)
+        assert body is not None
+        assert "Daily recap" in body or "Weekly wrap" in body
+        mock_send.assert_called_once()
+        assert repo.has_recap_been_sent(today, "daily")
+
+    @patch("app.jobs.send_recap")
+    def test_early_fire_waits_until_all_players_done(self, mock_send):
+        """Does NOT fire while at least one active player is still owed
+        a game."""
+        repo = TestRepo()
+        today = date(2026, 4, 14)
+        settings = _make_settings({"queens", "tango"})
+        now = datetime(2026, 4, 14, 14, 0, tzinfo=LA)
+
+        # Alice is done; Bob only played queens — tango outstanding.
+        _seed(repo, 1, "Alice", today, ["queens", "tango"])
+        _seed(repo, 2, "Bob",   today, ["queens"])
+        result = maybe_fire_early_recap(repo, settings, now=now,
+                                        group_id=repo.default_group.id)
+        assert result is None
+        mock_send.assert_not_called()
+
+    @patch("app.jobs.send_recap")
+    def test_early_fire_sends_and_cron_then_skips(self, mock_send):
+        """Once early-fired, the midnight cron finds the recap_log entry
+        and skips — no double send."""
+        mock_send.return_value = None
+        repo = TestRepo()
+        today = date(2026, 4, 14)  # Tuesday LA
+        settings = _make_settings({"queens"})
+
+        _seed(repo, 1, "Alice", today, ["queens"])
+        # Early fire succeeds during the day.
+        maybe_fire_early_recap(
+            repo, settings,
+            now=datetime(2026, 4, 14, 15, 0, tzinfo=LA),
+            group_id=repo.default_group.id,
+        )
+        assert mock_send.call_count == 1
+        mock_send.reset_mock()
+
+        # Midnight cron fires → should skip.
+        run_daily_recap(
+            repo, settings,
+            now=datetime(2026, 4, 15, 0, 0, tzinfo=LA),
+        )
+        mock_send.assert_not_called()
+
+    # ---- cron deadline path (Mon–Sat 00:00 LA) --------------------------
+
+    @patch("app.jobs.send_recap")
+    def test_cron_fires_at_midnight_la_even_if_not_all_submitted(self, mock_send):
+        """The 00:00 LA cron is a hard deadline — it sends the recap
+        regardless of whether every player has finished."""
+        mock_send.return_value = None
+        repo = TestRepo()
+        # Alice played; Bob active earlier this week but skipped today.
+        mon = date(2026, 4, 13)
+        tue = date(2026, 4, 14)
+        _seed(repo, 1, "Alice", tue, ["queens"])
+        _seed(repo, 2, "Bob",   mon, ["queens"])  # active but skipped Tue
+        settings = _make_settings({"queens"})
+
+        now = datetime(2026, 4, 15, 0, 0, tzinfo=LA)  # midnight → recap Tue
+        body = run_daily_recap(repo, settings, now=now)
+
+        assert body is not None
+        assert "Daily recap — Tue 14 Apr 2026" in body
+        mock_send.assert_called_once()
+        assert repo.has_recap_been_sent(tue, "daily")
+
+    @patch("app.jobs.send_recap")
+    def test_cron_fires_with_zero_submissions(self, mock_send):
+        """Midnight cron still sends even when nobody played that day."""
+        mock_send.return_value = None
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        now = datetime(2026, 4, 15, 0, 0, tzinfo=LA)
+        body = run_daily_recap(repo, settings, now=now)
+
+        assert body is not None
+        assert "No scores yet" in body
+        mock_send.assert_called_once()
+
+    @patch("app.jobs.send_recap")
+    def test_cron_deadline_fires_at_5pm_sydney_equivalently(self, mock_send):
+        """00:00 LA PDT == 17:00 Sydney AEST. Either clock expression
+        produces the same daily recap (verified with two fresh repos)."""
+        mock_send.return_value = None
+        settings = _make_settings({"queens"})
+
+        def _repo_with_score():
+            r = TestRepo()
+            alice = r.get_or_create_player("whatsapp:+1", "Alice")
+            r.insert_score(
+                player_id=alice.id, game="queens", puzzle_no=714,
+                puzzle_date=date(2026, 4, 14), raw_score=30, share_text="x",
+            )
+            return r
+
+        # Expressed in LA timezone.
+        body_la = run_daily_recap(
+            _repo_with_score(), settings,
+            now=datetime(2026, 4, 15, 0, 0, tzinfo=LA),
+        )
+        # Expressed in Sydney timezone — same instant.
+        body_syd = run_daily_recap(
+            _repo_with_score(), settings,
+            now=datetime(2026, 4, 15, 17, 0, tzinfo=SYDNEY),
+        )
+        assert "Tue 14 Apr 2026" in body_la
+        assert "Tue 14 Apr 2026" in body_syd
+
+    # ---- Sunday 23:59 LA (= Mon 16:59 Sydney = "4:59 PM") deadline -----
+
+    @patch("app.jobs.send_recap")
+    def test_sunday_wrap_fires_at_2359_la_even_if_not_all_submitted(self, mock_send):
+        """run_weekly_wrap_early fires at 23:59 LA Sunday (4:59 PM
+        Monday Sydney) regardless of submission completeness.
+        This is the hard deadline for the weekly wrap."""
+        mock_send.return_value = None
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+
+        # Only Alice played this week; Bob is active but skipped.
+        mon = date(2026, 4, 13)
+        _seed(repo, 1, "Alice", mon, ["queens"])
+        _seed(repo, 2, "Bob",   date(2026, 4, 6), ["queens"])  # prior week, counts as active
+
+        # 23:59 LA Sunday → 16:59 Monday Sydney → "4:59 PM"
+        now = datetime(2026, 4, 19, 23, 59, tzinfo=LA)
+        body = run_weekly_wrap_early(repo, settings, now=now)
+
+        assert body is not None
+        assert "Weekly wrap" in body
+        mock_send.assert_called_once()
+        assert repo.has_recap_been_sent(date(2026, 4, 19), "weekly")
+
+    @patch("app.jobs.send_recap")
+    def test_sunday_wrap_early_and_then_monday_cron_skips(self, mock_send):
+        """After the 23:59 LA Sunday early wrap fires, the Mon 00:00 LA
+        cron sees the recap_log entry and skips. No double-send."""
+        mock_send.return_value = None
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        _seed(repo, 1, "Alice", date(2026, 4, 13), ["queens"])
+
+        # Sun 23:59 LA fires the wrap.
+        run_weekly_wrap_early(repo, settings,
+                              now=datetime(2026, 4, 19, 23, 59, tzinfo=LA))
+        assert mock_send.call_count == 1
+        mock_send.reset_mock()
+
+        # Mon 00:00 LA cron should skip.
+        run_daily_recap(repo, settings,
+                        now=datetime(2026, 4, 20, 0, 0, tzinfo=LA))
+        mock_send.assert_not_called()
+
+    @patch("app.jobs.send_recap")
+    def test_early_fire_on_sunday_becomes_weekly_wrap(self, mock_send):
+        """When all players finish on a Sunday, the event-driven early-
+        fire produces a weekly wrap — same as if the deadline had fired."""
+        mock_send.return_value = None
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        sunday = date(2026, 4, 19)
+        _seed(repo, 1, "Alice", sunday, ["queens"])
+
+        body = maybe_fire_early_recap(
+            repo, settings,
+            now=datetime(2026, 4, 19, 10, 0, tzinfo=LA),
+            group_id=repo.default_group.id,
+        )
+        assert body is not None
+        assert "Weekly wrap" in body
+        # Marked as weekly so the 23:59 early wrap and the Mon 00:00 cron skip.
+        assert repo.has_recap_been_sent(sunday, "weekly")
+        assert not repo.has_recap_been_sent(sunday, "daily")
+
+
+# ---------------------------------------------------------------------------
+# Period champion / loser DMs (month-end and year-end)
+# ---------------------------------------------------------------------------
+
+
+class TestPeriodChampionLoserDMs:
+    """send_period_champion_loser_dms fires personal DMs to the period
+    champion and wooden-spoon holder at month or year end."""
+
+    SUN = date(2026, 4, 19)   # last Sunday of April (week end)
+    APR30 = date(2026, 4, 30)  # last day of April
+    DEC31 = date(2026, 12, 31)  # last day of year
+
+    def _seed_two_players(self, repo, game_day, scores=((10, "Alice"), (30, "Bob"))):
+        """Seed two players with one score each on ``game_day``."""
+        players = []
+        for i, (raw, name) in enumerate(scores):
+            p = repo.get_or_create_player(f"whatsapp:+6140000000{i+1}", name)
+            repo.insert_score(
+                player_id=p.id, game="queens",
+                puzzle_no=700 + i,
+                puzzle_date=game_day, raw_score=raw, share_text="x",
+            )
+            players.append(p)
+        return players
+
+    @patch("app.jobs.send_dm")
+    def test_month_end_dms_champion_and_loser(self, mock_dm):
+        """On the last day of a month, both month champion and loser
+        receive a personal DM."""
+        mock_dm.return_value = True
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        alice, bob = self._seed_two_players(
+            repo, date(2026, 4, 15),
+            scores=[(10, "Alice"), (30, "Bob")],
+        )
+        sent = send_period_champion_loser_dms(
+            repo, settings, self.APR30, "month",
+            group_id=repo.default_group.id,
+        )
+        assert len(sent) == 2
+        bodies = [call.args[2] for call in mock_dm.call_args_list]
+        # Month label must appear in both messages.
+        assert all("Apr 2026" in b for b in bodies)
+        # Champion message mentions Alice; loser message mentions Bob.
+        assert any("Alice" in b for b in bodies)
+        assert any("Bob" in b for b in bodies)
+
+    @patch("app.jobs.send_dm")
+    def test_year_end_dms_champion_and_loser(self, mock_dm):
+        """On Dec 31, year DMs fire with the year label."""
+        mock_dm.return_value = True
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        self._seed_two_players(
+            repo, date(2026, 6, 15),
+            scores=[(10, "Alice"), (30, "Bob")],
+        )
+        sent = send_period_champion_loser_dms(
+            repo, settings, self.DEC31, "year",
+            group_id=repo.default_group.id,
+        )
+        assert len(sent) == 2
+        bodies = [call.args[2] for call in mock_dm.call_args_list]
+        assert all("2026" in b for b in bodies)
+
+    @patch("app.jobs.send_dm")
+    def test_month_dms_skipped_for_solo_player(self, mock_dm):
+        """A single-player group has no meaningful champion vs loser —
+        no DMs sent."""
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=700,
+            puzzle_date=date(2026, 4, 15), raw_score=10, share_text="x",
+        )
+        sent = send_period_champion_loser_dms(
+            repo, settings, self.APR30, "month",
+            group_id=repo.default_group.id,
+        )
+        assert sent == []
+        mock_dm.assert_not_called()
+
+    @patch("app.jobs.send_dm")
+    def test_month_dms_skipped_for_opted_out_players(self, mock_dm):
+        """Players with notifications disabled don't receive period DMs."""
+        mock_dm.return_value = True
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        alice, bob = self._seed_two_players(
+            repo, date(2026, 4, 15),
+            scores=[(10, "Alice"), (30, "Bob")],
+        )
+        repo.set_notifications_enabled(alice.id, False)
+        repo.set_notifications_enabled(bob.id, False)
+        sent = send_period_champion_loser_dms(
+            repo, settings, self.APR30, "month",
+            group_id=repo.default_group.id,
+        )
+        assert sent == []
+
+    @patch("app.jobs.send_dm")
+    def test_runner_up_name_appears_in_champion_message(self, mock_dm):
+        """The champion's DM now names the runner-up (the person they
+        beat) so templates can reference them."""
+        mock_dm.return_value = True
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        # Three players: Alice wins, Bob 2nd, Charlie last.
+        for raw, name, wid in [
+            (10, "Alice",   "whatsapp:+1"),
+            (20, "Bob",     "whatsapp:+2"),
+            (30, "Charlie", "whatsapp:+3"),
+        ]:
+            p = repo.get_or_create_player(wid, name)
+            repo.insert_score(
+                player_id=p.id, game="queens", puzzle_no=700,
+                puzzle_date=date(2026, 4, 15), raw_score=raw, share_text="x",
+            )
+        sent = send_period_champion_loser_dms(
+            repo, settings, self.APR30, "month",
+            group_id=repo.default_group.id,
+        )
+        assert len(sent) == 2  # champion + loser
+        champion_body = mock_dm.call_args_list[0].args[2]
+        loser_body    = mock_dm.call_args_list[1].args[2]
+        # Champion message may reference runner-up (Bob) or loser (Charlie).
+        assert "Alice" in champion_body
+        # Loser message should reference Charlie.
+        assert "Charlie" in loser_body
+
+    @patch("app.jobs.send_recap")
+    @patch("app.jobs.send_dm")
+    def test_cron_sends_month_dms_on_last_day_of_month(self, mock_dm, mock_recap):
+        """The daily recap cron auto-fires month DMs on the last day of
+        any month (wired into _run_daily_recap_for_group)."""
+        mock_dm.return_value = True
+        mock_recap.return_value = None
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        # Seed two players on a day in April.
+        for raw, name, wid in [(10, "Alice", "whatsapp:+1"), (30, "Bob", "whatsapp:+2")]:
+            p = repo.get_or_create_player(wid, name)
+            repo.insert_score(
+                player_id=p.id, game="queens", puzzle_no=714,
+                puzzle_date=date(2026, 4, 14), raw_score=raw, share_text="x",
+            )
+        # Cron at May 1 00:00 LA → target_day = Apr 30 (last day of month).
+        run_daily_recap(repo, settings,
+                        now=datetime(2026, 5, 1, 0, 0, tzinfo=LA))
+        dm_bodies = [c.args[2] for c in mock_dm.call_args_list]
+        # Month DMs should contain "Apr 2026".
+        assert any("Apr 2026" in b for b in dm_bodies)
+
+    @patch("app.jobs.send_recap")
+    @patch("app.jobs.send_dm")
+    def test_cron_sends_year_dms_on_dec_31(self, mock_dm, mock_recap):
+        """The cron auto-fires year DMs (not month DMs) on Dec 31."""
+        mock_dm.return_value = True
+        mock_recap.return_value = None
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        for raw, name, wid in [(10, "Alice", "whatsapp:+1"), (30, "Bob", "whatsapp:+2")]:
+            p = repo.get_or_create_player(wid, name)
+            repo.insert_score(
+                player_id=p.id, game="queens", puzzle_no=999,
+                puzzle_date=date(2026, 12, 15), raw_score=raw, share_text="x",
+            )
+        # Cron at Jan 1 2027 00:00 LA → target_day = Dec 31 2026.
+        run_daily_recap(repo, settings,
+                        now=datetime(2027, 1, 1, 0, 0, tzinfo=LA))
+        dm_bodies = [c.args[2] for c in mock_dm.call_args_list]
+        # Year DMs contain "2026".
+        assert any("2026" in b for b in dm_bodies)
+        # Year DMs do NOT contain "Dec 2026" (month template label).
+        assert not any("Dec 2026" in b for b in dm_bodies)
+
+    def test_invalid_period_raises(self):
+        repo = TestRepo()
+        settings = _make_settings({"queens"})
+        import pytest
+        with pytest.raises(ValueError, match="period must be"):
+            send_period_champion_loser_dms(
+                repo, settings, self.APR30, "quarter",
+                group_id=repo.default_group.id,
+            )
