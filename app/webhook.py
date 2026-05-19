@@ -73,21 +73,37 @@ _LEADERBOARD_PREFIX_RE = re.compile(
 # into Read / You / Mutating sections so the wall of commands is
 # scannable — we have a lot now.
 _HELP_TEXT = (
-    "Commands:\n"
+    "Commands (send `ultrahelp` for full detail):\n"
+    "  Scores: recap · leaderboard · week · month · year · times · global\n"
+    "  You:    stats · pb · streak · vs\n"
+    "  Setup:  group · switch · name · notify · undo\n"
+    "  Misc:   rules · prizes · missing · games\n"
+    "  Fun:    brag · gripe · nag\n"
+    "\n"
+    "Paste a LinkedIn share text to submit a score."
+)
+
+_ULTRA_HELP_TEXT = (
+    "Full command reference:\n"
     "  Group:\n"
     "    group <name> — create a new group or join an existing one\n"
     "    switch <name> — move to a different existing group (past scores stay)\n"
     "\n"
-    "  Look at scores (today's results lock until you've played — past days unrestricted):\n"
+    "  Leaderboards (today's lock until you've played all games):\n"
+    "    leaderboard — full weekly standings\n"
+    "    leaderboard <game> — single-game standings (e.g. \"leaderboard queens\")\n"
+    "    leaderboard <g1> <g2> ... — multi-game (e.g. \"leaderboard zip tango\")\n"
+    "    leaderboard yesterday / leaderboard YYYY-MM-DD — past standings\n"
+    "    global — leaderboard across all groups this week\n"
+    "    times — per-game time standings (fastest totals this week)\n"
+    "    month / mtd (+ optional game, e.g. \"month queens\") — MTD summary\n"
+    "    year / ytd (+ optional game, e.g. \"year queens\") — YTD summary\n"
+    "\n"
+    "  Recaps & summaries:\n"
     "    recap / today — full daily recap (need to have played all today's games)\n"
     "    yesterday / \"N days ago\" / recap YYYY-MM-DD — past daily recap\n"
     "    week / wrap — weekly wrap\n"
     "    all / history — every round this week\n"
-    "    leaderboard / standings (+ optional game, e.g. \"leaderboard queens\")\n"
-    "    leaderboard yesterday / leaderboard YYYY-MM-DD — compact past standings\n"
-    "    times — per-game time standings (fastest totals this week)\n"
-    "    month / mtd (+ optional game, e.g. \"month queens\") — MTD summary\n"
-    "    year / ytd (+ optional game, e.g. \"year queens\") — YTD summary\n"
     "    prizes — live prize snapshot\n"
     "    missing / who — who hasn't played today\n"
     "    games — which games are tracked\n"
@@ -103,7 +119,6 @@ _HELP_TEXT = (
     "    undo — delete today's last submission\n"
     "    name <new> — change your display name\n"
     "    notify on / notify off — toggle daily recap DMs\n"
-    "    help / ? — show this list\n"
     "\n"
     "  Easter eggs (once each per day):\n"
     "    brag / flex — taunt the group that you're crushing it\n"
@@ -303,6 +318,34 @@ def _resolve_leaderboard_target(
             f"I can only pull leaderboards from the last {_MAX_DAYS_AGO} days.",
         )
     return (target, None)
+
+
+def _parse_leaderboard_games(lower: str) -> Optional[List[str]]:
+    """Parse ``leaderboard game1 game2 ...`` into a list of game keys.
+
+    Returns ``None`` when the prefix is missing, fewer than two words
+    follow, or any word isn't a recognised game name. Single-game
+    variants are intentionally excluded (handled by the per-game loop).
+    """
+    m = _LEADERBOARD_PREFIX_RE.match(lower)
+    if m is None:
+        return None
+    rest = lower[m.end():].strip()
+    if not rest:
+        return None
+    words = rest.split()
+    if len(words) < 2:
+        return None
+    display_to_key = {GAME_DISPLAY[k].lower(): k for k in GAMES}
+    resolved: List[str] = []
+    for w in words:
+        if w in GAMES:
+            resolved.append(w)
+        elif w in display_to_key:
+            resolved.append(display_to_key[w])
+        else:
+            return None
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +796,65 @@ def _handle_leaderboard(
     if rendered is None:
         return f"No {GAME_DISPLAY[game]} scores yet for week of {monday.strftime('%a %d %b %Y')}."
     return rendered
+
+
+def _handle_global_leaderboard(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    *,
+    from_: Optional[str] = None,
+    profile_name: str = "",
+    group_id: int,
+) -> str:
+    """Weekly leaderboard aggregated across every group.
+
+    Deduplicates by ``(player_id, game, puzzle_no)`` so a player who
+    switched groups mid-week isn't double-counted. No-peek gate mirrors
+    the per-group leaderboard: the requester must have submitted all
+    enabled games today before today's global standings unlock.
+    """
+    if settings is None:
+        return "Global leaderboard isn't available in this context."
+    from .scheduler import _weekly_leaderboard_lines
+
+    today = la_date(now)
+    if from_ is not None and settings.enabled_games:
+        played = _games_played_today_by(
+            repo, from_, profile_name, today, settings.enabled_games,
+            group_id=group_id,
+        )
+        if played != set(settings.enabled_games):
+            return _no_peek_leaderboard(played, settings.enabled_games)
+
+    monday, sunday = week_bounds(today)
+    groups = repo.list_groups()
+
+    all_scores: List[ScoreRow] = []
+    seen: set = set()
+    for grp in groups:
+        for s in repo.list_scores(date_from=monday, date_to=sunday, group_id=grp.id):
+            key = (s.player_id, s.game, s.puzzle_no)
+            if key not in seen:
+                seen.add(key)
+                all_scores.append(s)
+
+    filtered = [
+        s for s in all_scores
+        if s.game in settings.enabled_games and s.puzzle_date <= today
+    ]
+    if not filtered:
+        return f"No scores yet for week of {monday.strftime('%a %d %b %Y')} across any group."
+
+    header_date = today.strftime("%a %d %b %Y")
+    prior = [s for s in filtered if s.puzzle_date < today]
+    lines = _weekly_leaderboard_lines(
+        filtered,
+        title=f"Global — week so far ({header_date})",
+        prior_scores=prior,
+        absent_player_names=[],
+    )
+    return "\n".join(lines)
 
 
 def _handle_times(
@@ -1604,6 +1706,8 @@ def handle_inbound(
     # Check for commands before attempting score parsing
     if lower in ("help", "?", "commands"):
         return _HELP_TEXT
+    if lower in ("ultrahelp", "help more", "help +"):
+        return _ULTRA_HELP_TEXT
     if lower == "stats":
         return _handle_stats(repo, from_, profile_name, group_id=group_id)
     if lower in ("pb", "bests", "personal bests"):
@@ -1632,6 +1736,31 @@ def handle_inbound(
                 repo, settings, now, game=game_key,
                 from_=from_, profile_name=profile_name, group_id=group_id,
             )
+    # ``leaderboard zip tango`` / ``leaderboard zip tango crossclimb`` etc.
+    multi_games = _parse_leaderboard_games(lower)
+    if multi_games is not None:
+        today_date = la_date(now)
+        if settings is not None and settings.enabled_games and from_ is not None:
+            played = _games_played_today_by(
+                repo, from_, profile_name, today_date, settings.enabled_games,
+                group_id=group_id,
+            )
+            if played != set(settings.enabled_games):
+                return _no_peek_leaderboard(played, settings.enabled_games)
+        parts = [
+            _handle_leaderboard(
+                repo, settings, now, game=g,
+                from_=None, profile_name=profile_name, group_id=group_id,
+            )
+            for g in multi_games
+        ]
+        return "\n\n".join(parts)
+    # ``global`` — leaderboard across all groups.
+    if lower in ("global", "global leaderboard", "all groups", "all groups leaderboard"):
+        return _handle_global_leaderboard(
+            repo, settings, now,
+            from_=from_, profile_name=profile_name, group_id=group_id,
+        )
     # ``times`` — per-game cumulative time standings across time-based games.
     if lower in ("times", "game times", "time standings"):
         return _handle_times(repo, settings, now, group_id=group_id)
