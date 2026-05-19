@@ -3303,3 +3303,131 @@ class TestByDayCommand:
             profile_name="Alice", now=NOW,
         )
         assert "No scores" in reply or "Not enough" in reply
+
+    def test_by_day_with_limit_shows_label(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day 5",
+            profile_name="Alice", now=NOW,
+        )
+        assert "last 5" in reply
+
+    def test_by_day_limit_restricts_to_recent_scores(self, repo):
+        """With limit=1, only the 1 most-recent score per game is kept,
+        so no weekday can have ≥ 2 plays → no weekday rows rendered."""
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day zip 1",
+            profile_name="Alice", now=NOW,
+        )
+        # Only 1 score in window → no weekday has ≥2 plays → "Not enough data"
+        assert "Not enough" in reply or "1 of" in reply
+
+    def test_by_day_game_and_limit_any_order(self, repo):
+        """'by day 5 zip' and 'by day zip 5' should produce the same output."""
+        self._setup_multi_dow(repo)
+        r1 = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day 5 zip",
+            profile_name="Alice", now=NOW,
+        )
+        r2 = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day zip 5",
+            profile_name="Alice", now=NOW,
+        )
+        assert r1 == r2
+
+
+class TestTrackCommand:
+    """``track`` sets per-group game tracking."""
+
+    def test_track_sets_group_games(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="track queens zip",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Queens" in reply
+        assert "Zip" in reply
+        # The group's enabled_games should now be set
+        from app.db import InMemoryRepository
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.enabled_games == frozenset({"queens", "zip"})
+
+    def test_track_reset_clears_override(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        # First set games
+        handle_inbound(
+            repo, from_="whatsapp:+1", body="track queens",
+            profile_name="Alice", now=NOW,
+        )
+        # Then reset
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="track reset",
+            profile_name="Alice", now=NOW,
+        )
+        assert "reset" in reply.lower() or "global" in reply.lower()
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.enabled_games is None
+
+    def test_track_unknown_game_returns_error(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="track widgets",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Unknown" in reply
+
+    def test_track_all_enables_every_game(self, repo):
+        from app.parsers import GAMES
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="track all",
+            profile_name="Alice", now=NOW,
+        )
+        assert "all games" in reply.lower() or "tracking" in reply.lower()
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.enabled_games == frozenset(GAMES)
+
+    def test_group_games_override_used_in_trends(self, repo):
+        """After track sets group games, only those games appear in trends."""
+        from datetime import date, timedelta
+
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        # Seed enough zip scores in the two periods
+        last4_base = date(2026, 3, 16)
+        prior4_base = date(2026, 2, 23)
+        for i in range(3):
+            repo.insert_score(
+                player_id=alice.id, game="zip", puzzle_no=400 + i,
+                puzzle_date=last4_base + timedelta(days=i), raw_score=30, share_text="",
+            )
+            repo.insert_score(
+                player_id=alice.id, game="zip", puzzle_no=380 + i,
+                puzzle_date=prior4_base + timedelta(days=i), raw_score=50, share_text="",
+            )
+        # Also seed queens scores so they'd show up if queens were enabled
+        for i in range(3):
+            repo.insert_score(
+                player_id=alice.id, game="queens", puzzle_no=700 + i,
+                puzzle_date=last4_base + timedelta(days=i), raw_score=30, share_text="",
+            )
+            repo.insert_score(
+                player_id=alice.id, game="queens", puzzle_no=680 + i,
+                puzzle_date=prior4_base + timedelta(days=i), raw_score=50, share_text="",
+            )
+        # Set group to track only zip
+        handle_inbound(
+            repo, from_="whatsapp:+1", body="track zip",
+            profile_name="Alice", now=NOW,
+        )
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="trends",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        # Zip should show trend; Queens should NOT appear (not tracked)
+        assert "Zip" in reply
+        assert "Queens" not in reply
