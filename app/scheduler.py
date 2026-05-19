@@ -241,7 +241,6 @@ def _weekly_leaderboard_lines(
     prior_scores: Optional[Sequence[ScoreRow]] = None,
     *,
     absent_player_names: Optional[Sequence[str]] = None,
-    sparklines: Optional[Dict[int, str]] = None,
 ) -> List[str]:
     """Render the cumulative weekly leaderboard as a compact list.
 
@@ -274,14 +273,9 @@ def _weekly_leaderboard_lines(
             if show_arrows
             else ""
         )
-        spark = (
-            f" {sparklines[p.player_id]}"
-            if sparklines and p.player_id in sparklines
-            else ""
-        )
         lines.append(
             f"  {i}. {p.player_name}: {_pts(p.total_points)} "
-            f"(T: {_format_seconds(p.total_time)}, G:{p.submissions}){suffix}{spark}"
+            f"(T: {_format_seconds(p.total_time)}, G:{p.submissions}){suffix}"
         )
     if absent_player_names:
         lines.append("Haven't played this week:")
@@ -643,7 +637,6 @@ def weekly_wrap(
     month_scores: Optional[Sequence[ScoreRow]] = None,
     year_scores: Optional[Sequence[ScoreRow]] = None,
     absent_player_names: Optional[Sequence[str]] = None,
-    sparklines: Optional[Dict[int, str]] = None,
 ) -> str:
     """Format a weekly wrap covering ``[week_start, week_end]`` inclusive.
 
@@ -691,7 +684,6 @@ def weekly_wrap(
         week_filtered,
         title="Week totals",
         absent_player_names=absent_player_names,
-        sparklines=sparklines,
     ))
 
     # Per-game weekly winners

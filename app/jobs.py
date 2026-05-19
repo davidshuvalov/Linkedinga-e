@@ -45,7 +45,7 @@ from .puzzles import (
     year_bounds,
 )
 from .scheduler import daily_recap, weekly_wrap
-from .scoring import PlayerWeeklyStats, sparkline, weekly_leaderboard
+from .scoring import PlayerWeeklyStats, weekly_leaderboard
 from .sender import send_dm, send_recap
 
 logger = logging.getLogger(__name__)
@@ -56,33 +56,6 @@ logger = logging.getLogger(__name__)
 _ACTIVE_WINDOW_DAYS = 7
 
 
-def _compute_sparklines(
-    repo: Repository,
-    *,
-    group_id: int,
-    reference_monday: date,
-    enabled_games: FrozenSet[str],
-    num_weeks: int = 5,
-) -> Dict[int, str]:
-    """Return ``{player_id: sparkline_str}`` from the last ``num_weeks``
-    completed weeks before ``reference_monday``.  Weeks with no enabled-game
-    scores are skipped so gaps don't silently eat history."""
-    player_history: Dict[int, List[float]] = {}
-    for i in range(num_weeks, 0, -1):
-        mon = reference_monday - timedelta(weeks=i)
-        sun = mon + timedelta(days=6)
-        try:
-            week_scores = repo.list_scores(date_from=mon, date_to=sun, group_id=group_id)
-        except Exception:
-            logger.exception("compute_sparklines: list_scores failed for week %s", mon)
-            continue
-        filtered = [s for s in week_scores if s.game in enabled_games]
-        if not filtered:
-            continue
-        lb = weekly_leaderboard(filtered)
-        for entry in lb:
-            player_history.setdefault(entry.player_id, []).append(entry.total_points)
-    return {pid: sparkline(totals) for pid, totals in player_history.items()}
 
 
 def _settings_for_group(settings: Settings, group: Group) -> Settings:
@@ -152,17 +125,12 @@ def render_daily(
     )
 
     if _is_sunday(target_day):
-        sparks = _compute_sparklines(
-            repo, group_id=group_id, reference_monday=monday,
-            enabled_games=settings.enabled_games,
-        )
         body = weekly_wrap(
             monday, sunday, week_scores,
             enabled_games=settings.enabled_games,
             month_scores=month_scores,
             year_scores=year_scores,
             absent_player_names=absent,
-            sparklines=sparks,
         )
     else:
         body = daily_recap(
@@ -223,17 +191,12 @@ def render_wrap(
     week_scores = repo.list_scores(
         date_from=monday, date_to=sunday, group_id=group_id
     )
-    sparks = _compute_sparklines(
-        repo, group_id=group_id, reference_monday=monday,
-        enabled_games=settings.enabled_games,
-    )
     body = weekly_wrap(
         monday, sunday, week_scores,
         enabled_games=settings.enabled_games,
         absent_player_names=absent_player_names_for_week(
             repo, reference_day, week_scores, group_id=group_id
         ),
-        sparklines=sparks,
     )
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday, group_id=group_id

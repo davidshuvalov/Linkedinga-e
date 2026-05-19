@@ -56,33 +56,6 @@ MIN_SUBMISSIONS_FOR_FASTEST_PRIZE = 10
 # total-time prize. Every other game stores raw_score in seconds.
 _NON_TIME_GAMES = frozenset({"pinpoint"})
 
-# ---------------------------------------------------------------------------
-# sparkline
-# ---------------------------------------------------------------------------
-
-_SPARKLINE_CHARS = "▁▂▃▄▅▆▇█"
-
-
-def sparkline(weekly_totals: Sequence[float], width: int = 5) -> str:
-    """Render an ASCII sparkline of weekly point totals (higher = better).
-
-    Takes the last ``width`` values and maps them to 8 bar-height
-    characters (▁ through █). Left-pads with spaces when fewer than
-    ``width`` values are available. Returns '' for empty input.
-    """
-    if not weekly_totals:
-        return ""
-    vals = list(weekly_totals)[-width:]
-    mn, mx = min(vals), max(vals)
-
-    def _bar(v: float) -> str:
-        if mx == mn:
-            return _SPARKLINE_CHARS[3]  # mid-level when all scores equal
-        idx = round((v - mn) / (mx - mn) * 7)
-        return _SPARKLINE_CHARS[max(0, min(7, idx))]
-
-    return "".join(_bar(v) for v in vals).rjust(width)
-
 
 def monthly_awards(
     month_scores: Sequence[ScoreRow],
