@@ -32,7 +32,8 @@ grouping uses ``(game, puzzle_no)`` rather than ``puzzle_date``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from datetime import date
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 from .db import ScoreRow
 
@@ -54,6 +55,188 @@ MIN_SUBMISSIONS_FOR_FASTEST_PRIZE = 10
 # Pinpoint is guess count, not seconds, so it's excluded from the
 # total-time prize. Every other game stores raw_score in seconds.
 _NON_TIME_GAMES = frozenset({"pinpoint"})
+
+# ---------------------------------------------------------------------------
+# sparkline
+# ---------------------------------------------------------------------------
+
+_SPARKLINE_CHARS = "▁▂▃▄▅▆▇█"
+
+
+def sparkline(weekly_totals: Sequence[float], width: int = 5) -> str:
+    """Render an ASCII sparkline of weekly point totals (higher = better).
+
+    Takes the last ``width`` values and maps them to 8 bar-height
+    characters (▁ through █). Left-pads with spaces when fewer than
+    ``width`` values are available. Returns '' for empty input.
+    """
+    if not weekly_totals:
+        return ""
+    vals = list(weekly_totals)[-width:]
+    mn, mx = min(vals), max(vals)
+
+    def _bar(v: float) -> str:
+        if mx == mn:
+            return _SPARKLINE_CHARS[3]  # mid-level when all scores equal
+        idx = round((v - mn) / (mx - mn) * 7)
+        return _SPARKLINE_CHARS[max(0, min(7, idx))]
+
+    return "".join(_bar(v) for v in vals).rjust(width)
+
+
+def monthly_awards(
+    month_scores: Sequence[ScoreRow],
+    week_boundaries: Sequence[Tuple[date, date]],
+    enabled_games: FrozenSet[str],
+) -> Dict[str, Optional["PlayerWeeklyStats"]]:
+    """Compute monthly ceremony awards from a full month's scores.
+
+    Returns a dict with keys:
+        ``player_of_month``   — most total points across the month
+        ``most_consistent``   — lowest std-dev of per-week totals (≥3 weeks)
+        ``most_improved``     — steepest positive slope of weekly totals (≥2 weeks)
+        ``speedster``         — lowest mean time per time-based round (≥10 subs)
+
+    Values are :class:`PlayerWeeklyStats` instances (winner for each award)
+    or ``None`` when the threshold isn't met.
+    """
+    import statistics
+
+    filtered = [s for s in month_scores if s.game in enabled_games]
+    if not filtered:
+        return {
+            "player_of_month": None,
+            "most_consistent": None,
+            "most_improved": None,
+            "speedster": None,
+        }
+
+    # Overall month leaderboard → Player of the Month.
+    month_lb = weekly_leaderboard(filtered)
+    player_of_month: Optional[PlayerWeeklyStats] = month_lb[0] if month_lb else None
+
+    # Per-player weekly totals for consistency + trend.
+    pid_week_totals: Dict[int, List[float]] = {}
+    for mon, sun in week_boundaries:
+        week_sc = [s for s in filtered if mon <= s.puzzle_date <= sun]
+        if not week_sc:
+            continue
+        wlb = weekly_leaderboard(week_sc)
+        for entry in wlb:
+            pid_week_totals.setdefault(entry.player_id, []).append(entry.total_points)
+
+    most_consistent: Optional[PlayerWeeklyStats] = None
+    most_consistent_std = float("inf")
+    most_improved: Optional[PlayerWeeklyStats] = None
+    most_improved_slope = float("-inf")
+
+    pid_to_stats = {e.player_id: e for e in month_lb}
+
+    for pid, totals in pid_week_totals.items():
+        if pid not in pid_to_stats:
+            continue
+        if len(totals) >= 3:
+            std = statistics.stdev(totals)
+            if std < most_consistent_std:
+                most_consistent_std = std
+                most_consistent = pid_to_stats[pid]
+
+        if len(totals) >= 2:
+            n = len(totals)
+            xs = list(range(n))
+            mean_x = sum(xs) / n
+            mean_y = sum(totals) / n
+            num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, totals))
+            den = sum((x - mean_x) ** 2 for x in xs)
+            slope = num / den if den != 0 else 0.0
+            if slope > most_improved_slope:
+                most_improved_slope = slope
+                most_improved = pid_to_stats[pid]
+
+    # Speedster: lowest average time across time-based games, ≥10 submissions.
+    speedster: Optional[PlayerWeeklyStats] = None
+    speedster_avg = float("inf")
+    for entry in month_lb:
+        if (
+            entry.time_based_submissions >= 10
+            and entry.average_time < speedster_avg
+        ):
+            speedster_avg = entry.average_time
+            speedster = entry
+
+    # Only award most_improved if slope is actually positive.
+    if most_improved_slope <= 0:
+        most_improved = None
+
+    return {
+        "player_of_month": player_of_month,
+        "most_consistent": most_consistent,
+        "most_improved": most_improved,
+        "speedster": speedster,
+    }
+
+
+def estimate_score_to_beat(
+    target_points: float,
+    competitors: Sequence[int],
+    game: str,
+    *,
+    max_raw: int = 86_400,
+) -> Optional[int]:
+    """Binary-search for the smallest raw_score that earns >= ``target_points``
+    when submitted alongside ``competitors`` in ``game``.
+
+    Returns ``None`` when even raw_score=1 can't reach ``target_points``
+    (field is too large / points too high) or when ``game`` is Pinpoint
+    (guess-based — can't meaningfully estimate a target time).
+    """
+    if game in _NON_TIME_GAMES:
+        return None
+    if not competitors:
+        return None
+
+    def _pts_for(raw: int) -> float:
+        from .db import ScoreRow
+        from datetime import date as _date
+        sentinel_id = -1
+        rows: List[ScoreRow] = [
+            ScoreRow(
+                player_id=sentinel_id,
+                player_name="?",
+                game=game,
+                puzzle_no=0,
+                puzzle_date=_date(2000, 1, 1),
+                raw_score=raw,
+                share_text="",
+            )
+        ] + [
+            ScoreRow(
+                player_id=i,
+                player_name=f"p{i}",
+                game=game,
+                puzzle_no=0,
+                puzzle_date=_date(2000, 1, 1),
+                raw_score=c,
+                share_text="",
+            )
+            for i, c in enumerate(competitors)
+        ]
+        pts = assign_daily_points(rows)
+        return pts.get(sentinel_id, 0.0)
+
+    # If even score=1 can't reach target, it's impossible.
+    if _pts_for(1) < target_points:
+        return None
+
+    lo, hi = 1, max_raw
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _pts_for(mid) >= target_points:
+            lo = mid
+        else:
+            hi = mid - 1
+
+    return lo if _pts_for(lo) >= target_points else None
 
 
 def _tied_points(rank: int, count: int) -> float:

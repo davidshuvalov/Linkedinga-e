@@ -198,3 +198,24 @@ alter table groups
 update groups
 set enabled_games = '["mini_sudoku","patches","queens","tango","zip"]'
 where enabled_games is null;
+
+-- ---------- badges ----------
+-- Persistent achievement rows. badge_kind + game together form the
+-- uniqueness key so a player can hold e.g. centurion for both Queens
+-- and Zip independently.
+create table if not exists badges (
+    id          bigserial primary key,
+    player_id   bigint      not null references players(id) on delete cascade,
+    group_id    bigint      not null references groups(id)  on delete cascade,
+    badge_kind  text        not null,
+    game        text,
+    earned_at   timestamptz not null default now(),
+    notified    boolean     not null default false
+);
+
+create unique index if not exists badges_player_group_kind_game
+    on badges (player_id, group_id, badge_kind, coalesce(game, ''));
+
+create index if not exists badges_player_group_notified
+    on badges (player_id, group_id, notified)
+    where notified = false;

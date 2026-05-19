@@ -31,7 +31,7 @@ import logging
 import random
 from dataclasses import dataclass, replace as _dc_replace
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .config import Settings
 from .db import Group, Player, Repository, ScoreRow
@@ -45,7 +45,7 @@ from .puzzles import (
     year_bounds,
 )
 from .scheduler import daily_recap, weekly_wrap
-from .scoring import PlayerWeeklyStats, weekly_leaderboard
+from .scoring import PlayerWeeklyStats, sparkline, weekly_leaderboard
 from .sender import send_dm, send_recap
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,35 @@ logger = logging.getLogger(__name__)
 # (and therefore expected to play today). Seven days catches anyone
 # in the natural weekly rhythm of LinkedIn games.
 _ACTIVE_WINDOW_DAYS = 7
+
+
+def _compute_sparklines(
+    repo: Repository,
+    *,
+    group_id: int,
+    reference_monday: date,
+    enabled_games: FrozenSet[str],
+    num_weeks: int = 5,
+) -> Dict[int, str]:
+    """Return ``{player_id: sparkline_str}`` from the last ``num_weeks``
+    completed weeks before ``reference_monday``.  Weeks with no enabled-game
+    scores are skipped so gaps don't silently eat history."""
+    player_history: Dict[int, List[float]] = {}
+    for i in range(num_weeks, 0, -1):
+        mon = reference_monday - timedelta(weeks=i)
+        sun = mon + timedelta(days=6)
+        try:
+            week_scores = repo.list_scores(date_from=mon, date_to=sun, group_id=group_id)
+        except Exception:
+            logger.exception("compute_sparklines: list_scores failed for week %s", mon)
+            continue
+        filtered = [s for s in week_scores if s.game in enabled_games]
+        if not filtered:
+            continue
+        lb = weekly_leaderboard(filtered)
+        for entry in lb:
+            player_history.setdefault(entry.player_id, []).append(entry.total_points)
+    return {pid: sparkline(totals) for pid, totals in player_history.items()}
 
 
 def _settings_for_group(settings: Settings, group: Group) -> Settings:
@@ -123,12 +152,17 @@ def render_daily(
     )
 
     if _is_sunday(target_day):
+        sparks = _compute_sparklines(
+            repo, group_id=group_id, reference_monday=monday,
+            enabled_games=settings.enabled_games,
+        )
         body = weekly_wrap(
             monday, sunday, week_scores,
             enabled_games=settings.enabled_games,
             month_scores=month_scores,
             year_scores=year_scores,
             absent_player_names=absent,
+            sparklines=sparks,
         )
     else:
         body = daily_recap(
@@ -189,12 +223,17 @@ def render_wrap(
     week_scores = repo.list_scores(
         date_from=monday, date_to=sunday, group_id=group_id
     )
+    sparks = _compute_sparklines(
+        repo, group_id=group_id, reference_monday=monday,
+        enabled_games=settings.enabled_games,
+    )
     body = weekly_wrap(
         monday, sunday, week_scores,
         enabled_games=settings.enabled_games,
         absent_player_names=absent_player_names_for_week(
             repo, reference_day, week_scores, group_id=group_id
         ),
+        sparklines=sparks,
     )
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday, group_id=group_id
@@ -273,6 +312,56 @@ def _run_daily_recap_for_group(
         send_period_champion_loser_dms(
             repo, settings, target_day, "month", group_id=group.id
         )
+
+    # On Sunday, award weekly badges (podium + perfect week).
+    if _is_sunday(target_day):
+        try:
+            from .badges import check_badges_after_weekly_wrap, notify_new_badges
+            from .scoring import weekly_leaderboard as _wlb
+            monday3, sunday3 = week_bounds(target_day)
+            ws3 = repo.list_scores(date_from=monday3, date_to=sunday3, group_id=group.id)
+            lb3 = _wlb([s for s in ws3 if s.game in settings.enabled_games])
+            badge_map = check_badges_after_weekly_wrap(
+                repo, group_id=group.id,
+                week_start=monday3, week_end=sunday3,
+                leaderboard=lb3,
+                enabled_games=settings.enabled_games,
+            )
+            if badge_map:
+                players_by_id = {
+                    p.id: p for p in repo.list_players_in_group(group.id)
+                }
+                for pid, badges in badge_map.items():
+                    pl = players_by_id.get(pid)
+                    if pl:
+                        notify_new_badges(repo, settings, player=pl, badges=badges)
+        except Exception:
+            logger.exception("weekly badge checks failed for group %s", group.name)
+
+    # On Sunday, send a narrative paragraph as a second message.
+    if _is_sunday(target_day):
+        try:
+            from .narrative import build_narrative_context, render_narrative
+            monday, _ = week_bounds(target_day)
+            prior_mon = monday - timedelta(days=7)
+            prior_scores = repo.list_scores(
+                date_from=prior_mon,
+                date_to=monday - timedelta(days=1),
+                group_id=group.id,
+            )
+            monday2, sunday2 = week_bounds(target_day)
+            week_sc = repo.list_scores(date_from=monday2, date_to=sunday2, group_id=group.id)
+            ctx = build_narrative_context(week_sc, prior_scores, settings.enabled_games)
+            if ctx is not None:
+                narrative_body = render_narrative(ctx)
+                send_recap(
+                    settings, narrative_body,
+                    dm_targets=dm_targets,
+                    group_recap_to=_group_recap_to(settings, group),
+                )
+        except Exception:
+            logger.exception("narrative wrap failed for group %s", group.name)
+
     return body
 
 
@@ -1632,6 +1721,90 @@ def _send_nudges_to_lagging_players(
             nudged.append((player.whatsapp_id, player.display_name))
 
     return nudged, len(active_players)
+
+
+def _run_monthly_ceremony_for_group(
+    repo: Repository,
+    settings: Settings,
+    group: Group,
+    *,
+    now: datetime,
+) -> Optional[str]:
+    """Build and send the monthly ceremony message for one group."""
+    settings = _settings_for_group(settings, group)
+    target_day = la_date(now) - timedelta(days=1)
+    ceremony_key = f"monthly_ceremony:{target_day.year:04d}-{target_day.month:02d}"
+
+    if repo.has_recap_been_sent(target_day, ceremony_key, group_id=group.id):
+        return None
+
+    m_start, m_end = month_bounds(target_day)
+    month_scores = repo.list_scores(date_from=m_start, date_to=m_end, group_id=group.id)
+    if not month_scores:
+        return None
+
+    # Build week boundaries for the month.
+    from .puzzles import week_bounds as _week_bounds
+    from .scoring import monthly_awards
+    week_bounds_list: List[Tuple[date, date]] = []
+    cur = m_start
+    while cur <= m_end:
+        mon, sun = _week_bounds(cur)
+        if (mon, sun) not in week_bounds_list:
+            week_bounds_list.append((mon, sun))
+        cur = sun + timedelta(days=1)
+
+    awards = monthly_awards(month_scores, week_bounds_list, settings.enabled_games)
+    pot = awards["player_of_month"]
+    if pot is None:
+        return None
+
+    month_label = target_day.strftime("%B %Y")
+    lines = [f"🏆 {month_label} Awards:"]
+    lines.append(f"  Player of the Month: {pot.player_name} ({pot.total_points} pts)")
+    if awards["most_consistent"] is not None:
+        mc = awards["most_consistent"]
+        lines.append(f"  Most Consistent: {mc.player_name}")
+    if awards["most_improved"] is not None:
+        mi = awards["most_improved"]
+        lines.append(f"  Most Improved: {mi.player_name}")
+    if awards["speedster"] is not None:
+        sp = awards["speedster"]
+        from .scheduler import _format_seconds as _fmt_s
+        lines.append(
+            f"  Speedster: {sp.player_name} ({_fmt_s(round(sp.average_time))}/round)"
+        )
+    body = "\n".join(lines)
+
+    dm_targets = repo.list_active_whatsapp_ids(
+        date_from=m_start, date_to=m_end, group_id=group.id
+    )
+    send_recap(settings, body, dm_targets=dm_targets, group_recap_to=_group_recap_to(settings, group))
+    repo.mark_recap_sent(target_day, ceremony_key, group_id=group.id)
+    return body
+
+
+def run_monthly_ceremony(
+    repo: Repository,
+    settings: Settings,
+    *,
+    now: Optional[datetime] = None,
+) -> Optional[str]:
+    """Cron entry point — fire monthly awards on the 1st of each month
+    (targeting the month that just closed). Iterates all groups."""
+    now = now or datetime.now(settings.tz)
+    last_body: Optional[str] = None
+    for group in _iter_groups(repo):
+        try:
+            body = _run_monthly_ceremony_for_group(repo, settings, group, now=now)
+            if body is not None:
+                last_body = body
+        except Exception:
+            logger.exception(
+                "run_monthly_ceremony failed for group %s (id=%s)",
+                group.name, group.id,
+            )
+    return last_body
 
 
 def run_morning_nudge(

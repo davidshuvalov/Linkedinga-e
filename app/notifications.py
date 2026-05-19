@@ -48,7 +48,7 @@ from .db import Player, Repository, ScoreRow
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER, format_raw_score
 from .puzzles import week_bounds
 from .scoring import assign_daily_points, weekly_leaderboard
-from .sender import send_dm
+from .sender import send_dm, send_recap
 
 logger = logging.getLogger(__name__)
 
@@ -408,6 +408,17 @@ _RIVALRY_TEMPLATES = (
 )
 
 
+_PODIUM_STREAK_TEMPLATES = (
+    "Podium machine, {name}! That's {weeks} weeks in the top 3.",
+    "{name} is making the podium look easy — {weeks} straight weeks in the top 3.",
+    "{weeks} weeks on the podium and counting, {name}. Consistent.",
+    "Don't look now but {name} has been in the top 3 for {weeks} weeks running.",
+    "{name}: {weeks} consecutive weeks in the podium zone. The leaderboard is starting to feel like home.",
+    "Top 3 for {weeks} weeks? That's not luck, {name}. That's dominance.",
+    "{name} is on a {weeks}-week podium streak. Someone's built for this.",
+    "Podium streak alert — {name}, {weeks} weeks and no sign of stopping.",
+)
+
 _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "new_pb": _NEW_PB_TEMPLATES,
     "tied_pb": _TIED_PB_TEMPLATES,
@@ -428,6 +439,7 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "dow_bottom_quartile_personal": _DOW_BOTTOM_QUARTILE_TEMPLATES,
     "above_floor_today": _ABOVE_FLOOR_TODAY_TEMPLATES,
     "rivalry": _RIVALRY_TEMPLATES,
+    "podium_streak": _PODIUM_STREAK_TEMPLATES,
 }
 
 
@@ -441,12 +453,12 @@ _TRIGGER_TRUMPS: Dict[str, frozenset] = {
     "new_pb": frozenset({
         "dow_pb", "year_pb",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
-        "rivalry",
+        "rivalry", "podium_streak",
     }),
     "tied_pb": frozenset({
         "dow_pb", "year_pb",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
-        "rivalry",
+        "rivalry", "podium_streak",
     }),
     "new_worst": frozenset({
         "dow_worst",
@@ -460,7 +472,7 @@ _TRIGGER_TRUMPS: Dict[str, frozenset] = {
         "new_pb", "tied_pb", "best_of_day",
         "dow_pb", "year_pb",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
-        "rivalry",
+        "rivalry", "podium_streak",
     }),
     "all_time_anti_record": frozenset({
         "new_worst", "tied_worst", "worst_of_day",
@@ -476,7 +488,8 @@ _TRIGGER_TRUMPS: Dict[str, frozenset] = {
         "bottom_quartile_personal", "dow_bottom_quartile_personal",
         "above_floor_today",
     }),
-    "rivalry": frozenset(),  # rivalry doesn't trump anything
+    "rivalry": frozenset(),
+    "podium_streak": frozenset(),
 }
 
 
@@ -758,6 +771,53 @@ def _detect_above_floor_today_trigger(
     )
 
 
+
+def _detect_podium_streak_trigger(
+    repo: Repository,
+    player_id: int,
+    player_name: str,
+    group_id: int,
+    today: date,
+    enabled_games: FrozenSet[str],
+) -> Optional[Trigger]:
+    """Fire when a player extends their podium streak to 3 or more weeks.
+
+    Cooldown: once per player per week via recap_log.
+    """
+    from .puzzles import week_bounds as _wb
+    from .stats import podium_streak
+
+    monday, _ = _wb(today)
+    cooldown_key = f"podium_streak:{player_id}:{monday.isoformat()}"
+    try:
+        if repo.has_recap_been_sent(today, cooldown_key, group_id=group_id):
+            return None
+    except Exception:
+        logger.exception("podium_streak: cooldown check failed")
+        return None
+
+    streak = podium_streak(
+        repo,
+        player_id=player_id,
+        group_id=group_id,
+        reference_week_monday=monday,
+        enabled_games=enabled_games,
+    )
+    if streak < 3:
+        return None
+
+    try:
+        repo.mark_recap_sent(today, cooldown_key, group_id=group_id)
+    except Exception:
+        logger.exception("podium_streak: mark_recap_sent failed")
+        return None
+
+    return Trigger(
+        kind="podium_streak",
+        format_data={"weeks": str(streak)},
+    )
+
+
 _RIVALRY_THRESHOLD = 3.0  # pts; within this margin = "close"
 
 
@@ -874,6 +934,7 @@ def gather_submission_triggers(
     repo: Repository,
     *,
     player_id: int,
+    player_name: str = "",
     game: str,
     new_raw: int,
     today: date,
@@ -973,7 +1034,7 @@ def gather_submission_triggers(
     if above_floor is not None:
         triggers.append(above_floor)
 
-    # Phase F: social / cross-player triggers — rivalry (weekly standings).
+    # Phase F: social / cross-player triggers — rivalry + podium streak.
     if settings is not None:
         try:
             rivalry = _detect_rivalry_trigger(repo, player_id, group_id, today, settings)
@@ -983,8 +1044,212 @@ def gather_submission_triggers(
             logger.exception(
                 "rivalry detector failed (player=%s) — skipping", player_id
             )
+        try:
+            ps = _detect_podium_streak_trigger(
+                repo, player_id, player_name, group_id, today,
+                settings.enabled_games,
+            )
+            if ps is not None:
+                triggers.append(ps)
+        except Exception:
+            logger.exception(
+                "podium_streak detector failed (player=%s) — skipping", player_id
+            )
 
     return triggers
+
+
+# ---------------------------------------------------------------------------
+# Group broadcasts: photo finish + comeback
+# ---------------------------------------------------------------------------
+
+_PHOTO_FINISH_TEMPLATES = (
+    "🏁 Photo finish — {p1} leads {p2} by {gap} pts with one {game} left to play.",
+    "📸 One {game} to go. {p1} vs {p2}: gap is just {gap} pts. This one's going down to the wire.",
+    "⚡ It's neck and neck! {p1} and {p2} are {gap} pts apart — {game} decides it.",
+    "🎯 Last game: {game}. {p1} holds a {gap} pt lead over {p2}. Could go either way.",
+    "🔥 {p1} and {p2} are {gap} pts apart. One {game} left. Don't blink.",
+    "🏁 {p1} is {gap} pts ahead of {p2} — with {game} still to play. Not over yet.",
+    "📍 Final game: {game}. The gap between {p1} and {p2} is just {gap} pts.",
+)
+
+_COMEBACK_TEMPLATES = (
+    "⚡ Comeback alert! {name} just moved from outside the top 2 to first place.",
+    "🔄 Plot twist: {name} has taken the lead! {prior_leader} held it for {days_held} {day_word}.",
+    "🚀 {name} just snatched the lead from {prior_leader}. {days_held} {day_word} of domination ended.",
+    "📈 {name} is back on top. {prior_leader} had led for {days_held} {day_word}.",
+    "⚡ {name} just jumped to first. {prior_leader}'s {days_held}-{day_word} lead is gone.",
+    "🏆 Leaderboard flip! {name} takes #1. {prior_leader} drops.",
+    "🔥 {name} climbed to the top! {prior_leader} was leading for {days_held} {day_word}.",
+)
+
+
+def _photo_finish_message(
+    p1_name: str,
+    p2_name: str,
+    gap: float,
+    game: str,
+) -> str:
+    idx = hash((p1_name, p2_name, game)) % len(_PHOTO_FINISH_TEMPLATES)
+    return _PHOTO_FINISH_TEMPLATES[idx].format(
+        p1=p1_name, p2=p2_name,
+        gap=f"{gap:.1f}",
+        game=GAME_DISPLAY.get(game, game),
+    )
+
+
+def _comeback_message(
+    name: str,
+    prior_leader: str,
+    days_held: int,
+) -> str:
+    idx = hash((name, prior_leader, days_held)) % len(_COMEBACK_TEMPLATES)
+    day_word = "day" if days_held == 1 else "days"
+    return _COMEBACK_TEMPLATES[idx].format(
+        name=name,
+        prior_leader=prior_leader,
+        days_held=days_held,
+        day_word=day_word,
+    )
+
+
+def maybe_broadcast_photo_finish(
+    repo: Repository,
+    settings: Settings,
+    *,
+    group_id: int,
+    today: date,
+    group_recap_to: Optional[str],
+    enabled_games: FrozenSet[str],
+) -> Optional[str]:
+    """Broadcast a photo-finish alert when the top-2 weekly standings are
+    within 2.0 pts and exactly one game remains unplayed by both of them
+    today. Fires at most once per week."""
+    monday, _ = week_bounds(today)
+    cooldown_key = f"photo_finish:{monday.isoformat()}"
+    try:
+        if repo.has_recap_been_sent(today, cooldown_key, group_id=group_id):
+            return None
+    except Exception:
+        logger.exception("photo_finish: cooldown check failed")
+        return None
+
+    try:
+        week_scores = repo.list_scores(date_from=monday, date_to=today, group_id=group_id)
+    except Exception:
+        logger.exception("photo_finish: list_scores failed")
+        return None
+
+    filtered = [s for s in week_scores if s.game in enabled_games]
+    lb = weekly_leaderboard(filtered)
+    if len(lb) < 2:
+        return None
+
+    top1, top2 = lb[0], lb[1]
+    gap = round(top1.total_points - top2.total_points, 1)
+    if gap > 2.0:
+        return None
+
+    today_scores = [s for s in week_scores if s.puzzle_date == today]
+    top2_ids = {top1.player_id, top2.player_id}
+
+    unplayed_by_both = [
+        g for g in enabled_games
+        if not any(s.game == g and s.player_id in top2_ids for s in today_scores)
+    ]
+    if len(unplayed_by_both) != 1:
+        return None
+
+    game = unplayed_by_both[0]
+    body = _photo_finish_message(top1.player_name, top2.player_name, gap, game)
+    try:
+        repo.mark_recap_sent(today, cooldown_key, group_id=group_id)
+    except Exception:
+        logger.exception("photo_finish: mark_recap_sent failed")
+        return None
+
+    dm_targets: List[str] = []
+    try:
+        dm_targets = repo.list_active_whatsapp_ids(
+            date_from=monday, date_to=today, group_id=group_id
+        )
+    except Exception:
+        logger.exception("photo_finish: list_active_whatsapp_ids failed")
+
+    send_recap(settings, body, dm_targets=dm_targets, group_recap_to=group_recap_to)
+    return body
+
+
+def maybe_broadcast_comeback(
+    repo: Repository,
+    settings: Settings,
+    *,
+    player_id: int,
+    player_name: str,
+    group_id: int,
+    today: date,
+    group_recap_to: Optional[str],
+    enabled_games: FrozenSet[str],
+) -> Optional[str]:
+    """Broadcast a comeback alert when a player moves from 3rd+ to 1st,
+    wasn't in 1st yesterday, and ≥2 enabled games are still unplayed this week."""
+    monday, sunday = week_bounds(today)
+    cooldown_key = f"comeback:{player_id}:{monday.isoformat()}"
+    try:
+        if repo.has_recap_been_sent(today, cooldown_key, group_id=group_id):
+            return None
+    except Exception:
+        logger.exception("comeback: cooldown check failed")
+        return None
+
+    try:
+        week_scores = repo.list_scores(date_from=monday, date_to=today, group_id=group_id)
+    except Exception:
+        logger.exception("comeback: list_scores failed")
+        return None
+
+    filtered = [s for s in week_scores if s.game in enabled_games]
+    lb = weekly_leaderboard(filtered)
+    if not lb or lb[0].player_id != player_id:
+        return None  # not in first
+
+    # Count games with at least one submission anywhere this week.
+    games_played_this_week = {s.game for s in filtered}
+    games_remaining = enabled_games - games_played_this_week
+    if len(games_remaining) < 2:
+        return None
+
+    # Check yesterday's standings.
+    yesterday = today - timedelta(days=1)
+    prior_filtered = [s for s in filtered if s.puzzle_date < today]
+    prior_lb = weekly_leaderboard(prior_filtered)
+    if prior_lb and prior_lb[0].player_id == player_id:
+        return None  # was already 1st yesterday
+
+    prior_leader = prior_lb[0].player_name if prior_lb else None
+    if prior_leader is None:
+        return None
+
+    # Days the prior leader held the top spot.
+    days_held = (today - monday).days  # days into the week
+
+    body = _comeback_message(player_name, prior_leader, max(days_held, 1))
+    try:
+        repo.mark_recap_sent(today, cooldown_key, group_id=group_id)
+    except Exception:
+        logger.exception("comeback: mark_recap_sent failed")
+        return None
+
+    dm_targets: List[str] = []
+    try:
+        dm_targets = repo.list_active_whatsapp_ids(
+            date_from=monday, date_to=today, group_id=group_id
+        )
+    except Exception:
+        logger.exception("comeback: list_active_whatsapp_ids failed")
+
+    send_recap(settings, body, dm_targets=dm_targets, group_recap_to=group_recap_to)
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -1127,6 +1392,7 @@ def render_trigger(trigger: Trigger, *, player_name: str, game: str) -> str:
     for key in ("prior_holder", "weekday", "year", "rank", "rival", "weeks", "gap"):
         if key in fd:
             subs[key] = fd[key]
+    # podium_streak uses {weeks} which is already handled above
     return template.format(**subs)
 
 
@@ -1214,6 +1480,7 @@ def maybe_notify_personal_best(
     triggers = gather_submission_triggers(
         repo,
         player_id=player.id,
+        player_name=player.display_name,
         game=game,
         new_raw=new_raw,
         today=today,

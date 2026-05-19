@@ -117,13 +117,14 @@ _ULTRA_HELP_TEXT = (
     "    recap / today — full daily recap\n"
     "    yesterday / \"N days ago\" / recap YYYY-MM-DD — past daily recap\n"
     "    week / wrap — weekly wrap\n"
+    "    story / narrative — narrative paragraph recap of the week\n"
     "    all week — every score submitted this week\n"
     "    prizes — live prize snapshot\n"
     "    missing / who — who hasn't played today\n"
     "    rules / scoring — how points work\n"
     "\n"
     "  About you:\n"
-    "    stats — your all-time stats\n"
+    "    stats — your all-time stats (includes podium streak)\n"
     "    pb / bests — your personal bests across all games\n"
     "    streak — your current submission streak\n"
     "    vs <name> — head-to-head record against another player\n"
@@ -133,6 +134,7 @@ _ULTRA_HELP_TEXT = (
     "    best day — your highest-scoring composite day ever\n"
     "    worst day — your lowest-scoring composite day ever\n"
     "    pace — your current rank and projected points by Sunday\n"
+    "    estimate — what score you need in each game to overtake the leader\n"
     "    by day — your day-of-week breakdown (all games)\n"
     "    by day <game> — day-of-week breakdown for one game\n"
     "    by day <game> <N> — same, using only your last N plays\n"
@@ -394,7 +396,8 @@ def _parse_game_names_from_words(words: List[str]) -> Optional[List[str]]:
 
 
 def _handle_stats(
-    repo: Repository, from_: str, profile_name: str, *, group_id: int
+    repo: Repository, from_: str, profile_name: str, *, group_id: int,
+    settings: Optional["Settings"] = None, now: Optional["datetime"] = None,
 ) -> str:
     display_name = (profile_name or "").strip() or from_
     player = repo.get_or_create_player(from_, display_name)
@@ -429,6 +432,26 @@ def _handle_stats(
                 f"{format_raw_score(game, best[game])} "
                 f"({count[game]} submissions)"
             )
+
+    # Podium streak.
+    if settings is not None and now is not None:
+        try:
+            from .stats import podium_streak as _podium_streak
+            from .puzzles import week_bounds as _wb, la_date as _la
+            monday, _ = _wb(_la(now))
+            streak = _podium_streak(
+                repo,
+                player_id=player.id,
+                group_id=group_id,
+                reference_week_monday=monday,
+                enabled_games=settings.enabled_games,
+            )
+            if streak > 0:
+                week_word = "week" if streak == 1 else "weeks"
+                lines.append("")
+                lines.append(f"Podium streak: {streak} {week_word} in the top 3")
+        except Exception:
+            pass
 
     return "\n".join(lines)
 
@@ -892,6 +915,32 @@ def _common_games(
         (grp.enabled_games if grp.enabled_games is not None else fallback)
         for grp in grps
     ))
+
+
+def _handle_narrative(
+    repo: "Repository",
+    settings: Optional["Settings"],
+    now: "datetime",
+    *,
+    group_id: int,
+) -> str:
+    """Render the narrative wrap paragraph for the current week."""
+    from .narrative import build_narrative_context, render_narrative
+    from .puzzles import week_bounds, la_date
+
+    if settings is None:
+        return "Narrative wrap isn't available in this context."
+
+    today = la_date(now)
+    monday, sunday = week_bounds(today)
+    week_scores = repo.list_scores(date_from=monday, date_to=sunday, group_id=group_id)
+    prior_mon = monday - timedelta(days=7)
+    prior_scores = repo.list_scores(date_from=prior_mon, date_to=monday - timedelta(days=1), group_id=group_id)
+
+    ctx = build_narrative_context(week_scores, prior_scores, settings.enabled_games)
+    if ctx is None:
+        return "Not enough data for a narrative this week — need at least 2 players."
+    return render_narrative(ctx)
 
 
 def _handle_global_recap(
@@ -2010,6 +2059,82 @@ def _ordinal_suffix(n: int) -> str:
 _DOW_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _DOW_FULL = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
+def _handle_estimate(
+    repo: "Repository",
+    settings: Optional["Settings"],
+    from_: str,
+    profile_name: str,
+    now: "datetime",
+    *,
+    group_id: int,
+) -> str:
+    """Show the raw score a player needs in each unplayed game today to
+    overtake the current weekly leader."""
+    from .scoring import estimate_score_to_beat, weekly_leaderboard
+    from .puzzles import week_bounds, la_date
+    from .parsers import format_raw_score as _fmt_raw
+
+    today = la_date(now)
+    monday, sunday = week_bounds(today)
+    enabled_games: FrozenSet[str] = settings.enabled_games if settings else frozenset()
+
+    player = repo.get_or_create_player(from_, profile_name)
+    week_scores = repo.list_scores(date_from=monday, date_to=sunday, group_id=group_id)
+    week_filtered = [s for s in week_scores if s.game in enabled_games]
+    lb = weekly_leaderboard(week_filtered)
+
+    if not lb:
+        return "No scores this week yet — nothing to estimate from."
+
+    my_entry = next((e for e in lb if e.player_id == player.id), None)
+    my_pts = my_entry.total_points if my_entry else 0.0
+    my_rank = lb.index(my_entry) + 1 if my_entry else len(lb) + 1
+    leader = lb[0]
+
+    if my_rank == 1 and len(lb) > 1:
+        gap_to_2nd = round(leader.total_points - lb[1].total_points, 1)
+        header = (
+            f"You're leading, {profile_name} — {_fmt_pts(leader.total_points)} pts "
+            f"(+{_fmt_pts(gap_to_2nd)} ahead of {lb[1].player_name})."
+        )
+    elif my_rank == 1:
+        return f"You're the only one on the board this week, {profile_name}. Play on!"
+    else:
+        header = (
+            f"To overtake {leader.player_name} "
+            f"({_fmt_pts(leader.total_points)} pts) you need:"
+        )
+
+    today_scores = [s for s in week_scores if s.puzzle_date == today]
+    played_today = {s.game for s in today_scores if s.player_id == player.id}
+    unplayed_time = [g for g in enabled_games if g not in played_today and g != "pinpoint"]
+    pinpoint_unplayed = "pinpoint" in enabled_games and "pinpoint" not in played_today
+
+    if not unplayed_time and not pinpoint_unplayed:
+        if my_rank > 1:
+            pts_gap = round(leader.total_points - my_pts, 1)
+            return f"{header}\nYou've played everything today. Gap: {_fmt_pts(pts_gap)} pts."
+        return header
+
+    lines = [header]
+    target = leader.total_points - my_pts + 0.1
+
+    for game in sorted(unplayed_time):
+        competitors = [s.raw_score for s in today_scores if s.game == game]
+        needed = estimate_score_to_beat(target, competitors, game)
+        game_label = GAME_DISPLAY.get(game, game)
+        if needed is None:
+            lines.append(f"  {game_label}: not achievable at current pace")
+        else:
+            lines.append(f"  {game_label}: sub {_fmt_raw(game, needed)}")
+
+    if pinpoint_unplayed:
+        lines.append(f"  {GAME_DISPLAY.get('pinpoint', 'Pinpoint')}: (guess-based — can't estimate)")
+
+    lines.append("(based on scores submitted so far today)")
+    return "\n".join(lines)
+
+
 _BY_DAY_BARE = frozenset({"by day", "byday", "day stats", "daystats", "days"})
 _BY_DAY_PREFIX = ("by day ", "byday ", "day stats ", "daystats ", "days ")
 
@@ -2609,13 +2734,16 @@ def handle_inbound(
     if lower in ("ultrahelp", "help more", "help +"):
         return _ULTRA_HELP_TEXT
     if lower == "stats":
-        return _handle_stats(repo, from_, profile_name, group_id=group_id)
+        return _handle_stats(repo, from_, profile_name, group_id=group_id, settings=settings, now=now)
     if lower in ("pb", "bests", "personal bests"):
         return _handle_pb(repo, from_, profile_name, group_id=group_id)
     if lower == "unparsed":
         return _handle_unparsed(repo)
     if lower in ("wrap", "week"):
         return _handle_wrap(repo, settings, now, group_id=group_id)
+
+    if lower in ("story", "narrative", "wrap story", "week story"):
+        return _handle_narrative(repo, settings, now, group_id=group_id)
     if lower in ("all", "all week"):
         return _handle_all_week(repo, settings, now, group_id=group_id)
     if lower in ("leaderboard", "standings"):
@@ -2822,6 +2950,11 @@ def handle_inbound(
             repo, from_, profile_name, now, settings, group_id=group_id
         )
 
+    if lower in ("estimate", "what do i need", "need to win", "needed"):
+        return _handle_estimate(
+            repo, settings, from_, profile_name, now, group_id=group_id
+        )
+
     # ``by day [game] [n]`` — per-DOW breakdown with optional game filter
     # and optional recency limit (last N scores).
     _byd = _parse_by_day_command(lower)
@@ -3005,6 +3138,64 @@ def handle_inbound(
 
             logging.getLogger(__name__).exception(
                 "maybe_fire_early_recap failed after insert by player %s",
+                player.id,
+            )
+
+    # Group broadcasts: photo finish + comeback (fire-and-forget; never
+    # block the submission ack if these fail).
+    if settings is not None and parsed.game in enabled_games:
+        from .jobs import _group_recap_to as _group_recap_to_from_group
+        _recap_to = _group_recap_to_from_group(settings, sender_group)
+        try:
+            from .notifications import maybe_broadcast_photo_finish
+            maybe_broadcast_photo_finish(
+                repo, settings,
+                group_id=group_id,
+                today=puzzle_date,
+                group_recap_to=_recap_to,
+                enabled_games=enabled_games,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "maybe_broadcast_photo_finish failed after insert by player %s",
+                player.id,
+            )
+        # Badge checks after submission.
+        try:
+            from .badges import check_badges_after_submission, notify_new_badges
+            new_badges = check_badges_after_submission(
+                repo,
+                player_id=player.id,
+                group_id=group_id,
+                game=parsed.game,
+                new_raw=parsed.raw_score,
+                today=puzzle_date,
+                enabled_games=enabled_games,
+            )
+            if new_badges:
+                notify_new_badges(repo, settings, player=player, badges=new_badges)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "badge checks failed after insert by player %s", player.id
+            )
+
+        try:
+            from .notifications import maybe_broadcast_comeback
+            maybe_broadcast_comeback(
+                repo, settings,
+                player_id=player.id,
+                player_name=player.display_name,
+                group_id=group_id,
+                today=puzzle_date,
+                group_recap_to=_recap_to,
+                enabled_games=enabled_games,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "maybe_broadcast_comeback failed after insert by player %s",
                 player.id,
             )
 
