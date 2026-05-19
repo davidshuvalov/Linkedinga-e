@@ -72,6 +72,14 @@ _NEW_PB_TEMPLATES = (
     "{name}, a thing of beauty: {new} on {game}, your fastest ever (was {prior}).",
     "New PB unlocked, {name}. {game} in {new}. Old shame: {prior}.",
     "Tape measure out — {name} stretched their own {game} record to {new} (was {prior}).",
+    "{name} just put down the best {game} of their life: {new}. {prior} is now history.",
+    "That's a personal record, {name}: {game} in {new} (was {prior}). Not a drill.",
+    "Unprecedented {game} from {name}: {new}. The previous {prior} didn't see this coming.",
+    "{name}: {new} on {game}. Your best ever (was {prior}). The data is thrilled.",
+    "A personal best to savour, {name}: {game} in {new} (was {prior}). This one counts.",
+    "{name}, the {game} gods smiled: {new} (was {prior}). Down. Done. Documented.",
+    "PB, {name}. {game} in {new}. The {prior} is in your rear-view mirror and shrinking.",
+    "{name} dropped a {game} PB nobody asked for but everyone respects: {new} (was {prior}).",
 )
 _TIED_PB_TEMPLATES = (
     "Matched your {game} PB ({new}). Consistency is a skill.",
@@ -100,6 +108,13 @@ _NEW_WORST_TEMPLATES = (
     "{name}, {game} in {new} is officially your slowest. Beats {prior} for the wrong reason.",
     "{name}, the floor moved: {new} on {game} is your new bottom (was {prior}).",
     "Worst-ever {game} for {name}: {new}. The previous {prior} looks fast now.",
+    "Spiritual damage: {name} clocks {new} on {game}. Previous worst: {prior}. The floor has a sub-basement.",
+    "{name}, {new} on {game} is your new worst. The old {prior} now looks like a golden era.",
+    "The bad news: {name}'s {game} in {new} is a new worst. The worse news: {prior} was your previous floor.",
+    "Historically bad, {name}: {new} on {game} is your worst ever (was {prior}). But you're still a good person. Unlike this score.",
+    "{name} just redefined their {game} floor: {new}. The old {prior} now feels like a triumph.",
+    "{name}, {game} in {new}. New personal worst. The {prior} didn't deserve to be beaten like this.",
+    "The puzzle won comprehensively, {name}: {new} on {game} (was {prior}). Tomorrow is another day.",
 )
 _TIED_WORST_TEMPLATES = (
     "Tied your worst-ever {game} ({new}). At least you're predictable.",
@@ -134,6 +149,11 @@ _BEST_OF_DAY_TEMPLATES = (
     "{name}: {new} on {game}, eclipsing the field. For now.",
     "Fastest {game} of the day stamped at {new}, {name}. Rest of the pack: catch up.",
     "{name}, you just bumped everyone off the top of {game} today: {new}.",
+    "{name}: {new} on {game}. Day's fastest. The lead may not last but it is yours right now.",
+    "Top of today's {game} pile: {name} with {new}. Justified smugness follows.",
+    "{name} takes today's {game} crown: {new}. Everyone else is now playing catch-up.",
+    "{name}, today's {game} benchmark is set at {new}. Most won't beat it. Enjoy.",
+    "First in quality on {game} today: {name}, {new}. The others have a number to chase.",
 )
 
 _WORST_OF_DAY_TEMPLATES = (
@@ -149,6 +169,13 @@ _WORST_OF_DAY_TEMPLATES = (
     "Today's {game} basement: {name}, {new}. We're all friends here.",
     "{name}, the puzzle didn't blink: {new} on {game}, slowest of the day.",
     "Currently last on today's {game}, {name}: {new}. Tomorrow's a new day.",
+    "{name}, {new} on {game} is the day's worst so far. The puzzle has claimed a victim.",
+    "Rock bottom of today's {game} leaderboard: {name}, {new}. The view from down here is unique.",
+    "{name}: today's {game} sacrifice. Someone had to hold up the bottom. Today it's you.",
+    "{name}, you're today's {game} anchor: {new}. Keeping the group's average honest.",
+    "Dead last on {game} today, {name}: {new}. That's not nothing. It's just last.",
+    "{name}, the {game} board has your name at the bottom: {new}. Proudly yours.",
+    "Last man standing on {game} today — standing at the bottom: {name}, {new}.",
 )
 
 # All-time record — fastest score for this game across all players,
@@ -258,6 +285,105 @@ _FIRST_TODAY_TEMPLATES = (
 )
 
 
+# 2nd–5th best in personal all-time history for this game.
+# ``{rank}`` is filled with "2nd", "3rd", etc.
+_NTH_BEST_TEMPLATES = (
+    "Not the PB, but your {rank} best {game} ever: {new}. The top spot stays just out of reach.",
+    "{name}, that's your {rank} best {game} of all time: {new}. Podium-adjacent.",
+    "{rank} best {game} you've ever done, {name}: {new}. The PB is right there, judging you.",
+    "Silver-ish medal, {name}: {new} on {game} is your {rank} ever. Getting there.",
+    "{name}: {new} on {game}. Your {rank} best. Not bad, considering.",
+    "Historically, this {game} ranks {rank} for you: {new}. A good one, technically.",
+    "{rank} all-time on {game} for {name}: {new}. The best version of you is only marginally faster.",
+    "Not a PB, but {rank} best on {game}: {new}, {name}. Consistency is charming.",
+    "{name}'s {rank} best {game}: {new}. Still chasing that number one spot.",
+    "Career {rank} on {game}, {name}: {new}. Better than most days. Just not the best.",
+    "{rank} on your {game} all-time list: {new}. {name}, you are, technically, improving.",
+    "{name}: {new} on {game}. {rank} best ever. That's a flex, with conditions.",
+    "That {game} in {new} is your {rank} all-time, {name}. Conditional respect.",
+    "Good but not great: {new} on {game} ranks {rank} for you, {name}. The PB is unmoved.",
+    "{name} scores {new} on {game} — {rank} best in personal history. Acceptable. Just.",
+    "{name}, {new} on {game} makes the all-time {rank}. You are, statistically, decent.",
+    "{rank} best ever on {game}, {name}: {new}. The numbers note your existence.",
+    "Not a disaster, not a triumph: {new} on {game} is your {rank} best, {name}.",
+)
+
+# Top 25% of player's own all-time history — not a PB.
+_TOP_QUARTILE_TEMPLATES = (
+    "Top 25% of your {game} history, {name}: {new}. The good version of you showed up.",
+    "{name}, {new} on {game} is in your upper quartile historically. Take it.",
+    "That's one of your better {game} days: {new}. Top 25% for you.",
+    "Top quartile for {name} on {game}: {new}. Quietly excellent.",
+    "{new} puts you in the top quarter of your own {game} history, {name}. Solid.",
+    "{name}: {new} on {game}. Upper 25% for you. Comfortably decent.",
+    "Your above-average {game} self turned up today, {name}: {new}.",
+    "Historically a good {game} score for you, {name}: {new}. Top quartile.",
+    "{name}, that {new} on {game} sits comfortably in your top 25% all-time.",
+    "One of your better {game} performances: {new}, {name}. Top quartile.",
+    "Upper echelon of your own {game} history: {new}, {name}. You can do this.",
+    "{name} delivers a top-quartile {game}: {new}. The data agrees.",
+)
+
+# Bottom 25% of player's own all-time history — not a worst.
+_BOTTOM_QUARTILE_TEMPLATES = (
+    "Bottom quarter of your {game} history, {name}: {new}. Not your finest.",
+    "{name}, {new} on {game} is in the bottom 25% of your all-time scores. Historically bleak.",
+    "That's a low-end {game} for you: {new}. Bottom quartile, historically speaking.",
+    "One of your slower {game} days: {new}, {name}. The bottom 25% of your own record.",
+    "{name}: {new} on {game}. Lower quartile for you. But you showed up, and that's something. Sort of.",
+    "Historically, {new} is near the bottom for you on {game}, {name}. But you're a good person, unlike this score.",
+    "Bottom 25% on {game}, {name}: {new}. The puzzle had its way with you today.",
+    "{name}, {new} is one of your weaker {game} scores. Lower quartile. The bar was set. It was cleared. From underneath.",
+    "Lower quarter of your {game} history: {new}, {name}. The better days are in the data.",
+    "{name}: {new} on {game} lands in your bottom quartile. Statistically, 25% of your games are like this. It's still not ideal.",
+    "Not one of your better {game} days, {name}: {new}. Bottom 25% personally. We say this with love.",
+    "{name}, that {game} in {new} is bottom quartile for you. But at least you're a good person. Unlike the score.",
+    "Lower end for you on {game}: {new}. {name}, the data is not rooting for you today.",
+)
+
+# Top 25% of player's same-weekday history.
+_DOW_TOP_QUARTILE_TEMPLATES = (
+    "{name}, your {weekday} {game} is looking sharp: {new} is top quartile for you on {weekday}s.",
+    "Top 25% of your {weekday} {game} scores: {new}, {name}. {weekday}s suit you.",
+    "{weekday} is a good {game} day for you, {name}: {new} in the top quarter historically.",
+    "{name}, that {new} on {game} makes it one of your better {weekday}s. Top quartile.",
+    "Strong {weekday} {game}, {name}: {new} is upper quartile for you on {weekday}s.",
+    "{name}: a good {weekday} for {game}. {new} is top 25% of your {weekday} history.",
+)
+
+# Bottom 25% of player's same-weekday history.
+_DOW_BOTTOM_QUARTILE_TEMPLATES = (
+    "{weekday}s and {game} just don't mix for you, {name}: {new} is bottom quartile on {weekday}s.",
+    "{name}, historically {weekday}s are rough for you on {game}: {new} is in the lower quarter.",
+    "Bottom 25% of your {weekday} {game} scores: {new}, {name}. The pattern holds.",
+    "{name}: {new} on {game} on a {weekday}. Historically, {weekday}s are not your {game} day.",
+    "{weekday}-{game} lows, {name}: {new} is bottom quartile for you on {weekday}s. Maybe it's the vibes.",
+    "{name}, the data suggests {weekday} is not your {game} day. {new} confirms it.",
+)
+
+# Player had a bad score but wasn't the worst of the day — there's
+# someone worse to point at. ``{prior_holder}`` is the actual worst;
+# ``{prior}`` is their score.
+_ABOVE_FLOOR_TODAY_TEMPLATES = (
+    "Not your best {game}: {new}, {name}. But spare a thought for {prior_holder} who managed {prior}.",
+    "{name}, {new} on {game} isn't great. Then again, neither is {prior_holder}'s {prior}. Small comfort.",
+    "Rough {game} today, {name}: {new}. At least {prior_holder} is having a worse one ({prior}).",
+    "{name}: {new} on {game}. Would feel bad, but {prior_holder} posted {prior}. Context matters.",
+    "That {game} in {new} was rough, {name}. {prior_holder}'s {prior} makes yours look quick.",
+    "{name}, the puzzle beat you ({new}). It beat {prior_holder} harder though ({prior}). There's comfort in the rankings.",
+    "Bad {game} for {name}: {new}. {prior_holder}'s {prior} is worse. Barely. Take it.",
+    "{name}, you're not winning {game} today ({new}). But {prior_holder} has it worse at {prior}.",
+    "{new} on {game} — not ideal, {name}. Still faster than {prior_holder}'s {prior}. Today's gift.",
+    "{name}: {new} on {game} isn't what you wanted. But {prior_holder} posted {prior}. Perspective.",
+    "You did bad on {game} today ({new}), {name}. {prior_holder} did worse ({prior}). Character-building.",
+    "{name}, {new} is a slow {game}. {prior_holder}'s {prior} is slower. You are above the floor. The floor is carpeted.",
+    "Not your finest {game}, {name}: {new}. {prior_holder}'s {prior} gives you the moral high ground.",
+    "{name}: {new} on {game}. Underwhelming. But {prior_holder} ({prior}) somehow makes {new} look quick.",
+    "The puzzle won, {name}. {new} on {game} is slow. But {prior_holder} gave it {prior}. You're not alone at the bottom. Just adjacent.",
+    "{name}, {new} wasn't pretty on {game}. At least {prior_holder} is down there too ({prior}). Solidarity. Sort of.",
+)
+
+
 _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "new_pb": _NEW_PB_TEMPLATES,
     "tied_pb": _TIED_PB_TEMPLATES,
@@ -271,6 +397,12 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "dow_worst": _DOW_WORST_TEMPLATES,
     "year_pb": _YEAR_PB_TEMPLATES,
     "first_today": _FIRST_TODAY_TEMPLATES,
+    "nth_best_personal": _NTH_BEST_TEMPLATES,
+    "top_quartile_personal": _TOP_QUARTILE_TEMPLATES,
+    "bottom_quartile_personal": _BOTTOM_QUARTILE_TEMPLATES,
+    "dow_top_quartile_personal": _DOW_TOP_QUARTILE_TEMPLATES,
+    "dow_bottom_quartile_personal": _DOW_BOTTOM_QUARTILE_TEMPLATES,
+    "above_floor_today": _ABOVE_FLOOR_TODAY_TEMPLATES,
 }
 
 
@@ -281,10 +413,40 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
 # subordinate kinds whenever the dominant kind is in the candidate
 # pool; the random pick then runs over the survivors.
 _TRIGGER_TRUMPS: Dict[str, frozenset] = {
-    "new_pb": frozenset({"dow_pb", "year_pb"}),
-    "tied_pb": frozenset({"dow_pb", "year_pb"}),
-    "new_worst": frozenset({"dow_worst"}),
-    "tied_worst": frozenset({"dow_worst"}),
+    "new_pb": frozenset({
+        "dow_pb", "year_pb",
+        "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
+    }),
+    "tied_pb": frozenset({
+        "dow_pb", "year_pb",
+        "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
+    }),
+    "new_worst": frozenset({
+        "dow_worst",
+        "bottom_quartile_personal", "dow_bottom_quartile_personal",
+    }),
+    "tied_worst": frozenset({
+        "dow_worst",
+        "bottom_quartile_personal", "dow_bottom_quartile_personal",
+    }),
+    "all_time_record": frozenset({
+        "new_pb", "tied_pb", "best_of_day",
+        "dow_pb", "year_pb",
+        "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
+    }),
+    "all_time_anti_record": frozenset({
+        "new_worst", "tied_worst", "worst_of_day",
+        "dow_worst",
+        "bottom_quartile_personal", "dow_bottom_quartile_personal", "above_floor_today",
+    }),
+    "best_of_day": frozenset({
+        "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
+        "above_floor_today",
+    }),
+    "worst_of_day": frozenset({
+        "bottom_quartile_personal", "dow_bottom_quartile_personal",
+        "above_floor_today",
+    }),
 }
 
 
@@ -460,6 +622,112 @@ def _make_extreme_trigger(
     )
 
 
+def _detect_nth_best_trigger(prior_raws: List[int], new_raw: int) -> Optional[Trigger]:
+    """Fire when ``new_raw`` ranks 2nd–5th in the player's personal history.
+
+    Requires ≥ 6 prior scores so "2nd best of 3" (which isn't interesting)
+    doesn't fire. PB and tied-PB are handled by the personal-history detector.
+    """
+    if len(prior_raws) < 6:
+        return None
+    if new_raw <= min(prior_raws):
+        return None  # PB / tied-PB — handled elsewhere
+    better_count = sum(1 for r in prior_raws if r < new_raw)
+    rank = better_count + 1
+    if rank < 2 or rank > 5:
+        return None
+    ordinals = {2: "2nd", 3: "3rd", 4: "4th", 5: "5th"}
+    return Trigger(
+        kind="nth_best_personal",
+        format_data={"_new_raw": str(new_raw), "rank": ordinals[rank]},
+    )
+
+
+def _detect_quartile_trigger(prior_raws: List[int], new_raw: int) -> Optional[Trigger]:
+    """Fire when ``new_raw`` lands in the top or bottom 25% of the
+    player's personal history, but isn't itself a PB or worst.
+
+    Requires ≥ 8 prior scores so a quartile is statistically meaningful.
+    """
+    if len(prior_raws) < 8:
+        return None
+    if new_raw <= min(prior_raws) or new_raw >= max(prior_raws):
+        return None  # PB / worst handled elsewhere
+    n = len(prior_raws)
+    worse_count = sum(1 for r in prior_raws if r > new_raw)
+    better_count = sum(1 for r in prior_raws if r < new_raw)
+    if worse_count / n >= 0.75:
+        return Trigger(kind="top_quartile_personal", format_data={"_new_raw": str(new_raw)})
+    if better_count / n >= 0.75:
+        return Trigger(kind="bottom_quartile_personal", format_data={"_new_raw": str(new_raw)})
+    return None
+
+
+def _detect_dow_quartile_trigger(
+    player_game_history: Sequence[ScoreRow],
+    new_raw: int,
+    today: date,
+) -> Optional[Trigger]:
+    """Fire when ``new_raw`` is in the top or bottom 25% of the player's
+    scores for this game on this weekday. Requires ≥ 4 prior same-weekday
+    scores; PB/worst on the weekday are handled by ``dow_pb``/``dow_worst``."""
+    weekday = today.weekday()
+    same_dow = [
+        s.raw_score for s in player_game_history
+        if s.puzzle_date.weekday() == weekday and s.puzzle_date != today
+    ]
+    if len(same_dow) < 4:
+        return None
+    if new_raw <= min(same_dow) or new_raw >= max(same_dow):
+        return None
+    n = len(same_dow)
+    worse_count = sum(1 for r in same_dow if r > new_raw)
+    better_count = sum(1 for r in same_dow if r < new_raw)
+    weekday_name = _WEEKDAY_NAMES[weekday]
+    if worse_count / n >= 0.75:
+        return Trigger(
+            kind="dow_top_quartile_personal",
+            format_data={"_new_raw": str(new_raw), "weekday": weekday_name},
+        )
+    if better_count / n >= 0.75:
+        return Trigger(
+            kind="dow_bottom_quartile_personal",
+            format_data={"_new_raw": str(new_raw), "weekday": weekday_name},
+        )
+    return None
+
+
+def _detect_above_floor_today_trigger(
+    today_scores: Sequence[ScoreRow],
+    new_raw: int,
+    player_id: int,
+) -> Optional[Trigger]:
+    """Fire when the player had a bad score but wasn't the worst of the day.
+
+    Only fires when the player is in the slower half of today's field,
+    so it doesn't console someone who was actually competitive. Names
+    the actual day-worst player as the consolation reference."""
+    others = [s for s in today_scores if s.player_id != player_id]
+    if not others:
+        return None
+    worst_other = max(others, key=lambda s: s.raw_score)
+    if worst_other.raw_score <= new_raw:
+        return None  # Player IS the worst or tied for it
+    # Only trigger for the slower half of today's field.
+    all_today = sorted(s.raw_score for s in today_scores)
+    median = all_today[len(all_today) // 2]
+    if new_raw <= median:
+        return None
+    return Trigger(
+        kind="above_floor_today",
+        format_data={
+            "_new_raw": str(new_raw),
+            "_prior_raw": str(worst_other.raw_score),
+            "prior_holder": worst_other.player_name or "—",
+        },
+    )
+
+
 def gather_submission_triggers(
     repo: Repository,
     *,
@@ -543,6 +811,24 @@ def gather_submission_triggers(
     first = _detect_first_today_trigger(today_scores, new_raw, player_id)
     if first is not None:
         triggers.append(first)
+
+    # Phase E: ranking & percentile triggers — nth-best in personal history,
+    # quartile bands, weekday-quartile, and above-floor-today consolation.
+    nth = _detect_nth_best_trigger(prior_raws, new_raw)
+    if nth is not None:
+        triggers.append(nth)
+
+    quartile = _detect_quartile_trigger(prior_raws, new_raw)
+    if quartile is not None:
+        triggers.append(quartile)
+
+    dow_q = _detect_dow_quartile_trigger(player_game_history, new_raw, today)
+    if dow_q is not None:
+        triggers.append(dow_q)
+
+    above_floor = _detect_above_floor_today_trigger(today_scores, new_raw, player_id)
+    if above_floor is not None:
+        triggers.append(above_floor)
 
     return triggers
 
@@ -684,7 +970,7 @@ def render_trigger(trigger: Trigger, *, player_name: str, game: str) -> str:
         subs["new"] = format_raw_score(game, int(fd["_new_raw"]))
     if "_prior_raw" in fd:
         subs["prior"] = format_raw_score(game, int(fd["_prior_raw"]))
-    for key in ("prior_holder", "weekday", "year"):
+    for key in ("prior_holder", "weekday", "year", "rank"):
         if key in fd:
             subs[key] = fd[key]
     return template.format(**subs)

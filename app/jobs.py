@@ -256,6 +256,14 @@ def _run_daily_recap_for_group(
     )
     repo.mark_recap_sent(target_day, recap_type, group_id=group.id)
     send_champion_loser_dms(repo, settings, target_day, group_id=group.id)
+    if is_last_day_of_year(target_day):
+        send_period_champion_loser_dms(
+            repo, settings, target_day, "year", group_id=group.id
+        )
+    elif is_last_day_of_month(target_day):
+        send_period_champion_loser_dms(
+            repo, settings, target_day, "month", group_id=group.id
+        )
     return body
 
 
@@ -328,6 +336,14 @@ def _run_weekly_wrap_early_for_group(
     )
     repo.mark_recap_sent(target_day, "weekly", group_id=group.id)
     send_champion_loser_dms(repo, settings, target_day, group_id=group.id)
+    if is_last_day_of_year(target_day):
+        send_period_champion_loser_dms(
+            repo, settings, target_day, "year", group_id=group.id
+        )
+    elif is_last_day_of_month(target_day):
+        send_period_champion_loser_dms(
+            repo, settings, target_day, "month", group_id=group.id
+        )
     return body
 
 
@@ -381,7 +397,12 @@ def _fmt_weekly_points(val: float) -> str:
     return f"{val:.1f} pts"
 
 
-_CHAMPION_TEMPLATES = (
+# Weekly champion / loser DM pools.
+# Format keys available: {name} {points} {iso} {runner_up} {runner_up_pts}
+#                        {loser} {loser_pts} {gap}  (champion templates)
+#                        {name} {points} {iso} {champ} {champ_pts}
+#                        {above_name} {above_pts} {gap}  (loser templates)
+_WEEK_CHAMPION_TEMPLATES = (
     "MASSIVE congrats {name} — you are THIS WEEK'S CHAMPION with {points}. "
     "No time for losers, for you are THE champion. Flex responsibly.",
     "{name}. Week {iso}. CHAMPION. {points}. "
@@ -412,8 +433,79 @@ _CHAMPION_TEMPLATES = (
     "Print this DM. Frame this DM. Show the children.",
     "{name}, look at you. CHAMPION of week {iso} with {points}. "
     "Don't peak now. Or do. Either's fine.",
+    "{name}, you left {runner_up} {gap} back. "
+    "Week {iso}: yours. Completely.",
+    "Week {iso} champion, {name}, {points}. "
+    "{runner_up} tried their very best and it was not enough.",
+    "The gap between you and {runner_up} was {gap}. "
+    "That's not a race, {name}, that's a processional. Champion.",
+    "{name} wins week {iso} with {points}. "
+    "{runner_up} was respectable. They were just not you.",
+    "Champion status confirmed: {name}, {points}, week {iso}. "
+    "{loser} stares at the ceiling and wonders where it all went wrong.",
+    "WEEK {iso} — CHAMPION: {name} ({points}). WOODEN SPOON: {loser} ({loser_pts}). "
+    "One of these is you. One is not.",
+    "{name}, you took week {iso} by {gap} over {runner_up}. "
+    "Clean. Clinical. Unlovable behaviour from a competitor.",
+    "Congrats {name}. {points}. Week {iso}. "
+    "{runner_up} gave chase. You didn't notice.",
+    "Week {iso} sorted: {name} on top, {runner_up} in silver, {loser} somewhere at the bottom. "
+    "You are the top one.",
+    "{name}, week {iso} is filed under YOUR NAME. {points}. "
+    "{runner_up} fought hard, we noted it, it didn't matter.",
+    "FINAL STANDINGS — Week {iso}. 1st: {name} ({points}). "
+    "2nd: {runner_up} ({runner_up_pts}). Not 1st: everyone else. You are 1st.",
+    "{name}, you want the stats? {points}. Gap over {runner_up}: {gap}. "
+    "Week {iso}: YOURS. Take the weekend.",
+    "Week {iso}'s champion walks among us. It's {name}. "
+    "{points}. {loser} is somewhere being {loser}.",
+    "{name} — the gap you put between yourself and {runner_up} was {gap}. "
+    "Not a margin. A statement.",
+    "Three facts about week {iso}: it ended, {name} won it, {runner_up} didn't. "
+    "{points}. Well done.",
+    "{name}, {points}, champion of week {iso}. "
+    "{loser} saw the podium and decided it wasn't for them.",
+    "Every week needs a winner. Week {iso} chose wisely: it chose {name}. "
+    "{points}. Everyone else: supporting cast.",
+    "{name}, you are the weekly champion. You did {points}. "
+    "{runner_up} did {runner_up_pts}. That's a {gap} argument in your favour.",
+    "Week {iso}'s trophy is yours, {name}. {points}. "
+    "{loser} carried the wooden spoon so you didn't have to.",
+    "Reigning champion of week {iso}: {name} ({points}). "
+    "The next 7 days, this information is yours to weaponise.",
+    "Not all heroes wear capes, {name}. "
+    "Some just do {points} in a week and top leaderboards. Week {iso}: yours.",
+    "{name}, the numbers don't lie: {points}, week {iso}, first place. "
+    "{runner_up} can tell a different story to their mirror.",
+    "Week {iso} in review: {name} was unstoppable, {runner_up} was almost good enough, "
+    "and {loser} was there. Champion: {name}.",
+    "Put yourself in {runner_up}'s shoes for a moment, {name}. "
+    "Now step back onto the top step. {points}. Week {iso}.",
+    "Weekly champion. Non-ironically. Genuinely. For real. "
+    "{name}. {points}. Week {iso}.",
+    "The score this week: {name} {points}, everyone else: less. "
+    "Champion status: locked. {loser_pts} for {loser}, meanwhile.",
+    "{name}, week {iso}. You. Win. {points}. "
+    "Go and do something fun that doesn't involve puzzles. You've earned it.",
+    "Week {iso} leaderboard summary: 1. {name} ({points}). 2. {runner_up} ({runner_up_pts}). "
+    "∞. {loser} ({loser_pts}). That 1 is you.",
+    "Champion of week {iso}: {name}, {points}. "
+    "Technically {runner_up} came second, but we're not here to talk about them.",
+    "{name}, you won. The week is over. Your {points} says champion. "
+    "{loser}'s {loser_pts} says something very different.",
+    "This is your certificate of victory, {name}: Week {iso} Champion, {points}. "
+    "Frame it or cherish it quietly. Either works.",
+    "Week {iso}, final result: {name} first, {runner_up} second, glory undefined. "
+    "{points}. You get the glory.",
+    "{name}: champion. {runner_up}: not champion. {loser}: also not champion, "
+    "but for more structural reasons. Week {iso}.",
+    "{name}, you are the reason {runner_up} is reconsidering their LinkedIn gaming habits. "
+    "{points}. Week {iso}. Champion.",
+    "Done. Week {iso}. Winner: {name}. Points: {points}. "
+    "Gap over {runner_up}: {gap}. Mood: victorious. The end.",
 )
-_LOSER_TEMPLATES = (
+
+_WEEK_LOSER_TEMPLATES = (
     "{name} — wooden spoon this week with {points}. "
     "Someone has to be the floor the champion dances on. "
     "New week, new chance. Probably.",
@@ -445,11 +537,388 @@ _LOSER_TEMPLATES = (
     "{points}. Climb back up.",
     "{name} closed week {iso} on {points}. Last. "
     "Tomorrow's a new week. Tomorrow's also Monday. Brace.",
+    "{name}, you finished {gap} behind {above_name}. "
+    "{points}. Week {iso}. One rung up the ladder, that's all it takes.",
+    "Week {iso}: {champ} won, {name} finished last. "
+    "{points}. Nobody expects you to be {champ}. Just... slightly less last.",
+    "Wooden spoon, week {iso}: {name} ({points}). "
+    "{above_name} finished just above you with {above_pts}. The gap is {gap}. Stare at it.",
+    "{name}, last of week {iso} with {points}. "
+    "The good news: {champ} played brilliantly this week. It's not about you. Mostly.",
+    "The leaderboard is a pyramid, {name}. You are the base. "
+    "Structural. Important. Also: last. {points}, week {iso}.",
+    "{name} — {points} this week. {champ} got {champ_pts}. "
+    "The gulf between those numbers has its own postcode.",
+    "Week {iso} wrapped: {champ} on top, {name} on the floor, "
+    "{gap} separating you from {above_name}. Food for thought.",
+    "Last place this week: {name}, {points}. "
+    "{above_name} pipped you by {gap}. A remarkably small amount of daylight.",
+    "{name}, wooden spoon, week {iso}. {champ} won {champ_pts}, you won {points}. "
+    "But at least you won something.",
+    "Week {iso} leaderboard has {champ} at the top and {name} at the bottom. "
+    "You're bookends. Just unequal ones. {points}.",
+    "{name}, you and {above_name} were separated by {gap} this week. "
+    "That's your one number. Week {iso} is done; fix it.",
+    "Wooden spoon confirmed, {name}. {points}, week {iso}. "
+    "Look, at least you're reliably there.",
+    "{name}: last. {champ}: first. Same game, same week, very different outcomes. "
+    "One of you had a better time. {points} says which.",
+    "Week {iso} belonged to {champ}. {name} held down the bottom rung. "
+    "{points}. There's always next week — and next week's champion might be you.",
+    "{name}, {points}, last of week {iso}. {above_name} is {gap} ahead of you. "
+    "That's the number to beat. Just that one.",
+    "Dead last, week {iso}: {name}. {points}. "
+    "The floor is yours. Decorate it however you like. See you Monday.",
+    "Week {iso}: everyone played, {champ} won, {name} supported everyone "
+    "by being on the bottom. {points}. Foundational work.",
+    "Not the outcome you wanted, {name}. {points}. Wooden spoon. "
+    "{above_name} is {gap} away. That's extremely catchable. Allegedly.",
+    "{name}, week {iso} closes with you in last. {points}. "
+    "{champ} is miles away, but {above_name} is only {gap} ahead. Food for thought.",
+    "Week {iso} champion: {champ} ({champ_pts}). Week {iso} wooden spoon: {name} ({points}). "
+    "These two people played the same games. Remarkable.",
+    "{name}: solid effort, wrong end of the leaderboard, {points}. "
+    "The {gap} between you and {above_name} is frankly an insult. Week {iso}.",
+    "You know what I'm going to say, {name}. Last. {points}. Week {iso}. "
+    "The Monday reset exists for a reason.",
+    "{name}, the data says last place, week {iso}, {points}. "
+    "The data also says {above_name} is only {gap} ahead. That's basically nothing.",
+    "Week {iso}'s last-place ribbon goes to {name}. {points}. "
+    "You'll note {champ} got {champ_pts}. Don't note it for too long.",
+    "Wooden spoon week {iso}: {name}. The spoon is engraved. "
+    "It says {points}. Keep it somewhere you can see it. As a motivator.",
+    "{name}, you finished below {above_name} by {gap} this week. "
+    "That is your assignment for next week.",
+    "Last of week {iso}: {name}, {points}. "
+    "{above_name} is {gap} ahead. Monday is a blank page.",
+    "{name}, the gap between you and {above_name} is {gap}. "
+    "Not last forever. Just last this week. {points}.",
+    "Finishing touches on week {iso}: {champ} gets the crown, {name} gets the spoon, "
+    "everyone gets a fresh week Monday. {points}.",
+    "Week {iso}: {name} collects {points} and the wooden spoon. "
+    "{champ} collects {champ_pts} and the crown. One of these is better.",
+    "{name}, week {iso}'s last-place finish means Monday comes with a target on it. "
+    "{points}. Channel that.",
+    "The honest summary, {name}: last of week {iso}, {points}, "
+    "beaten by {above_name} ({above_pts}, gap: {gap}). Very narrow.",
+    "{name}, wooden spoon week {iso}. You've been {above_name}'s floor this week. "
+    "The ceiling's right there. {points}. Look up.",
+    "Week {iso} done. {name}: {points}, last. "
+    "Five days until you get to rewrite all of this. Monday.",
+)
+
+# Monthly champion / loser DM pools.
+# Format keys: {name} {points} {month} {runner_up} {runner_up_pts}
+#              {loser} {loser_pts} {gap}  (champion)
+#              {name} {points} {month} {champ} {champ_pts}
+#              {above_name} {above_pts} {gap}  (loser)
+_MONTH_CHAMPION_TEMPLATES = (
+    "Month of {month}: DONE. {name}: CHAMPION. {points}. "
+    "You outlasted everyone for a whole month. That's persistence AND skill.",
+    "{name}, you just won {month}. Not a day — the whole month. "
+    "{points}. {runner_up} will need at least 30 more days to get over it.",
+    "End of {month}: the monthly leaderboard has spoken. "
+    "{name}, {points}. Champion. Entire month. Full stop.",
+    "Monthly champion of {month}: {name} with {points}. "
+    "{runner_up} ran them close with {runner_up_pts} but close is for horseshoes.",
+    "{name}, you won {month}. Not just one week — the whole thing. "
+    "{points}. Print out the leaderboard. Frame it.",
+    "The month of {month} ends with {name} on top. {points}. "
+    "{runner_up} was a worthy adversary. They were also not you.",
+    "MONTHLY CHAMPION — {month}: {name}. {points}. "
+    "{loser} is somewhere reflecting on their life choices. You are not {loser}.",
+    "{name}, {points}, champion of {month}. "
+    "That's the whole calendar page. Yours.",
+    "{month} belongs to {name}. {points}. "
+    "The gap over {runner_up}: {gap}. Month-long dominance.",
+    "End-of-month update: {name} wins {month} with {points}. "
+    "{runner_up} fought all month and lost all month. Brutal.",
+    "Monthly wrap for {month}: champion is {name}, {points}, by {gap} over {runner_up}. "
+    "One entire month of winning.",
+    "{name} — congratulations on taking {month}. {points}. "
+    "30 days of grinding, one name at the top. Yours.",
+    "The {month} leaderboard closes with {name} in first. {points}. "
+    "{runner_up} gets the runner-up ribbon and our condolences.",
+    "Champion of {month}: {name} ({points}). "
+    "{runner_up} gave it everything. {gap} gap tells the story.",
+    "Month over. {month} is history. {name} wrote it. "
+    "{points}. First place. Champion. Done.",
+    "{name} is the {month} champion with {points}. "
+    "{runner_up} tried daily. Admirable. Not enough.",
+    "Final standings for {month}: 1. {name} ({points}). 2. {runner_up} ({runner_up_pts}). "
+    "Last. {loser} ({loser_pts}). You're the 1.",
+    "{month} in summary: {name} won. {runner_up} chased. {loser} had some thoughts. "
+    "{points}. This is your month.",
+    "{name}, the month of {month} ends at your feet. {points}. "
+    "Champion status: monthly, renewed.",
+    "Thirty-ish days. One winner. {name}. {month}. {points}. Remarkable run.",
+    "{name}, you took {month} day by day and ended up champion. "
+    "{points}. {runner_up} would do the same thing differently.",
+    "Monthly honours for {month} go to: {name} ({points}). "
+    "Runner-up: {runner_up} ({runner_up_pts}). Gap: {gap}. You're on the right side.",
+    "{name} — {month} champion, {points}. {loser} holds the wooden spoon with {loser_pts}. "
+    "You hold the trophy. One of these is better.",
+    "{month} leaderboard: {name} at the top, {loser} at the bottom, everyone in between. "
+    "You're the top one. {points}.",
+    "{name} wins {month}. That's 12 chances a year to do this and you used one. "
+    "{points}. Save the rest.",
+    "Monthly champion: {name}, {month}, {points}. "
+    "The {gap} cushion over {runner_up} is both comfortable and delicious.",
+    "It's the end of {month}. The champion is {name}. The gap is {gap}. "
+    "The mood: celebratory. {points}.",
+    "{name}, nobody could match you in {month}. "
+    "{runner_up} tried ({runner_up_pts}). Came up {gap} short. Month: yours.",
+    "Closing out {month}: {name} in first, {runner_up} in second, "
+    "{loser} doing {loser_pts}. You're in first. First is better.",
+    "{month} champion: {name}. {points}. The others played well, you played better. "
+    "For an entire month. Well done.",
+)
+
+_MONTH_LOSER_TEMPLATES = (
+    "{name} — the month of {month} is over and you're holding the wooden spoon. "
+    "{points}. The new month is a clean slate.",
+    "Last of {month}: {name}, {points}. "
+    "{champ} won the whole month. You provided the contrast. Both are important.",
+    "{month} done. {champ} champion. {name} last with {points}. "
+    "The gap to {above_name} is {gap}. That's your homework.",
+    "End of {month}: {name}, {points}, last place. "
+    "{above_name} is {gap} ahead of you. Focus on that number next month.",
+    "{name}, wooden spoon for {month}. {points}. "
+    "{champ} romped it with {champ_pts}. The mountain is tall. Start climbing.",
+    "Monthly wooden spoon, {month}: {name} ({points}). "
+    "{above_name} edged you by {gap} all month. Correction available.",
+    "{name}, the month of {month} ends with you in last. "
+    "{points}. This information is yours to use, not carry.",
+    "Monthly last place: {name}, {month}, {points}. "
+    "{champ} gets the crown. You get the spoon and a Monday.",
+    "{name}, you finished {month} on {points}. {champ} finished on {champ_pts}. "
+    "The difference: wide, but not insurmountable.",
+    "End of month report, {name}: last. {points}. "
+    "{month} belongs to {champ}. The next month belongs to whoever fights for it.",
+    "{name} brought up the rear of {month} with {points}. "
+    "{above_name} is only {gap} above you. Focus: found.",
+    "Monthly wooden spoon confirmed: {name}, {month}, {points}. "
+    "Next month has no memory of this one.",
+    "{name}, {month}'s final verdict: last place, {points}. "
+    "{champ} is champion. You are the floor the champion dances on. Repeatedly.",
+    "The month of {month} closes with {name} at the bottom. "
+    "{points}. {gap} to {above_name}. One small bridge to cross.",
+    "{name}, wooden spoon for {month}. {champ} did {champ_pts}. You did {points}. "
+    "The gap between those two numbers is a project.",
+    "Last of {month}: {name} ({points}). {above_name} ({above_pts}). "
+    "Gap: {gap}. Fix the gap. That's the assignment.",
+    "{month} recap: {champ} won, {name} didn't. {points}. "
+    "That's the brief version. The long version has the same conclusion.",
+    "{name} rounds out {month} in last with {points}. "
+    "Wooden spoon. Nice wood. You'll do better.",
+    "The {month} leaderboard closes with {name} at the base. "
+    "{points}. Foundation work. Unglamorous. New month Monday.",
+    "Wooden spoon, {month}: {name}. {points}. "
+    "{champ} gets {champ_pts} and bragging rights. You get a fresh start and our support.",
+    "{name}, {month} is done. You finished last ({points}). "
+    "{above_name} is {gap} ahead. That's next month's motivation.",
+    "Final {month} standings: {champ} on top, {name} on the bottom. "
+    "{points}. Not the month you wanted. Next one's available.",
+    "{name}: {month} wooden spoon, {points}. "
+    "{above_name} was just {gap} ahead all month. Extremely fixable.",
+    "Monthly last: {name} ({month}, {points}). "
+    "{champ} took the month convincingly. Your job: take it back.",
+    "{name}, {month} ends with you holding the spoon. {points}. "
+    "{champ} gets to gloat. You get to plot. Revenge is a dish best served next month.",
+    "End-of-month result, {name}: wooden spoon, {points}. "
+    "{gap} behind {above_name}. The numbers are unkind but fixable.",
+    "{name}, last of {month}. {points}. Not a permanent state. "
+    "A temporary fact. The next month will have a different one.",
+    "Wooden spoon for {month}: {name} ({points}). "
+    "{champ} lifts the trophy. You set the floor. Next month you set a higher one.",
+    "{name} — {month} wooden spoon, {points}. "
+    "The gap to {above_name} is {gap}. Not a gulf. A step.",
+    "{name}, last place {month}. {champ_pts} vs your {points}. "
+    "Wide gap. Narrow determination required. See you next month.",
+)
+
+# Yearly champion / loser DM pools.
+# Format keys: {name} {points} {year} {runner_up} {runner_up_pts}
+#              {loser} {loser_pts} {gap}  (champion)
+#              {name} {points} {year} {champ} {champ_pts}
+#              {above_name} {above_pts} {gap}  (loser)
+_YEAR_CHAMPION_TEMPLATES = (
+    "{name}. {year}. CHAMPION OF THE YEAR. {points}. "
+    "That's 365 days of winning. Frame this message.",
+    "Year {year} is over. The winner of the whole year is {name}. "
+    "{points}. You beat everyone for an entire calendar year. Breathtaking.",
+    "ANNUAL CHAMPION — {year}: {name}, {points}. "
+    "{runner_up} ran them all year. They came up {gap} short. The year belongs to {name}.",
+    "{name}, you are the {year} CHAMPION. Not of a day, not of a week — the whole year. "
+    "{points}. Defend the title.",
+    "Twelve months. {year}. One winner. {name}. {points}. The others: distinguished losers.",
+    "{year}'s leaderboard closes. The top: {name} ({points}). "
+    "The year: theirs. The gap over {runner_up}: {gap}.",
+    "YEAR-END REPORT, {year}: {name} is the annual champion with {points}. "
+    "{runner_up} did {runner_up_pts}. One name will be remembered. Guess which.",
+    "{name}, you took {year}. All of it. {points}. "
+    "Annual champion. This is an achievement that will follow you.",
+    "End of year. End of the board. {name} is on top with {points}. "
+    "Every other player played all year and you won it.",
+    "Annual champion: {name}. Year: {year}. Points: {points}. "
+    "Gap over runner-up {runner_up}: {gap}. The year was a very long argument and you won it.",
+    "{name}, champion of {year} with {points}. {loser} did {loser_pts}. "
+    "You both played all year. You did it slightly better. 365 days of slightly better.",
+    "The {year} leaderboard is closed, stamped, and filed under: "
+    "{name}, {points}, champion. {runner_up} is the honourable mention.",
+    "365 days. Countless puzzles. One champion. {name}. {year}. {points}. The year was yours.",
+    "{name} — the {year} annual leaderboard ends with you in first. "
+    "{points}. {runner_up} would like you to know they tried very hard.",
+    "Year-end champion: {name}. Points: {points}. Year: {year}. "
+    "{runner_up} ran all year for silver. You ran all year for gold. Welcome to gold.",
+    "{name}, you won {year}. The whole year. {points}. "
+    "{loser} provided structural support from the bottom. You stood on top.",
+    "Final standings — {year}: 1. {name} ({points}). 2. {runner_up} ({runner_up_pts}). "
+    "Last. {loser} ({loser_pts}). You are the 1. The 1 of the entire year.",
+    "{year} CHAMPION: {name}. {points}. "
+    "52 weeks of puzzles and you topped them all. That requires either brilliance "
+    "or an unhealthy lifestyle.",
+    "{name}, end of {year}. Champion. {points}. "
+    "The leaderboard will be wiped at midnight. The legacy: permanent.",
+    "We went around the sun once. At the end: {name} is champion, {runner_up} is second, "
+    "and {loser} is doing some reflecting. {points}. You're the champion one.",
+    "Year {year} complete. {name}: {points}, champion. "
+    "{runner_up}: {runner_up_pts}, runner-up. Gap between first and second: {gap}. The year: yours.",
+    "{name}, you're the annual champion of {year} and it required exactly one year of effort. "
+    "{points}. Worth every puzzle.",
+    "Breaking: {name} wins {year} with {points}. "
+    "{runner_up} finishes second for the whole year in a row. Champion: confirmed.",
+    "{year} is done. {name} is the winner. Not just of a day, not just of a week. "
+    "Of the year. {points}. That's a big deal.",
+    "Annual wrap for {year}: {name} leads from first to last day and finishes with {points}. "
+    "{gap} over {runner_up}. A dominant year.",
+    "{name} — year-end champion, {year}, {points}. "
+    "The gap over {runner_up} is {gap}. Defending your title next year starts January 1st.",
+    "Year {year} final: {name}, {points}, champion. "
+    "{loser} ({loser_pts}) bookends the board from the bottom. You own the top.",
+    "{name}: champion of {year}. This is the highest leaderboard honour available. "
+    "{points}. You've held it. Now defend it.",
+    "The {year} annual champion is {name} ({points}). {runner_up} chased all year ({runner_up_pts}). "
+    "The gap of {gap} was your margin.",
+    "Year {year}: done. Winner: {name}. Score: {points}. "
+    "Runner-up: {runner_up} ({runner_up_pts}). Last: {loser} ({loser_pts}). "
+    "One year of data. One champion. You.",
+)
+
+_YEAR_LOSER_TEMPLATES = (
+    "{name}, you played puzzles all year in {year} and finished last. "
+    "{points}. That is dedication. Misdirected dedication, but dedication.",
+    "Annual wooden spoon, {year}: {name}, {points}. "
+    "{champ} won the year. You helped everyone else feel better about themselves.",
+    "{name} — last of {year} with {points}. {champ} got {champ_pts}. "
+    "The gap between those numbers is 365 days of trying.",
+    "Year-end wooden spoon: {name}, {year}, {points}. "
+    "{above_name} is {gap} ahead of you in the annual standings. New year, new gap.",
+    "{name}, the {year} annual leaderboard closes with you at the bottom. "
+    "{points}. This is not the last word. January is.",
+    "Full-year wooden spoon: {name} ({year}, {points}). "
+    "{champ} gets the annual trophy. You get to start fresh in January. That's not nothing.",
+    "{year}'s last-place certificate goes to {name}. {points}. "
+    "You showed up every day. The scoreboard just disagreed with your technique.",
+    "{name}, 12 months of puzzles, {points} accumulated, dead last for {year}. "
+    "{champ} is the annual champion. You are the annual floor.",
+    "End-of-year summary, {name}: last place, {year}, {points}. "
+    "{above_name} is {gap} ahead. That's the number to close next year.",
+    "Annual leaderboard, {year}: {champ} at the top, {name} at the bottom. "
+    "{points}. 365 days of data points to this conclusion.",
+    "{name} — wooden spoon for the entire year of {year}. "
+    "{points}. {champ} lifts the annual trophy. You set the annual floor.",
+    "{year} done. {champ} champion. {name} last with {points}. "
+    "The gap to {above_name} is {gap}. You have 365 new days to close it.",
+    "{name}, you finished {year} in last with {points}. "
+    "{champ} did {champ_pts}. The difference: {gap}. One whole year available to fix it.",
+    "Annual wooden spoon confirmed: {name}, {year}, {points}. "
+    "{above_name} is just {gap} ahead in the annual standings. That's nothing. Use it.",
+    "{name} completes {year} in last place. {points}. "
+    "{champ} is the champion. You are the measurement tool at the other end.",
+    "Year-end report, {name}: wooden spoon, {points}. "
+    "{year} is done. January is the reset button. Hit it.",
+    "{name}, last of {year} with {points}. "
+    "This is a data point, not a verdict. Next year's data points start tomorrow.",
+    "The {year} annual wooden spoon belongs to {name}. {points}. "
+    "The gap to {above_name}: {gap}. Close it over 365 days. Very manageable.",
+    "{name}, end of year, last of the leaderboard, {points}. "
+    "{champ} won the whole year. You held the floor the whole year. "
+    "Same effort, different addresses.",
+    "Annual last: {name}, {year}, {points}. "
+    "{champ} will be celebrating. You have a full year to change the story.",
+    "{name} — the {year} leaderboard ends with you at the bottom ({points}). "
+    "{above_name} ({above_pts}) is {gap} above you. Annoyingly close.",
+    "Wooden spoon, full year: {name}, {year}, {points}. "
+    "Every puzzle, every week, {gap} short of {above_name}. Very precise unluckiness.",
+    "{name}, you grinded through {year} and landed in last. "
+    "{points}. The good news: everyone loved having you to measure against.",
+    "Year-end, {name}: wooden spoon ({points}), last place ({year}). "
+    "{champ} won gloriously. You competed persistently. One of those sounds better.",
+    "{name}, the year is done and so is the leaderboard. "
+    "You're at the bottom. {points}. {champ} is at the top with {champ_pts}. "
+    "That gap is next year's mission.",
+    "Annual result: {name} last, {points}, {year}. "
+    "{above_name} is {gap} ahead in the annual standings. "
+    "The new year is a blank page. Fill it differently.",
+    "{name} finishes {year} with the wooden spoon and {points}. "
+    "{champ} finishes with the trophy and {champ_pts}. "
+    "Different ends. Same number of puzzles.",
+    "{name}: last of {year}. {points}. "
+    "This is a temporary status. It lasts until approximately 00:01 January 1st.",
+    "Annual wooden spoon: {name}, {year}, {points}. "
+    "The gap between you and {above_name} is {gap}. "
+    "Your entire new year distilled to one number.",
+    "Year-end last place: {name} ({year}, {points}). "
+    "{champ} gets the crown. You get the clean slate that starts tomorrow. Use it.",
 )
 
 
 def _pick_template(templates: tuple, key: int) -> str:
     return templates[key % len(templates)]
+
+
+def _period_dm_format_args(
+    lb: List[PlayerWeeklyStats],
+    by_id: Dict[int, Player],
+) -> Dict[str, str]:
+    """Build the shared format-arg dict for period champion/loser DMs.
+
+    Returns keys usable by all six template pools. Defaults to "—"
+    for fields that can't be computed (e.g. runner-up when only 2
+    players, so runner_up==loser).
+    """
+    champ = lb[0]
+    loser = lb[-1]
+    runner_up = lb[1] if len(lb) >= 3 else loser
+    above_loser = lb[-2] if len(lb) >= 3 else champ
+
+    def name(stats: PlayerWeeklyStats) -> str:
+        p = by_id.get(stats.player_id)
+        return p.display_name if p else "—"
+
+    def pts(stats: PlayerWeeklyStats) -> str:
+        return _fmt_weekly_points(stats.total_points)
+
+    champ_gap = abs(champ.total_points - runner_up.total_points)
+    loser_gap = abs(above_loser.total_points - loser.total_points)
+
+    return {
+        # champion-template fields
+        "runner_up": name(runner_up),
+        "runner_up_pts": pts(runner_up),
+        "loser": name(loser),
+        "loser_pts": pts(loser),
+        # loser-template fields
+        "champ": name(champ),
+        "champ_pts": pts(champ),
+        "above_name": name(above_loser),
+        "above_pts": pts(above_loser),
+        # gap is context-dependent; callers override this key
+        "gap": _fmt_weekly_points(champ_gap),
+        "_champ_gap": _fmt_weekly_points(champ_gap),
+        "_loser_gap": _fmt_weekly_points(loser_gap),
+    }
 
 
 def send_champion_loser_dms(
@@ -479,8 +948,6 @@ def send_champion_loser_dms(
     )
     filtered = [s for s in week_scores if s.game in settings.enabled_games]
     lb = weekly_leaderboard(filtered)
-    # Need at least two players for champion vs. wooden-spoon to
-    # mean anything — a solo player is neither a champion nor a loser.
     if len(lb) < 2:
         return []
 
@@ -491,23 +958,93 @@ def send_champion_loser_dms(
     by_id = {p.id: p for p in players}
     iso_week = target_day.isocalendar()[1]
 
+    shared = _period_dm_format_args(lb, by_id)
     sent: List[str] = []
-    pairs = (
-        (champion, _CHAMPION_TEMPLATES),
-        (loser, _LOSER_TEMPLATES),
-    )
-    for stats, templates in pairs:
+
+    for stats, templates, gap_key in (
+        (champion, _WEEK_CHAMPION_TEMPLATES, "_champ_gap"),
+        (loser, _WEEK_LOSER_TEMPLATES, "_loser_gap"),
+    ):
         player = by_id.get(stats.player_id)
         if player is None or not player.notifications_enabled:
             continue
-        # Key template choice on iso_week so the copy rotates
-        # week-to-week but stays the same for both recipients in
-        # one week (cleaner if they ever compare notes).
-        body = _pick_template(templates, iso_week).format(
-            name=player.display_name,
-            points=_fmt_weekly_points(stats.total_points),
-            iso=iso_week,
-        )
+        fmt = {
+            **shared,
+            "name": player.display_name,
+            "points": _fmt_weekly_points(stats.total_points),
+            "iso": iso_week,
+            "gap": shared[gap_key],
+        }
+        body = _pick_template(templates, iso_week).format(**fmt)
+        if send_dm(settings, player.whatsapp_id, body):
+            sent.append(player.whatsapp_id)
+    return sent
+
+
+def send_period_champion_loser_dms(
+    repo: Repository,
+    settings: Settings,
+    target_day: date,
+    period: str,
+    *,
+    group_id: int,
+) -> List[str]:
+    """DM the champion and wooden-spoon holder for a completed month or
+    year. ``period`` must be ``"month"`` or ``"year"``.
+
+    Fires on the last day of the given period (caller's responsibility
+    to gate). Returns the list of ``whatsapp_id`` values that received
+    a DM.
+    """
+    if not settings.enabled_games:
+        return []
+
+    if period == "month":
+        start, end = month_bounds(target_day)
+        champ_templates: Tuple[str, ...] = _MONTH_CHAMPION_TEMPLATES
+        loser_templates: Tuple[str, ...] = _MONTH_LOSER_TEMPLATES
+        period_label = target_day.strftime("%b %Y")
+        period_key = "month"
+    elif period == "year":
+        start, end = year_bounds(target_day)
+        champ_templates = _YEAR_CHAMPION_TEMPLATES
+        loser_templates = _YEAR_LOSER_TEMPLATES
+        period_label = str(target_day.year)
+        period_key = "year"
+    else:
+        raise ValueError(f"period must be 'month' or 'year', got {period!r}")
+
+    scores = repo.list_scores(date_from=start, date_to=end, group_id=group_id)
+    filtered = [s for s in scores if s.game in settings.enabled_games]
+    lb = weekly_leaderboard(filtered)
+    if len(lb) < 2:
+        return []
+
+    champion: PlayerWeeklyStats = lb[0]
+    loser: PlayerWeeklyStats = lb[-1]
+
+    players = repo.list_players_active_since(start, group_id=group_id)
+    by_id = {p.id: p for p in players}
+
+    shared = _period_dm_format_args(lb, by_id)
+    template_key = target_day.toordinal()
+    sent: List[str] = []
+
+    for stats, templates, gap_key in (
+        (champion, champ_templates, "_champ_gap"),
+        (loser, loser_templates, "_loser_gap"),
+    ):
+        player = by_id.get(stats.player_id)
+        if player is None or not player.notifications_enabled:
+            continue
+        fmt = {
+            **shared,
+            "name": player.display_name,
+            "points": _fmt_weekly_points(stats.total_points),
+            period_key: period_label,
+            "gap": shared[gap_key],
+        }
+        body = _pick_template(templates, template_key).format(**fmt)
         if send_dm(settings, player.whatsapp_id, body):
             sent.append(player.whatsapp_id)
     return sent
@@ -588,6 +1125,14 @@ def maybe_fire_early_recap(
     )
     repo.mark_recap_sent(today, recap_type, group_id=group_id)
     send_champion_loser_dms(repo, settings, today, group_id=group_id)
+    if is_last_day_of_year(today):
+        send_period_champion_loser_dms(
+            repo, settings, today, "year", group_id=group_id
+        )
+    elif is_last_day_of_month(today):
+        send_period_champion_loser_dms(
+            repo, settings, today, "month", group_id=group_id
+        )
     return body
 
 
@@ -620,6 +1165,27 @@ _MORNING_OPENERS_NO_PROGRESS = (
     "Morning {name}. Five tiny puzzles stand between you and bragging rights.",
     "{name}, today's slate: blank. Today's potential: high. Today's actual: tbd.",
     "Up and at 'em, {name}. The puzzles are at 'em already.",
+    "{name}, no puzzles yet. The games exist. The leaderboard awaits. Your move.",
+    "Still a blank slate, {name}. Zero submissions. The day is technically still winnable.",
+    "Morning {name}. The other players are out there solving puzzles. "
+    "You are here, not solving puzzles.",
+    "{name} — every unplayed puzzle is just points you haven't collected yet.",
+    "Morning. {name}. Games: untouched. Potential: squandered unless fixed immediately.",
+    "{name}, gentle nudge: today's puzzles close at midnight. You're ahead of midnight. Barely.",
+    "The LinkedIn games don't play themselves, {name}. "
+    "Although at this rate you might be testing that theory.",
+    "{name}, you haven't logged a single puzzle yet. "
+    "The leaderboard is watching. The leaderboard is judging.",
+    "Morning {name}! Record of today's attempts: none. Today's potential: high. Let's fix that.",
+    "{name}, the clock is ticking. Not loudly. But noticeably. The puzzles are there.",
+    "New day, new chance, no puzzles yet. {name}: this is your window.",
+    "{name} — the leaderboard has a gap where your score should be. Fill it.",
+    "Morning check-in for {name}: games played — 0. Time remaining — plenty.",
+    "It's morning. {name} is unscored. These two facts are connected.",
+    "{name}, every top player you know has either played already or is about to.",
+    "Quiet morning for {name}. Too quiet. No puzzles, no points, no bragging rights. Fixable.",
+    "{name} — puzzle-free zone. Let's change that before someone else gets too far ahead.",
+    "Morning {name}. The scoreboard has your name. It just doesn't have your score yet.",
 )
 
 _MORNING_OPENERS_PARTIAL = (
@@ -640,6 +1206,24 @@ _MORNING_OPENERS_PARTIAL = (
     "Halfway clever, {name}. Finished: {played}.",
     "{name}, you didn't even need the nudge for: {played}. Showoff.",
     "Morning {name} — {played} done, leaderboard already noticing.",
+    "{name} — {played} in the bag. The unplayed ones are getting lonely.",
+    "Nice work so far, {name}. {played} done. Time to close it out.",
+    "Good progress, {name}. Logged: {played}. Still pending: the rest of them.",
+    "{name}, already playing smart. {played} done. Finish what you started.",
+    "Partial credit accepted, {name}. But we both know {played} isn't the full picture.",
+    "Morning {name}. Tracking so far: {played}. The leaderboard asks for more.",
+    "{name} — you've made it this far ({played}). The finish line is close.",
+    "Good start {name}. {played} down. A few more to go.",
+    "{name}, already ahead of where some people are today. {played} done. Keep it up.",
+    "Progress report for {name}: {played} submitted. The rest of the squad needs updating.",
+    "{name} — you remembered the puzzles. You played some ({played}). Now play the rest.",
+    "Partial score update: {name} has logged {played}. The remaining games await.",
+    "{name}, you're building momentum. {played} already done. Ride it.",
+    "Check-in, {name}: {played} done. Not done: the others. Gap: small. Fix it.",
+    "{name} has played {played} already. Good news. Mild news: there's still more.",
+    "Morning {name}. Marked off so far: {played}. Unmarked: the rest. You know what to do.",
+    "{name} — solid start. {played} in. A few more submissions and you're complete.",
+    "Halfway there and then some, {name}. Done: {played}. Just a nudge toward the finish.",
 )
 
 _MORNING_SIGN_OFFS = (
@@ -656,6 +1240,18 @@ _MORNING_SIGN_OFFS = (
     "Shares incoming -> here. The leaderboard will reward your effort. Modestly.",
     "Send shares this way as you go. Don't make me chase them down.",
     "Share each one back here. Quietly. Loudly. Smugly. Up to you.",
+    "DM me the share links as you complete each one — I'll do the rest.",
+    "Finish each puzzle and paste the share text back here.",
+    "Submit each share as you go. I'll keep the tally.",
+    "Just paste the share text in and I'll take care of the rest.",
+    "Done? Share it. Repeat until complete.",
+    "One share at a time. All of them, please.",
+    "Drop each share in here as you go. I'll handle the scoring.",
+    "Share text → me → leaderboard. That's the pipeline.",
+    "Forward the shares here. Easy as that.",
+    "DM your shares as you finish them. Don't sit on them.",
+    "Done with a puzzle? DM me the share. That's the whole process.",
+    "Paste the shares in here and the leaderboard updates automatically.",
 )
 
 
@@ -1409,6 +2005,27 @@ _NEW_GAMES_TEMPLATES: Tuple[str, ...] = (
     "Daybreak. Puzzles up. Honour available in limited quantities. Get in it.",
     "The puzzles are out. Your move. Get in it.",
     "Today's games are LIVE and they are deeply judgmental. Get in it.",
+    "The board resets daily. Today's reset has happened. The puzzles are live. In. It.",
+    "First one in has the early-bird advantage and zero excuses. "
+    "New games are LIVE. Get in it.",
+    "No carry-overs from yesterday. No memory of last week. Today is a blank slate. "
+    "Fill it. Get in it.",
+    "Puzzles: up. Leaderboard: empty. Honour: available. Get in it.",
+    "Rise and shame others — new puzzles are LIVE and someone's already ahead of you. "
+    "Get in it.",
+    "Every day's a fresh start. Today's fresh start includes new LinkedIn puzzles. Get in it.",
+    "The daily drop has happened. The games are live. Your competitors are plotting. Get in it.",
+    "Zero scores on the board. All games available. Maximum opportunity. Get in it.",
+    "Good morning. New puzzles. Get in it. We'll do the motivational speech later.",
+    "The games don't wait. Neither should you. New puzzles live now. Get in it.",
+    "Last night's scores are historical artefacts. Today's puzzles are opportunities. Get in it.",
+    "Puzzles flipped. Points available. Glory within reach. Get in it.",
+    "Today's games are live and asking politely to be solved. Please respond. Get in it.",
+    "New puzzles. Same leaderboard rules. Different chances. Get in it.",
+    "It's a new day. New puzzles. Same leaderboard. Different result if you try harder. Get in it.",
+    "The games rolled over at midnight. Pick them up where they left off: at the start. Get in it.",
+    "Today's puzzles have dropped and they're judging your absence. Get in it.",
+    "Morning. The scoreboard is clear. The puzzles are ready. The potential is yours. Get in it.",
 )
 
 

@@ -243,10 +243,10 @@ class TestHelpCommand:
             now=NOW,
         )
         assert reply is not None
-        for keyword in ("stats", "recap", "yesterday", "week", "all"):
+        for keyword in ("stats", "recap", "week", "ultrahelp"):
             assert keyword in reply
         # Format hint should appear too so users see how to submit.
-        assert "Queens #" in reply
+        assert "LinkedIn" in reply
 
     def test_question_mark_is_alias_for_help(self, repo):
         reply = handle_inbound(
