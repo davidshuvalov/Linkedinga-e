@@ -80,7 +80,7 @@ _HELP_TEXT = (
     "             best day · worst day · by day\n"
     "  Setup:     group · switch · name · notify · undo · track\n"
     "  Misc:      rules · prizes · missing · games\n"
-    "  Fun:       brag · gripe · nag\n"
+    "  Fun:       brag · gripe · nag · 42\n"
     "\n"
     "Paste a LinkedIn share text to submit a score."
 )
@@ -146,6 +146,7 @@ _ULTRA_HELP_TEXT = (
     "    brag / flex — taunt the group that you're crushing it\n"
     "    gripe / whinge — taunt the group that today's a write-off\n"
     "    nag / blast / poke — DM everyone who hasn't played today\n"
+    "    42 — unlock founder lore\n"
     "\n"
     "Submit a score by pasting the LinkedIn share text, e.g.:\n"
     "  Queens #714\n"
