@@ -3218,3 +3218,88 @@ class TestPaceCommand:
             profile_name="Alice", now=NOW, settings=settings,
         )
         assert "No scores" in reply or "hasn't submitted" in reply
+
+
+class TestByDayCommand:
+    """``by day`` shows per-weekday avg/best/worst breakdown with quartile labels."""
+
+    def _setup_multi_dow(self, repo):
+        """Seed Alice with zip scores on several distinct weekdays.
+        2026-04-06 Mon, 2026-04-07 Tue, 2026-04-08 Wed
+        Three scores each day for a meaningful quartile + avg."""
+        from datetime import date
+
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        # Day plan: Mon=fast (20, 25, 22), Tue=medium (45, 50, 48), Wed=slow (80, 90, 85)
+        entries = [
+            (date(2026, 4, 6),  "zip", [20, 25, 22]),
+            (date(2026, 4, 7),  "zip", [45, 50, 48]),
+            (date(2026, 4, 8),  "zip", [80, 90, 85]),
+        ]
+        pno = 420
+        for day, game, raws in entries:
+            for raw in raws:
+                repo.insert_score(
+                    player_id=alice.id, game=game, puzzle_no=pno,
+                    puzzle_date=day, raw_score=raw, share_text="",
+                )
+                pno += 1
+        return alice
+
+    def test_by_day_shows_weekday_rows(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Day breakdown for Alice" in reply
+        assert "Mon" in reply
+        assert "Tue" in reply
+        assert "Wed" in reply
+
+    def test_by_day_shows_avg_best_worst(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        # Monday best should be 0:20 (raw=20)
+        assert "avg" in reply
+        assert "best" in reply
+        assert "worst" in reply
+
+    def test_by_day_top_quarter_marker_on_best_dow(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        # Mon average is ~22s which is in the top quarter of all 9 scores
+        assert "top quarter" in reply
+
+    def test_by_day_bottom_quarter_marker_on_worst_dow(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        # Wed average is ~85s which is in the bottom quarter
+        assert "bottom quarter" in reply
+
+    def test_by_day_specific_game_filter(self, repo):
+        self._setup_multi_dow(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day zip",
+            profile_name="Alice", now=NOW,
+        )
+        assert "Zip" in reply
+        # Shouldn't show other game headers like "Queens"
+        assert "Queens" not in reply
+
+    def test_by_day_no_scores_returns_prompt(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="by day",
+            profile_name="Alice", now=NOW,
+        )
+        assert "No scores" in reply or "Not enough" in reply

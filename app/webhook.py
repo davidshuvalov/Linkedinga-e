@@ -1339,6 +1339,15 @@ def _handle_vs(
 # ---------------------------------------------------------------------------
 
 
+def _parse_single_game_key(word: str) -> Optional[str]:
+    """Return a game key for ``word`` (exact key or display-name match),
+    or ``None`` if not recognised."""
+    if word in GAMES:
+        return word
+    display_to_key = {GAME_DISPLAY[k].lower(): k for k in GAMES}
+    return display_to_key.get(word)
+
+
 def _parse_history_command(lower: str) -> Tuple[bool, Optional[str]]:
     """Parse ``history`` or ``history <game>``.
 
@@ -1352,11 +1361,9 @@ def _parse_history_command(lower: str) -> Tuple[bool, Optional[str]]:
     if not lower.startswith("history "):
         return False, None
     word = lower[len("history "):].strip()
-    display_to_key = {GAME_DISPLAY[k].lower(): k for k in GAMES}
-    if word in GAMES:
-        return True, word
-    if word in display_to_key:
-        return True, display_to_key[word]
+    key = _parse_single_game_key(word)
+    if key is not None:
+        return True, key
     return True, "__bad__"  # recognised prefix, unrecognised game
 
 
@@ -1688,8 +1695,121 @@ def _ordinal_suffix(n: int) -> str:
     return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
 
 
-# ---------------------------------------------------------------------------
-# Mutating commands
+_DOW_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_DOW_FULL = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _handle_dow_stats(
+    repo: Repository,
+    from_: str,
+    profile_name: str,
+    game_filter: Optional[str],  # None = all games; else specific game key
+    *,
+    group_id: int,
+    settings: Optional[Settings] = None,
+) -> str:
+    """Per-day-of-week breakdown for each game.
+
+    For every (game, weekday) pair with ≥ 2 plays, shows:
+      - play count
+      - average score
+      - personal best (day's best)
+      - personal worst (day's worst)
+      - quartile label: the average falls in Q1 (top 25%), Q2, Q3, or
+        Q4 (bottom 25%) relative to ALL of the player's scores for
+        that game.
+
+    Requires ≥ 4 total scores per game to compute a meaningful quartile.
+    """
+    display_name = (profile_name or "").strip() or from_
+    player = repo.get_or_create_player(from_, display_name)
+    all_scores = repo.list_player_scores(player.id, group_id=group_id)
+
+    if not all_scores:
+        return "No scores recorded yet. Submit some shares first!"
+
+    enabled = settings.enabled_games if settings else frozenset(GAMES)
+
+    games_to_show: List[str] = []
+    if game_filter is not None:
+        if game_filter in enabled:
+            games_to_show = [game_filter]
+        else:
+            return f"{GAME_DISPLAY[game_filter]} isn't in the enabled games list."
+    else:
+        games_to_show = [g for g in GAME_DISPLAY_ORDER if g in enabled]
+
+    header = f"Day breakdown for {display_name}:"
+    sections: List[str] = [header]
+    no_data: List[str] = []
+
+    for game in games_to_show:
+        game_scores = [s for s in all_scores if s.game == game]
+        if not game_scores:
+            continue
+
+        total_count = len(game_scores)
+        all_raws = sorted(s.raw_score for s in game_scores)
+
+        # Group by weekday (0=Mon … 6=Sun)
+        by_dow: Dict[int, List[int]] = {}
+        for s in game_scores:
+            dow = s.puzzle_date.weekday()
+            by_dow.setdefault(dow, []).append(s.raw_score)
+
+        # Quartile boundaries on the full distribution (lower = better).
+        # Q1 = top 25% (best), Q4 = bottom 25% (worst).
+        def _quartile_label(avg_raw: float) -> str:
+            if total_count < 4:
+                return ""
+            q1_cut = all_raws[total_count // 4]          # 25th pct = top quarter
+            q3_cut = all_raws[int(total_count * 0.75)]   # 75th pct = bottom quarter
+            if avg_raw <= q1_cut:
+                return " ✦ top quarter"
+            if avg_raw >= q3_cut:
+                return " ✧ bottom quarter"
+            return ""
+
+        rows: List[Tuple[int, List[int]]] = sorted(by_dow.items())
+        # Skip games where no weekday has ≥ 2 plays
+        if not any(len(v) >= 2 for _, v in rows):
+            no_data.append(GAME_DISPLAY[game])
+            continue
+
+        name_col = f"{GAME_DISPLAY[game]} ({total_count} plays):"
+        sections.append(f"\n{name_col}")
+
+        for dow, raws in rows:
+            if len(raws) < 2:
+                # Single-play days: show raw data but no quartile
+                fmt = format_raw_score(game, raws[0])
+                sections.append(
+                    f"  {_DOW_NAMES[dow]}  1 play   {fmt}"
+                )
+                continue
+            avg = sum(raws) / len(raws)
+            best = min(raws)
+            worst = max(raws)
+            ql = _quartile_label(avg)
+            sections.append(
+                f"  {_DOW_NAMES[dow]}  "
+                f"{len(raws)} plays  "
+                f"avg {format_raw_score(game, int(round(avg)))}  "
+                f"best {format_raw_score(game, best)}  "
+                f"worst {format_raw_score(game, worst)}"
+                f"{ql}"
+            )
+
+    if len(sections) == 1:
+        return (
+            f"Not enough data yet to show a day breakdown for {display_name}. "
+            "Keep submitting!"
+        )
+    if no_data:
+        sections.append(f"\nNot enough data (need ≥ 2 plays per day): {', '.join(no_data)}")
+    return "\n".join(sections)
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -2290,6 +2410,21 @@ def handle_inbound(
         return _handle_pace(
             repo, from_, profile_name, now, settings, group_id=group_id
         )
+
+    # ``by day`` / ``by day <game>`` — per-DOW breakdown with quartiles.
+    if lower in ("by day", "byday", "day stats", "daystats", "days"):
+        return _handle_dow_stats(
+            repo, from_, profile_name, None,
+            group_id=group_id, settings=settings,
+        )
+    if lower.startswith("by day "):
+        _byd_word = lower[len("by day "):].strip()
+        _byd_game = _parse_single_game_key(_byd_word)
+        if _byd_game is not None:
+            return _handle_dow_stats(
+                repo, from_, profile_name, _byd_game,
+                group_id=group_id, settings=settings,
+            )
 
     # ``name <new>`` — self-assigned display name.
     new_name = _parse_name_command(lower, body_stripped)
