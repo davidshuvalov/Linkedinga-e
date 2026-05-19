@@ -2186,10 +2186,9 @@ class TestEasterEgg42:
         )
         assert reply is not None and "Founder Lore" in reply
 
-    def test_42_is_not_advertised_in_help_text(self, repo):
-        # The trigger is intentionally hidden — finding it is the point.
+    def test_42_is_advertised_in_help_text(self, repo):
         from app.webhook import _HELP_TEXT
-        assert "42" not in _HELP_TEXT
+        assert "42" in _HELP_TEXT
 
 
 # ---------------------------------------------------------------------------
