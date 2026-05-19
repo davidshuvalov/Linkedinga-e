@@ -185,3 +185,10 @@ alter table recap_log
 
 create index if not exists recap_log_group_date_idx
     on recap_log (group_id, recap_date);
+
+-- ``enabled_games`` is a JSON array of game keys that this group tracks,
+-- e.g. '["queens","zip","tango"]'. NULL means the group inherits the
+-- global default from app settings. Added after the initial schema so
+-- it's applied as an idempotent ALTER — safe to re-run.
+alter table groups
+    add column if not exists enabled_games text;

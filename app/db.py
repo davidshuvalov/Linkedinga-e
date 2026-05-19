@@ -759,7 +759,7 @@ class SupabaseRepository:
         key = name.lower()
         resp = (
             self._client.table("groups")
-            .select("id, name, name_lower, recap_to")
+            .select("id, name, name_lower, recap_to, enabled_games")
             .eq("name_lower", key)
             .limit(1)
             .execute()
@@ -778,7 +778,7 @@ class SupabaseRepository:
             return None
         resp = (
             self._client.table("groups")
-            .select("id, name, name_lower, recap_to")
+            .select("id, name, name_lower, recap_to, enabled_games")
             .eq("name_lower", name.lower())
             .limit(1)
             .execute()
@@ -792,7 +792,7 @@ class SupabaseRepository:
             return None
         resp = (
             self._client.table("groups")
-            .select("id, name, name_lower, recap_to")
+            .select("id, name, name_lower, recap_to, enabled_games")
             .eq("id", group_id)
             .limit(1)
             .execute()
@@ -806,7 +806,7 @@ class SupabaseRepository:
             return []
         resp = (
             self._client.table("groups")
-            .select("id, name, name_lower, recap_to")
+            .select("id, name, name_lower, recap_to, enabled_games")
             .order("id")
             .execute()
         )
