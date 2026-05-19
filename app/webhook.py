@@ -348,6 +348,23 @@ def _parse_leaderboard_games(lower: str) -> Optional[List[str]]:
     return resolved
 
 
+def _parse_game_names_from_words(words: List[str]) -> Optional[List[str]]:
+    """Convert a list of words into game keys. Returns ``None`` if any word
+    isn't a recognised game name; returns ``[]`` for an empty list."""
+    if not words:
+        return []
+    display_to_key = {GAME_DISPLAY[k].lower(): k for k in GAMES}
+    resolved: List[str] = []
+    for w in words:
+        if w in GAMES:
+            resolved.append(w)
+        elif w in display_to_key:
+            resolved.append(display_to_key[w])
+        else:
+            return None
+    return resolved
+
+
 # ---------------------------------------------------------------------------
 # /stats command
 # ---------------------------------------------------------------------------
@@ -780,14 +797,22 @@ def _handle_leaderboard(
         # day's board (None on Monday → no arrows, by design).
         prior = [s for s in filtered if s.puzzle_date < target_day]
         from .jobs import absent_player_names_for_week
-        lines = _weekly_leaderboard_lines(
+        from .scheduler import _game_winners_lines, _prize_lines
+        from .scoring import prize_allocations, weekly_leaderboard as _score_weekly_lb
+        lines = list(_weekly_leaderboard_lines(
             filtered,
             title=f"Week so far — {header_date}",
             prior_scores=prior,
             absent_player_names=absent_player_names_for_week(
                 repo, target_day, filtered, group_id=group_id
             ),
-        )
+        ))
+        winners = _game_winners_lines(filtered)
+        if winners:
+            lines += [""] + list(winners)
+        pl = _prize_lines(prize_allocations(_score_weekly_lb(filtered)))
+        if pl:
+            lines += [""] + list(pl)
         return "\n".join(lines)
 
     rendered = _render_per_game_leaderboard(
@@ -803,11 +828,15 @@ def _handle_global_leaderboard(
     settings: Optional[Settings],
     now: datetime,
     *,
+    games: Optional[List[str]] = None,
     from_: Optional[str] = None,
     profile_name: str = "",
     group_id: int,
 ) -> str:
     """Weekly leaderboard aggregated across every group.
+
+    ``games`` optionally restricts to a subset of game keys — passing
+    ``['zip', 'tango']`` shows only those two games' combined standings.
 
     Deduplicates by ``(player_id, game, puzzle_no)`` so a player who
     switched groups mid-week isn't double-counted. No-peek gate mirrors
@@ -816,7 +845,8 @@ def _handle_global_leaderboard(
     """
     if settings is None:
         return "Global leaderboard isn't available in this context."
-    from .scheduler import _weekly_leaderboard_lines
+    from .scheduler import _game_winners_lines, _prize_lines, _weekly_leaderboard_lines
+    from .scoring import prize_allocations, weekly_leaderboard as _score_weekly_lb
 
     today = la_date(now)
     if from_ is not None and settings.enabled_games:
@@ -828,11 +858,11 @@ def _handle_global_leaderboard(
             return _no_peek_leaderboard(played, settings.enabled_games)
 
     monday, sunday = week_bounds(today)
-    groups = repo.list_groups()
+    grps = repo.list_groups()
 
     all_scores: List[ScoreRow] = []
     seen: set = set()
-    for grp in groups:
+    for grp in grps:
         for s in repo.list_scores(date_from=monday, date_to=sunday, group_id=grp.id):
             key = (s.player_id, s.game, s.puzzle_no)
             if key not in seen:
@@ -841,19 +871,38 @@ def _handle_global_leaderboard(
 
     filtered = [
         s for s in all_scores
-        if s.game in settings.enabled_games and s.puzzle_date <= today
+        if s.game in settings.enabled_games
+        and s.puzzle_date <= today
+        and (games is None or s.game in games)
     ]
     if not filtered:
-        return f"No scores yet for week of {monday.strftime('%a %d %b %Y')} across any group."
+        scope = (
+            f"({', '.join(GAME_DISPLAY[g] for g in games)}) " if games else ""
+        )
+        return (
+            f"No {scope}scores yet for week of "
+            f"{monday.strftime('%a %d %b %Y')} across any group."
+        )
 
     header_date = today.strftime("%a %d %b %Y")
+    if games:
+        game_labels = " · ".join(GAME_DISPLAY[g] for g in games)
+        title = f"Global ({game_labels}) — week so far ({header_date})"
+    else:
+        title = f"Global — week so far ({header_date})"
     prior = [s for s in filtered if s.puzzle_date < today]
-    lines = _weekly_leaderboard_lines(
+    lines = list(_weekly_leaderboard_lines(
         filtered,
-        title=f"Global — week so far ({header_date})",
+        title=title,
         prior_scores=prior,
         absent_player_names=[],
-    )
+    ))
+    winners = _game_winners_lines(filtered)
+    if winners:
+        lines += [""] + list(winners)
+    pl = _prize_lines(prize_allocations(_score_weekly_lb(filtered)))
+    if pl:
+        lines += [""] + list(pl)
     return "\n".join(lines)
 
 
@@ -1755,7 +1804,22 @@ def handle_inbound(
             for g in multi_games
         ]
         return "\n\n".join(parts)
-    # ``global`` — leaderboard across all groups.
+    # ``global`` / ``global leaderboard`` — leaderboard across all groups.
+    # Optional game filter: ``global leaderboard zip tango`` etc.
+    _GLOBAL_PREFIXES = (
+        "global leaderboard ", "global ", "all groups leaderboard ", "all groups ",
+    )
+    for _gpfx in _GLOBAL_PREFIXES:
+        if lower.startswith(_gpfx):
+            _grest = lower[len(_gpfx):].strip()
+            _ggames = _parse_game_names_from_words(_grest.split()) if _grest else []
+            if _ggames is not None:
+                return _handle_global_leaderboard(
+                    repo, settings, now,
+                    games=_ggames or None,
+                    from_=from_, profile_name=profile_name, group_id=group_id,
+                )
+            break  # unrecognised words → fall through
     if lower in ("global", "global leaderboard", "all groups", "all groups leaderboard"):
         return _handle_global_leaderboard(
             repo, settings, now,
