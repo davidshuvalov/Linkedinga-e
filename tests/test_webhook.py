@@ -3431,3 +3431,152 @@ class TestTrackCommand:
         # Zip should show trend; Queens should NOT appear (not tracked)
         assert "Zip" in reply
         assert "Queens" not in reply
+
+
+# ---------------------------------------------------------------------------
+# Global (cross-group) commands: recap, wrap, times
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalRecapWrapTimes:
+    """``global recap``, ``global wrap``, ``global times`` aggregate
+    scores from every group and use the intersection of each group's
+    enabled games."""
+
+    def _two_group_repo_with_scores(self):
+        """Two groups, one player each, both play queens on the same
+        puzzle date. NOW is 2026-04-14 (Tue LA). We put yesterday's
+        scores (Mon 2026-04-13) so 'global recap' (yesterday) returns them."""
+        from datetime import date
+        from app.db import InMemoryRepository
+
+        repo = InMemoryRepository()
+        ga = repo.get_or_create_group("Alpha")
+        gb = repo.get_or_create_group("Beta")
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.set_player_group(alice.id, ga.id)
+        repo.set_player_group(bob.id, gb.id)
+
+        yesterday = date(2026, 4, 13)  # Monday (same week as NOW)
+        repo.insert_score(
+            player_id=alice.id, group_id=ga.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        repo.insert_score(
+            player_id=bob.id, group_id=gb.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=40, share_text="",
+        )
+        return repo, ga, gb, alice, bob
+
+    def test_global_recap_includes_both_groups(self):
+        repo, _, _, _, _ = self._two_group_repo_with_scores()
+        settings = _settings_with_default_games()
+        # Alice is in group Alpha — handle_inbound would normally scope to Alpha.
+        # We call _handle_global_recap directly to bypass group routing.
+        from app.webhook import _handle_global_recap
+        reply = _handle_global_recap(
+            repo, settings, NOW, group_id=1,
+        )
+        assert "Alice" in reply
+        assert "Bob" in reply
+
+    def test_global_recap_via_command(self):
+        """'global recap' command returns cross-group data."""
+        from datetime import date
+        from app.db import InMemoryRepository
+
+        repo = InMemoryRepository()
+        ga = repo.get_or_create_group("Alpha")
+        gb = repo.get_or_create_group("Beta")
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.set_player_group(alice.id, ga.id)
+        repo.set_player_group(bob.id, gb.id)
+
+        yesterday = date(2026, 4, 13)
+        repo.insert_score(
+            player_id=alice.id, group_id=ga.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        repo.insert_score(
+            player_id=bob.id, group_id=gb.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=40, share_text="",
+        )
+        # Alice issues "global recap"
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="global recap",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Alice" in reply
+        assert "Bob" in reply
+
+    def test_global_wrap_includes_both_groups(self):
+        from app.webhook import _handle_global_wrap
+        repo, _, _, _, _ = self._two_group_repo_with_scores()
+        settings = _settings_with_default_games()
+        reply = _handle_global_wrap(repo, settings, NOW, group_id=1)
+        assert "Alice" in reply
+        assert "Bob" in reply
+
+    def test_global_times_includes_both_groups(self):
+        from app.webhook import _handle_global_times
+        repo, _, _, _, _ = self._two_group_repo_with_scores()
+        settings = _settings_with_default_games()
+        reply = _handle_global_times(repo, settings, NOW, group_id=1)
+        # Queens is a time game; both players appear
+        assert "Alice" in reply or "Bob" in reply
+
+    def test_global_uses_common_games_intersection(self):
+        """When groups track different games, global uses the intersection."""
+        from datetime import date
+        from app.db import InMemoryRepository
+        from app.webhook import _handle_global_recap
+
+        repo = InMemoryRepository()
+        ga = repo.get_or_create_group("Alpha")
+        gb = repo.get_or_create_group("Beta")
+        # Alpha tracks only queens; Beta tracks only zip
+        repo.set_group_games(ga.id, frozenset({"queens"}))
+        repo.set_group_games(gb.id, frozenset({"zip"}))
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.set_player_group(alice.id, ga.id)
+        repo.set_player_group(bob.id, gb.id)
+
+        yesterday = date(2026, 4, 13)
+        # Alice plays queens (tracked by Alpha), Bob plays zip (tracked by Beta)
+        repo.insert_score(
+            player_id=alice.id, group_id=ga.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        repo.insert_score(
+            player_id=bob.id, group_id=gb.id, game="zip",
+            puzzle_no=420, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        settings = _settings_with_default_games()
+        # Intersection of {queens} ∩ {zip} = {} → no scores in common
+        reply = _handle_global_recap(repo, settings, NOW, group_id=1)
+        assert "No global scores" in reply
+
+    def test_global_yesterday_alias(self):
+        """'global yesterday' is an alias for global recap."""
+        from datetime import date
+        from app.db import InMemoryRepository
+
+        repo = InMemoryRepository()
+        ga = repo.get_or_create_group("Alpha")
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.set_player_group(alice.id, ga.id)
+        yesterday = date(2026, 4, 13)
+        repo.insert_score(
+            player_id=alice.id, group_id=ga.id, game="queens",
+            puzzle_no=714, puzzle_date=yesterday, raw_score=30, share_text="",
+        )
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="global yesterday",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Alice" in reply

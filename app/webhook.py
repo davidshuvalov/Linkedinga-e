@@ -823,6 +823,210 @@ def _handle_leaderboard(
     return rendered
 
 
+# ---------------------------------------------------------------------------
+# Global (cross-group) helpers and handlers
+# ---------------------------------------------------------------------------
+
+
+def _collect_global_scores(
+    repo: Repository,
+    *,
+    date_from: "date",
+    date_to: "date",
+    grps: Optional[List] = None,
+) -> List[ScoreRow]:
+    """Return all scores across every group for the given date range.
+
+    Deduplicates by ``(player_id, game, puzzle_no)`` so a player who
+    switched groups mid-period isn't counted twice.
+    """
+    if grps is None:
+        grps = repo.list_groups()
+    all_scores: List[ScoreRow] = []
+    seen: set = set()
+    for grp in grps:
+        for s in repo.list_scores(date_from=date_from, date_to=date_to, group_id=grp.id):
+            key = (s.player_id, s.game, s.puzzle_no)
+            if key not in seen:
+                seen.add(key)
+                all_scores.append(s)
+    return all_scores
+
+
+def _common_games(
+    grps: List,
+    settings: Optional["Settings"],
+) -> frozenset:
+    """Intersection of enabled_games across all groups.
+
+    Groups without an override contribute ``settings.enabled_games``.
+    Falls back to the global settings when there are no groups.
+    """
+    fallback = settings.enabled_games if settings else frozenset(GAMES)
+    if not grps:
+        return fallback
+    return frozenset.intersection(*(
+        (grp.enabled_games if grp.enabled_games is not None else fallback)
+        for grp in grps
+    ))
+
+
+def _handle_global_recap(
+    repo: Repository,
+    settings: Optional["Settings"],
+    now: "datetime",
+    target_day: Optional["date"] = None,
+    *,
+    group_id: int,
+) -> str:
+    """Daily (or weekly-wrap) recap aggregated across every group.
+
+    ``target_day`` defaults to yesterday's LA date. Deduplicates
+    scores so cross-group players aren't double-counted. Uses the
+    intersection of all groups' enabled games.
+    """
+    if settings is None:
+        return "Global recap isn't available in this context."
+    from .puzzles import is_last_day_of_month, is_last_day_of_year, month_bounds, year_bounds
+    from .scheduler import daily_recap, weekly_wrap
+
+    today = la_date(now)
+    if target_day is None:
+        target_day = today - timedelta(days=1)
+
+    monday, sunday = week_bounds(target_day)
+    grps = repo.list_groups()
+    common = _common_games(grps, settings)
+
+    week_scores = [
+        s for s in _collect_global_scores(repo, date_from=monday, date_to=sunday, grps=grps)
+        if s.game in common
+    ]
+    if not week_scores:
+        return (
+            f"No global scores for week of {monday.strftime('%a %d %b %Y')}."
+        )
+
+    month_scores = None
+    if is_last_day_of_month(target_day):
+        m_start, m_end = month_bounds(target_day)
+        month_scores = [
+            s for s in _collect_global_scores(repo, date_from=m_start, date_to=m_end, grps=grps)
+            if s.game in common
+        ]
+
+    year_scores = None
+    if is_last_day_of_year(target_day):
+        y_start, y_end = year_bounds(target_day)
+        year_scores = [
+            s for s in _collect_global_scores(repo, date_from=y_start, date_to=y_end, grps=grps)
+            if s.game in common
+        ]
+
+    if target_day.weekday() == 6:  # Sunday → weekly wrap
+        return weekly_wrap(
+            monday, sunday, week_scores,
+            enabled_games=frozenset(common),
+            month_scores=month_scores,
+            year_scores=year_scores,
+            absent_player_names=[],
+        )
+    return daily_recap(
+        target_day, week_scores,
+        enabled_games=frozenset(common),
+        month_scores=month_scores,
+        year_scores=year_scores,
+        include_missing_today_nag=False,
+        absent_player_names=[],
+    )
+
+
+def _handle_global_wrap(
+    repo: Repository,
+    settings: Optional["Settings"],
+    now: "datetime",
+    *,
+    group_id: int,
+) -> str:
+    """Weekly-wrap format aggregated across every group for the current week."""
+    if settings is None:
+        return "Global wrap isn't available in this context."
+    from .scheduler import weekly_wrap
+
+    today = la_date(now)
+    monday, sunday = week_bounds(today)
+    grps = repo.list_groups()
+    common = _common_games(grps, settings)
+
+    week_scores = [
+        s for s in _collect_global_scores(repo, date_from=monday, date_to=sunday, grps=grps)
+        if s.game in common and s.puzzle_date <= today
+    ]
+    if not week_scores:
+        return f"No global scores yet for week of {monday.strftime('%a %d %b %Y')}."
+
+    return weekly_wrap(
+        monday, sunday, week_scores,
+        enabled_games=frozenset(common),
+        absent_player_names=[],
+    )
+
+
+def _handle_global_times(
+    repo: Repository,
+    settings: Optional["Settings"],
+    now: "datetime",
+    *,
+    group_id: int,
+) -> str:
+    """Per-game time-standings aggregated across all groups for the current week."""
+    if settings is None:
+        return "Global times aren't available in this context."
+    from .scoring import _NON_TIME_GAMES
+    from .scheduler import _format_seconds
+
+    today = la_date(now)
+    monday, sunday = week_bounds(today)
+    grps = repo.list_groups()
+    common = _common_games(grps, settings)
+
+    all_scores = [
+        s for s in _collect_global_scores(repo, date_from=monday, date_to=sunday, grps=grps)
+        if s.game in common and s.puzzle_date <= today
+    ]
+    if not all_scores:
+        return f"No global scores yet for week of {monday.strftime('%a %d %b %Y')}."
+
+    per_game: Dict[str, Dict[int, List[int]]] = {}
+    player_names: Dict[int, str] = {}
+    for s in all_scores:
+        if s.game in _NON_TIME_GAMES:
+            continue
+        bucket = per_game.setdefault(s.game, {})
+        acc = bucket.setdefault(s.player_id, [0, 0])
+        acc[0] += s.raw_score
+        acc[1] += 1
+        player_names[s.player_id] = s.player_name
+
+    if not per_game:
+        return f"No time-based global scores yet for week of {monday.strftime('%a %d %b %Y')}."
+
+    header_date = today.strftime("%a %d %b %Y")
+    lines: List[str] = [f"Global game times — week so far ({header_date}):"]
+    for game in GAME_DISPLAY_ORDER:
+        stats = per_game.get(game)
+        if not stats:
+            continue
+        lines.append("")
+        lines.append(f"{GAME_DISPLAY[game]}:")
+        ranked = sorted(stats.items(), key=lambda kv: (kv[1][0], kv[0]))
+        for i, (pid, (total, subs)) in enumerate(ranked, start=1):
+            lines.append(
+                f"  {i}. {player_names[pid]}: {_format_seconds(total)} (G:{subs})"
+            )
+    return "\n".join(lines)
+
+
 def _handle_global_leaderboard(
     repo: Repository,
     settings: Optional[Settings],
@@ -2428,14 +2632,44 @@ def handle_inbound(
             for g in multi_games
         ]
         return "\n\n".join(parts)
-    # ``global`` / ``global leaderboard`` — leaderboard across all groups.
-    # Optional game filter: ``global leaderboard zip tango`` etc.
-    _GLOBAL_PREFIXES = (
-        "global leaderboard ", "global ", "all groups leaderboard ", "all groups ",
-    )
-    for _gpfx in _GLOBAL_PREFIXES:
+    # ``global`` / ``all groups`` — cross-group commands.
+    # Sub-commands are checked first, then the game-filter leaderboard.
+    _GLOBAL_BARE_CMDS = frozenset({
+        "global", "global leaderboard", "all groups", "all groups leaderboard",
+    })
+    _GLOBAL_RECAP_CMDS = frozenset({
+        "global recap", "global yesterday", "global daily",
+        "all groups recap", "all groups yesterday",
+    })
+    _GLOBAL_WRAP_CMDS = frozenset({
+        "global wrap", "global week", "global weekly",
+        "all groups wrap", "all groups week",
+    })
+    _GLOBAL_TIMES_CMDS = frozenset({
+        "global times", "global time", "global speed",
+        "all groups times", "all groups time",
+    })
+
+    if lower in _GLOBAL_RECAP_CMDS:
+        return _handle_global_recap(repo, settings, now, group_id=group_id)
+    if lower in _GLOBAL_WRAP_CMDS:
+        return _handle_global_wrap(repo, settings, now, group_id=group_id)
+    if lower in _GLOBAL_TIMES_CMDS:
+        return _handle_global_times(repo, settings, now, group_id=group_id)
+
+    # ``global <date>`` — global recap for a specific date.
+    _GLOBAL_DATE_PFXS = ("global ", "all groups ")
+    for _gpfx in _GLOBAL_DATE_PFXS:
         if lower.startswith(_gpfx):
             _grest = lower[len(_gpfx):].strip()
+            # Try as a date first (YYYY-MM-DD or relative "yesterday")
+            _date_target = _resolve_leaderboard_target(_grest, la_date(now))
+            if _date_target is not None:
+                _gday, _gerr = _date_target
+                if _gerr is not None:
+                    return _gerr
+                return _handle_global_recap(repo, settings, now, _gday, group_id=group_id)
+            # Try as game filter for global leaderboard
             _ggames = _parse_game_names_from_words(_grest.split()) if _grest else []
             if _ggames is not None:
                 return _handle_global_leaderboard(
@@ -2443,8 +2677,9 @@ def handle_inbound(
                     games=_ggames or None,
                     from_=from_, profile_name=profile_name, group_id=group_id,
                 )
-            break  # unrecognised words → fall through
-    if lower in ("global", "global leaderboard", "all groups", "all groups leaderboard"):
+            break
+
+    if lower in _GLOBAL_BARE_CMDS:
         return _handle_global_leaderboard(
             repo, settings, now,
             from_=from_, profile_name=profile_name, group_id=group_id,
