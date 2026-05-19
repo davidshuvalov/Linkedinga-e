@@ -925,8 +925,8 @@ class TestChampionLoserDMs:
         assert any("Alice" in b for b in bodies)
         # Loser message mentions Charlie.
         assert any("Charlie" in b for b in bodies)
-        # Bob (the middle player) should not receive a DM.
-        assert not any("Bob" in b for b in bodies)
+        # Bob (the middle player) should not receive a DM (2 DMs total).
+        assert len(sent) == 2
 
     @patch("app.jobs.send_dm")
     def test_skips_opted_out_winner(self, mock_dm):
