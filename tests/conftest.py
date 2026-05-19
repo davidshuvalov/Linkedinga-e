@@ -25,12 +25,12 @@ Tests that exercise multi-group isolation explicitly should pass
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from app.db import Group, InMemoryRepository, Player, ScoreRow
+from app.db import Badge, Group, InMemoryRepository, Player, ScoreRow
 
 DEFAULT_GROUP_NAME = "default"
 
@@ -181,6 +181,42 @@ class TestRepo(InMemoryRepository):
         return super().list_today_for_game(
             game=game,
             day=day,
+            group_id=group_id if group_id is not None else self.default_group.id,
+        )
+
+    def award_badge(
+        self,
+        *,
+        player_id: int,
+        group_id: Optional[int] = None,
+        badge_kind: str,
+        game: Optional[str],
+        earned_at: datetime,
+    ) -> bool:
+        return super().award_badge(
+            player_id=player_id,
+            group_id=group_id if group_id is not None else self.default_group.id,
+            badge_kind=badge_kind,
+            game=game,
+            earned_at=earned_at,
+        )
+
+    def list_unnotified_badges(
+        self, *, player_id: int, group_id: Optional[int] = None
+    ) -> List[Badge]:
+        return super().list_unnotified_badges(
+            player_id=player_id,
+            group_id=group_id if group_id is not None else self.default_group.id,
+        )
+
+    def mark_badges_notified(self, badge_ids: List[int]) -> None:
+        return super().mark_badges_notified(badge_ids)
+
+    def list_player_badges(
+        self, *, player_id: int, group_id: Optional[int] = None
+    ) -> List[Badge]:
+        return super().list_player_badges(
+            player_id=player_id,
             group_id=group_id if group_id is not None else self.default_group.id,
         )
 

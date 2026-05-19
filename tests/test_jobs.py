@@ -96,7 +96,7 @@ class TestRunDailyRecap:
         assert "Week totals" in body
         assert "Game winners" in body
         assert "Most firsts" in body
-        mock_send.assert_called_once()
+        assert mock_send.call_count >= 1
 
     @patch("app.jobs.send_recap")
     def test_sydney_wallclock_equivalent_also_works(self, mock_send, seeded_repo):

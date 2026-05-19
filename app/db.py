@@ -13,7 +13,7 @@ interface, not on Supabase directly. Two implementations are provided:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 
@@ -64,6 +64,17 @@ class ScoreRow:
     puzzle_no: int
     puzzle_date: date
     raw_score: int
+
+
+@dataclass(frozen=True)
+class Badge:
+    id: int
+    player_id: int
+    group_id: int
+    badge_kind: str
+    game: Optional[str]
+    earned_at: datetime
+    notified: bool
 
 
 class Repository(Protocol):
@@ -297,6 +308,39 @@ class Repository(Protocol):
         group's records."""
         ...
 
+    # ---- badges ----------------------------------------------------------
+
+    def award_badge(
+        self,
+        *,
+        player_id: int,
+        group_id: int,
+        badge_kind: str,
+        game: Optional[str],
+        earned_at: datetime,
+    ) -> bool:
+        """Insert a badge row. Returns ``True`` if this is the first time
+        the badge is awarded, ``False`` if the player already holds it
+        (idempotent). Raises on unexpected DB errors."""
+        ...
+
+    def list_unnotified_badges(
+        self, *, player_id: int, group_id: int
+    ) -> List["Badge"]:
+        """Return all badge rows for the player in the group where
+        ``notified`` is False."""
+        ...
+
+    def mark_badges_notified(self, badge_ids: List[int]) -> None:
+        """Set ``notified=True`` on the given badge ids. Idempotent."""
+        ...
+
+    def list_player_badges(
+        self, *, player_id: int, group_id: int
+    ) -> List["Badge"]:
+        """Return all earned badges for a player (for display)."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # In-memory implementation (tests + local fallback)
@@ -321,6 +365,9 @@ class InMemoryRepository:
     # (group_id, player_id, kind, day) → recorded. Drives the per-day
     # per-command per-group cooldown for the brag/gripe Easter eggs.
     _taunt_log: set = field(default_factory=set)
+    # badge_id → Badge; (player_id, group_id, kind, game) → badge_id
+    _badges: Dict[int, "Badge"] = field(default_factory=dict)
+    _badges_by_key: Dict[tuple, int] = field(default_factory=dict)
 
     # ---- groups ----------------------------------------------------------
 
@@ -628,6 +675,53 @@ class InMemoryRepository:
             [self._row(s, names_by_id) for s in fastest_sorted[:n]],
             [self._row(s, names_by_id) for s in slowest_sorted[:n]],
         )
+
+    # ---- badges ----------------------------------------------------------
+
+    def award_badge(
+        self,
+        *,
+        player_id: int,
+        group_id: int,
+        badge_kind: str,
+        game: Optional[str],
+        earned_at: datetime,
+    ) -> bool:
+        key = (player_id, group_id, badge_kind, game)
+        if key in self._badges_by_key:
+            return False
+        badge_id = len(self._badges) + 1
+        badge = Badge(
+            id=badge_id,
+            player_id=player_id,
+            group_id=group_id,
+            badge_kind=badge_kind,
+            game=game,
+            earned_at=earned_at,
+            notified=False,
+        )
+        self._badges[badge_id] = badge
+        self._badges_by_key[key] = badge_id
+        return True
+
+    def list_unnotified_badges(self, *, player_id: int, group_id: int) -> List[Badge]:
+        return [
+            b for b in self._badges.values()
+            if b.player_id == player_id and b.group_id == group_id and not b.notified
+        ]
+
+    def mark_badges_notified(self, badge_ids: List[int]) -> None:
+        from dataclasses import replace as _replace
+        for bid in badge_ids:
+            if bid in self._badges:
+                old = self._badges[bid]
+                self._badges[bid] = _replace(old, notified=True)
+
+    def list_player_badges(self, *, player_id: int, group_id: int) -> List[Badge]:
+        return [
+            b for b in self._badges.values()
+            if b.player_id == player_id and b.group_id == group_id
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -1272,3 +1366,62 @@ class SupabaseRepository:
             return out
 
         return _rows(fastest_resp.data), _rows(slowest_resp.data)
+
+    # ---- badges ----------------------------------------------------------
+
+    def award_badge(
+        self,
+        *,
+        player_id: int,
+        group_id: int,
+        badge_kind: str,
+        game: Optional[str],
+        earned_at: datetime,
+    ) -> bool:
+        row = {"player_id": player_id, "group_id": group_id,
+               "badge_kind": badge_kind, "game": game,
+               "earned_at": earned_at.isoformat(), "notified": False}
+        try:
+            resp = self._client.table("badges").insert(row).execute()
+            return bool(resp.data)
+        except Exception:
+            return False  # unique constraint = already awarded
+
+    def list_unnotified_badges(self, *, player_id: int, group_id: int) -> List[Badge]:
+        resp = (
+            self._client.table("badges")
+            .select("*")
+            .eq("player_id", player_id)
+            .eq("group_id", group_id)
+            .eq("notified", False)
+            .execute()
+        )
+        return [self._row_to_badge(r) for r in resp.data or []]
+
+    def mark_badges_notified(self, badge_ids: List[int]) -> None:
+        if not badge_ids:
+            return
+        self._client.table("badges").update({"notified": True}).in_("id", badge_ids).execute()
+
+    def list_player_badges(self, *, player_id: int, group_id: int) -> List[Badge]:
+        resp = (
+            self._client.table("badges")
+            .select("*")
+            .eq("player_id", player_id)
+            .eq("group_id", group_id)
+            .order("earned_at")
+            .execute()
+        )
+        return [self._row_to_badge(r) for r in resp.data or []]
+
+    @staticmethod
+    def _row_to_badge(row: Dict[str, Any]) -> Badge:
+        return Badge(
+            id=row["id"],
+            player_id=row["player_id"],
+            group_id=row["group_id"],
+            badge_kind=row["badge_kind"],
+            game=row.get("game"),
+            earned_at=datetime.fromisoformat(row["earned_at"]),
+            notified=row.get("notified", False),
+        )

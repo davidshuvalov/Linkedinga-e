@@ -116,6 +116,7 @@ def _setup_scheduler() -> None:
     from .jobs import (
         PRE_RESET_STAGES,
         run_daily_recap,
+        run_monthly_ceremony,
         run_morning_nudge,
         run_new_games_announcement,
         run_pre_reset_warning,
@@ -136,6 +137,9 @@ def _setup_scheduler() -> None:
 
     def _new_games():
         run_new_games_announcement(get_repository(), settings)
+
+    def _monthly_ceremony():
+        run_monthly_ceremony(get_repository(), settings)
 
     def _weekly_wrap():
         run_weekly_wrap_early(get_repository(), settings)
@@ -198,14 +202,24 @@ def _setup_scheduler() -> None:
         id="weekly_wrap_early",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _monthly_ceremony,
+        # 1st of each month at 00:02 LA — two minutes after the daily
+        # recap fires so the recap lands first.
+        CronTrigger(day=1, hour=0, minute=2, timezone=recap_tz),
+        id="monthly_ceremony",
+        replace_existing=True,
+    )
 
     scheduler.start()
     logger.info(
         "Scheduler started: daily_recap at 00:00 %s, "
         "weekly_wrap_early at Sun 23:59 %s, "
         "new_games_announcement at 00:01 %s, "
+        "monthly_ceremony at 1st 00:02 %s, "
         "morning_nudge at 08:30 %s, "
         "pre_reset_warning at %s %s",
+        recap_tz,
         recap_tz,
         recap_tz,
         recap_tz,
