@@ -3579,3 +3579,39 @@ class TestGlobalRecapWrapTimes:
             profile_name="Alice", now=NOW, settings=settings,
         )
         assert "Alice" in reply
+
+    def test_global_mini_sudoku_filter(self):
+        """'global mini sudoku' filters the global leaderboard to Mini Sudoku."""
+        from datetime import date
+        from app.db import InMemoryRepository
+
+        repo = InMemoryRepository()
+        ga = repo.get_or_create_group("Alpha")
+        gb = repo.get_or_create_group("Beta")
+        # Both groups track only mini_sudoku so the no-peek gate is satisfied
+        # once Alice submits her Mini Sudoku score.
+        repo.set_group_games(ga.id, frozenset({"mini_sudoku"}))
+        repo.set_group_games(gb.id, frozenset({"mini_sudoku"}))
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+2", "Bob")
+        repo.set_player_group(alice.id, ga.id)
+        repo.set_player_group(bob.id, gb.id)
+
+        today = date(2026, 4, 14)
+        repo.insert_score(
+            player_id=alice.id, group_id=ga.id, game="mini_sudoku",
+            puzzle_no=246, puzzle_date=today, raw_score=76, share_text="",
+        )
+        # Bob plays queens — should NOT appear in the mini sudoku filter
+        repo.insert_score(
+            player_id=bob.id, group_id=gb.id, game="queens",
+            puzzle_no=714, puzzle_date=today, raw_score=30, share_text="",
+        )
+        settings = _settings_with_default_games()
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="global mini sudoku",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Mini Sudoku" in reply
+        assert "Alice" in reply
+        assert "Bob" not in reply
