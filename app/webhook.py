@@ -375,17 +375,31 @@ def _parse_leaderboard_games(lower: str) -> Optional[List[str]]:
 
 def _parse_game_names_from_words(words: List[str]) -> Optional[List[str]]:
     """Convert a list of words into game keys. Returns ``None`` if any word
-    isn't a recognised game name; returns ``[]`` for an empty list."""
+    isn't a recognised game name; returns ``[]`` for an empty list.
+
+    Uses longest-match so multi-word names like "mini sudoku" are matched
+    before falling back to single words.
+    """
     if not words:
         return []
     display_to_key = {GAME_DISPLAY[k].lower(): k for k in GAMES}
     resolved: List[str] = []
-    for w in words:
-        if w in GAMES:
-            resolved.append(w)
-        elif w in display_to_key:
-            resolved.append(display_to_key[w])
-        else:
+    i = 0
+    while i < len(words):
+        matched = False
+        for length in range(len(words) - i, 0, -1):
+            phrase = " ".join(words[i : i + length])
+            if phrase in GAMES:
+                resolved.append(phrase)
+                i += length
+                matched = True
+                break
+            elif phrase in display_to_key:
+                resolved.append(display_to_key[phrase])
+                i += length
+                matched = True
+                break
+        if not matched:
             return None
     return resolved
 
