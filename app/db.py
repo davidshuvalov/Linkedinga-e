@@ -162,11 +162,13 @@ class Repository(Protocol):
         date_from: date,
         date_to: date,
         group_id: int,
+        game: Optional[str] = None,
     ) -> List[ScoreRow]:
         """Return all scores in ``group_id`` whose ``puzzle_date`` falls
         in ``[date_from, date_to]`` inclusive, with each player's
         display name joined in. Used to build daily recaps and weekly
-        wraps.
+        wraps. Pass ``game`` to restrict to a single game (avoids the
+        PostgREST 1000-row default cap on wide date ranges).
         """
         ...
 
@@ -557,6 +559,7 @@ class InMemoryRepository:
         date_from: date,
         date_to: date,
         group_id: int,
+        game: Optional[str] = None,
     ) -> List[ScoreRow]:
         names_by_id = {p.id: p.display_name for p in self._players.values()}
         return [
@@ -564,6 +567,7 @@ class InMemoryRepository:
             for s in self.scores
             if s.get("group_id") == group_id
             and date_from <= s["puzzle_date"] <= date_to
+            and (game is None or s["game"] == game)
         ]
 
     def list_active_whatsapp_ids(
@@ -1100,6 +1104,7 @@ class SupabaseRepository:
         date_from: date,
         date_to: date,
         group_id: int,
+        game: Optional[str] = None,
     ) -> List[ScoreRow]:
         # PostgREST embedded join: ``players(display_name)`` inlines the
         # parent row under a ``players`` key on each returned score row.
@@ -1114,6 +1119,8 @@ class SupabaseRepository:
         )
         if self._has_group_columns:
             query = query.eq("group_id", group_id)
+        if game is not None:
+            query = query.eq("game", game)
         resp = query.execute()
         rows: List[ScoreRow] = []
         for row in resp.data or []:
