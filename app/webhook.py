@@ -2373,9 +2373,10 @@ def _records_top_lines(
         group = [e for e in top_entries if e.raw_score == score_val]
         rank_str = f"{rank}=" if len(group) > 1 else f"{rank}."
         for entry in group:
+            dow_str = _DOW_SHORT[entry.puzzle_date.weekday()]
             date_str = entry.puzzle_date.strftime("%d %b %Y")
             score_str = format_raw_score(game, entry.raw_score)
-            lines.append(f"  {rank_str:<3} {entry.player_name}: {score_str}  ({date_str})")
+            lines.append(f"  {rank_str:<3} {entry.player_name}: {score_str}  ({dow_str} {date_str})")
         rank += len(group)
         i += len(group)
     return lines
@@ -2406,7 +2407,7 @@ def _handle_records(
         return f"No {GAME_DISPLAY[game]} scores yet — submit some to set records!"
 
     lines = [f"{GAME_DISPLAY[game]} — all-time top scores:"]
-    lines.extend(_records_top_lines(game_scores, game, top_n=3))
+    lines.extend(_records_top_lines(game_scores, game, top_n=20))
     return "\n".join(lines)
 
 
@@ -2418,10 +2419,10 @@ def _handle_dow_records(
     *,
     group_id: int,
 ) -> str:
-    """Best raw score for each day of the week (all time) for ``game``.
+    """Top 3 raw scores per weekday (all time) for ``game``.
 
-    Shows one line per weekday (Mon–Sun) with the holder's name, score,
-    and date.  Days with no scores are omitted.
+    Shows a labelled block for each weekday that has at least one score,
+    with ties expanded exactly as in the all-time records command.
     """
     today = la_date(now)
 
@@ -2434,21 +2435,13 @@ def _handle_dow_records(
     if not game_scores:
         return f"No {GAME_DISPLAY[game]} scores yet."
 
-    best_by_dow: Dict[int, ScoreRow] = {}
-    for s in game_scores:
-        dow = s.puzzle_date.weekday()
-        if dow not in best_by_dow or s.raw_score < best_by_dow[dow].raw_score:
-            best_by_dow[dow] = s
-
-    lines = [f"{GAME_DISPLAY[game]} — best score by day (all time):"]
+    lines = [f"{GAME_DISPLAY[game]} — top 3 by day of week (all time):"]
     for dow in range(7):
-        if dow in best_by_dow:
-            best = best_by_dow[dow]
-            score_str = format_raw_score(game, best.raw_score)
-            date_str = best.puzzle_date.strftime("%d %b %Y")
-            lines.append(
-                f"  {_DOW_SHORT[dow]}:  {best.player_name}: {score_str}  ({date_str})"
-            )
+        dow_scores = [s for s in game_scores if s.puzzle_date.weekday() == dow]
+        if not dow_scores:
+            continue
+        lines.append(f"\n{_DOW_SHORT[dow]}:")
+        lines.extend(_records_top_lines(dow_scores, game, top_n=3))
     return "\n".join(lines)
 
 
