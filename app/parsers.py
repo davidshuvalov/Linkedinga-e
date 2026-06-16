@@ -31,6 +31,7 @@ GAMES = (
     "zip",
     "patches",
     "mini_sudoku",
+    "wend",
 )
 
 # Single source of truth for how each game name is rendered in user-facing
@@ -44,6 +45,7 @@ GAME_DISPLAY = {
     "zip": "Zip",
     "patches": "Patches",
     "mini_sudoku": "Mini Sudoku",
+    "wend": "Wend",
 }
 
 # Preferred order for rendering per-game sections in recaps and stats.
@@ -58,6 +60,7 @@ GAME_DISPLAY_ORDER = (
     "pinpoint",
     "patches",
     "mini_sudoku",
+    "wend",
 )
 
 
@@ -88,6 +91,7 @@ _GAME_NAME_PATTERNS: Dict[str, str] = {
     "zip": r"\bzip\b",
     "patches": r"\bpatches\b",
     "mini_sudoku": r"\bmini\s+sudoku\b",
+    "wend": r"\bwend\b",
 }
 
 
@@ -247,6 +251,18 @@ def parse_mini_sudoku(text: str) -> Optional[ParsedScore]:
     return _match_time_based("mini_sudoku", text)
 
 
+def parse_wend(text: str) -> Optional[ParsedScore]:
+    """Parse a Wend share.
+
+    Real share-text shape::
+
+        Wend #N
+        M:SS 🧶
+        lnkd.in/wend.
+    """
+    return _match_time_based("wend", text)
+
+
 def parse_pinpoint(text: str) -> Optional[ParsedScore]:
     """Parse a Pinpoint share.
 
@@ -287,6 +303,7 @@ _PARSERS: Dict[str, Callable[[str], Optional[ParsedScore]]] = {
     "zip": parse_zip,
     "patches": parse_patches,
     "mini_sudoku": parse_mini_sudoku,
+    "wend": parse_wend,
 }
 
 

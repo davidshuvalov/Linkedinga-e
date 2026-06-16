@@ -308,6 +308,15 @@ class Repository(Protocol):
         group's records."""
         ...
 
+    def get_top_extremes_for_game_dow(
+        self, *, game: str, weekday: int, n: int = 2, group_id: int
+    ) -> List["ScoreRow"]:
+        """Return the up to ``n`` fastest score rows for ``game``
+        within ``group_id`` on ``weekday`` (0=Mon…6=Sun), all time.
+        Sorted fastest-first. Used to detect group DOW record
+        triggers after an insert."""
+        ...
+
     # ---- badges ----------------------------------------------------------
 
     def award_badge(
@@ -675,6 +684,21 @@ class InMemoryRepository:
             [self._row(s, names_by_id) for s in fastest_sorted[:n]],
             [self._row(s, names_by_id) for s in slowest_sorted[:n]],
         )
+
+    def get_top_extremes_for_game_dow(
+        self, *, game: str, weekday: int, n: int = 2, group_id: int
+    ) -> List[ScoreRow]:
+        names_by_id = {p.id: p.display_name for p in self._players.values()}
+        rows = [
+            s for s in self.scores
+            if s["game"] == game
+            and s.get("group_id") == group_id
+            and s["puzzle_date"].weekday() == weekday
+        ]
+        if not rows:
+            return []
+        sorted_rows = sorted(rows, key=lambda s: (s["raw_score"], s["player_id"]))
+        return [self._row(s, names_by_id) for s in sorted_rows[:n]]
 
     # ---- badges ----------------------------------------------------------
 
@@ -1366,6 +1390,41 @@ class SupabaseRepository:
             return out
 
         return _rows(fastest_resp.data), _rows(slowest_resp.data)
+
+    def get_top_extremes_for_game_dow(
+        self, *, game: str, weekday: int, n: int = 2, group_id: int
+    ) -> List[ScoreRow]:
+        # PostgREST can't filter by EXTRACT(DOW), so pull all rows for
+        # game + group and filter by weekday in Python. Fine for small groups.
+        query = (
+            self._client.table("scores")
+            .select(
+                "player_id, game, puzzle_no, puzzle_date, raw_score, "
+                "players(display_name)"
+            )
+            .eq("game", game)
+        )
+        if self._has_group_columns:
+            query = query.eq("group_id", group_id)
+        resp = query.execute()
+        rows: List[ScoreRow] = []
+        for row in resp.data or []:
+            d = date.fromisoformat(row["puzzle_date"])
+            if d.weekday() != weekday:
+                continue
+            player = row.get("players") or {}
+            rows.append(
+                ScoreRow(
+                    player_id=row["player_id"],
+                    player_name=player.get("display_name", ""),
+                    game=row["game"],
+                    puzzle_no=row["puzzle_no"],
+                    puzzle_date=d,
+                    raw_score=row["raw_score"],
+                )
+            )
+        rows.sort(key=lambda r: (r.raw_score, r.player_id))
+        return rows[:n]
 
     # ---- badges ----------------------------------------------------------
 

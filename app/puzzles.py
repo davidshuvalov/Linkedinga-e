@@ -39,6 +39,9 @@ PUZZLE_EPOCH: Dict[str, Tuple[date, int]] = {
     "zip":         (date(2026, 4, 22), 401),
     "patches":     (date(2026, 4, 22), 36),
     "mini_sudoku": (date(2026, 4, 22), 254),
+    # Wend epoch — placeholder: update both values once the first real share
+    # arrives so the reference date and puzzle_no reflect actual LinkedIn data.
+    "wend":        (date(2026, 4, 22), 1),
 }
 
 

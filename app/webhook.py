@@ -75,6 +75,7 @@ _LEADERBOARD_PREFIX_RE = re.compile(
 _HELP_TEXT = (
     "Commands (send `ultrahelp` for full detail):\n"
     "  Scores:    recap · leaderboard · week · month · year · times\n"
+    "  Records:   records <game> · dow <game>\n"
     "  Global:    global · global recap · global week · global times\n"
     "  You:       stats · pb · streak · vs · history · trends · pace\n"
     "             best day · worst day · by day\n"
@@ -104,6 +105,8 @@ _ULTRA_HELP_TEXT = (
     "    times — per-game fastest totals this week\n"
     "    month / mtd (+ optional game, e.g. \"month queens\") — MTD summary\n"
     "    year / ytd (+ optional game, e.g. \"year queens\") — YTD summary\n"
+    "    records <game> — all-time top 3 raw scores for one game (e.g. \"records queens\")\n"
+    "    dow <game> — best score per day of week this year (e.g. \"dow queens\")\n"
     "\n"
     "  Global (across all groups, common games only):\n"
     "    global — combined leaderboard this week\n"
@@ -2320,6 +2323,138 @@ def _handle_dow_stats(
 
 
 # ---------------------------------------------------------------------------
+# records / dow — per-game best raw-score commands
+# ---------------------------------------------------------------------------
+
+
+_DOW_SHORT = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+# Prompt shown when the user runs ``records`` or ``dow`` without a game name.
+def _records_game_list(enabled: "FrozenSet[str]") -> str:
+    names = "  " + "\n  ".join(
+        GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in enabled
+    )
+    return (
+        "Specify a game:\n"
+        "  records <game>     — all-time top scores (e.g. records queens)\n"
+        "  dow <game>         — best score per day of week this year\n"
+        "\nAvailable games:\n"
+        f"{names}"
+    )
+
+
+def _records_top_lines(
+    game_scores: List[ScoreRow], game: str, top_n: int = 3
+) -> List[str]:
+    """Top N score positions (with ties expanded).
+
+    Uses each player's personal best so the same player can't appear twice.
+    Includes all players tied at any of the top N score values.
+    """
+    best_by_player: Dict[int, ScoreRow] = {}
+    for s in game_scores:
+        if s.player_id not in best_by_player or s.raw_score < best_by_player[s.player_id].raw_score:
+            best_by_player[s.player_id] = s
+
+    if not best_by_player:
+        return ["  (no scores yet)"]
+
+    entries = sorted(best_by_player.values(), key=lambda s: (s.raw_score, s.player_name))
+
+    unique_sorted = sorted(set(s.raw_score for s in entries))
+    cutoff = unique_sorted[min(top_n, len(unique_sorted)) - 1]
+    top_entries = [s for s in entries if s.raw_score <= cutoff]
+
+    lines: List[str] = []
+    rank = 1
+    i = 0
+    while i < len(top_entries):
+        score_val = top_entries[i].raw_score
+        group = [e for e in top_entries if e.raw_score == score_val]
+        rank_str = f"{rank}=" if len(group) > 1 else f"{rank}."
+        for entry in group:
+            date_str = entry.puzzle_date.strftime("%d %b %Y")
+            score_str = format_raw_score(game, entry.raw_score)
+            lines.append(f"  {rank_str:<3} {entry.player_name}: {score_str}  ({date_str})")
+        rank += len(group)
+        i += len(group)
+    return lines
+
+
+def _handle_records(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    game: str,
+    *,
+    group_id: int,
+) -> str:
+    """All-time top 3 raw scores for ``game`` (ties expanded).
+
+    Each position lists every player whose personal best equals that
+    score value, so a three-way tie at rank 1 shows all three and the
+    next unique score correctly labels as rank 4.
+    """
+    today = la_date(now)
+    game_scores = [
+        s for s in repo.list_scores(
+            date_from=date(2000, 1, 1), date_to=today, group_id=group_id
+        )
+        if s.game == game
+    ]
+    if not game_scores:
+        return f"No {GAME_DISPLAY[game]} scores yet — submit some to set records!"
+
+    lines = [f"{GAME_DISPLAY[game]} — all-time top scores:"]
+    lines.extend(_records_top_lines(game_scores, game, top_n=3))
+    return "\n".join(lines)
+
+
+def _handle_dow_records(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    game: str,
+    *,
+    group_id: int,
+) -> str:
+    """Best raw score for each day of the week in the current year for ``game``.
+
+    Shows one line per weekday (Mon–Sun) with the holder's name, score,
+    and date.  Days with no scores in the current year are omitted.
+    """
+    today = la_date(now)
+    year = today.year
+    year_start = date(year, 1, 1)
+
+    game_scores = [
+        s for s in repo.list_scores(
+            date_from=year_start, date_to=today, group_id=group_id
+        )
+        if s.game == game
+    ]
+    if not game_scores:
+        return f"No {GAME_DISPLAY[game]} scores in {year} yet."
+
+    best_by_dow: Dict[int, ScoreRow] = {}
+    for s in game_scores:
+        dow = s.puzzle_date.weekday()
+        if dow not in best_by_dow or s.raw_score < best_by_dow[dow].raw_score:
+            best_by_dow[dow] = s
+
+    lines = [f"{GAME_DISPLAY[game]} — best score by day ({year}):"]
+    for dow in range(7):
+        if dow in best_by_dow:
+            best = best_by_dow[dow]
+            score_str = format_raw_score(game, best.raw_score)
+            date_str = best.puzzle_date.strftime("%d %b")
+            lines.append(
+                f"  {_DOW_SHORT[dow]}:  {best.player_name}: {score_str}  ({date_str})"
+            )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 
 
 def _handle_undo(
@@ -2877,6 +3012,33 @@ def handle_inbound(
                     repo, settings, now, period=period_key,
                     game=game_key, group_id=group_id,
                 )
+    # ``records <game>`` — all-time top 3 raw scores for one game.
+    # ``dow <game>``     — best score per day of week this year for one game.
+    # Bare ``records`` / ``dow`` without a game name shows the game list.
+    _enabled_now = settings.enabled_games if settings else frozenset(GAMES)
+    if lower in ("records", "record", "all time", "alltime"):
+        return _records_game_list(_enabled_now)
+    if lower in ("dow", "day records", "week best", "weekly best", "best week"):
+        return _records_game_list(_enabled_now)
+    for game_key in GAMES:
+        display_lower = GAME_DISPLAY[game_key].lower()
+        if lower in (
+            f"records {game_key}",
+            f"records {display_lower}",
+            f"record {game_key}",
+            f"record {display_lower}",
+        ):
+            return _handle_records(repo, settings, now, game_key, group_id=group_id)
+        if lower in (
+            f"dow {game_key}",
+            f"dow {display_lower}",
+            f"day records {game_key}",
+            f"day records {display_lower}",
+            f"week best {game_key}",
+            f"week best {display_lower}",
+        ):
+            return _handle_dow_records(repo, settings, now, game_key, group_id=group_id)
+
     if lower in ("missing", "who", "ghosts"):
         return _handle_missing(repo, settings, now, group_id=group_id)
     if lower in ("games", "enabled"):

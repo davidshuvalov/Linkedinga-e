@@ -86,7 +86,8 @@ alter table scores add constraint scores_game_check
         'crossclimb',
         'zip',
         'patches',
-        'mini_sudoku'
+        'mini_sudoku',
+        'wend'
     ));
 
 create index if not exists scores_puzzle_date_idx on scores (puzzle_date);
