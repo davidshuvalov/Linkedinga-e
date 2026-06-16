@@ -2957,6 +2957,24 @@ def handle_inbound(
     if lower in _GLOBAL_TIMES_CMDS:
         return _handle_global_times(repo, settings, now, group_id=group_id)
 
+    # ``global records/dow <game>`` — must be checked before the generic
+    # ``global <anything>`` prefix handler below, which would otherwise
+    # swallow these commands and route them to the global leaderboard.
+    for game_key in GAMES:
+        display_lower = GAME_DISPLAY[game_key].lower()
+        if lower in (
+            f"global records {game_key}",
+            f"global records {display_lower}",
+            f"global record {game_key}",
+            f"global record {display_lower}",
+        ):
+            return _handle_records(repo, settings, now, game_key, group_id=group_id)
+        if lower in (
+            f"global dow {game_key}",
+            f"global dow {display_lower}",
+        ):
+            return _handle_dow_records(repo, settings, now, game_key, group_id=group_id)
+
     # ``global <date>`` — global recap for a specific date.
     _GLOBAL_DATE_PFXS = ("global ", "all groups ")
     for _gpfx in _GLOBAL_DATE_PFXS:
@@ -3027,10 +3045,6 @@ def handle_inbound(
             f"records {display_lower}",
             f"record {game_key}",
             f"record {display_lower}",
-            f"global records {game_key}",
-            f"global records {display_lower}",
-            f"global record {game_key}",
-            f"global record {display_lower}",
         ):
             return _handle_records(repo, settings, now, game_key, group_id=group_id)
         if lower in (
@@ -3040,8 +3054,6 @@ def handle_inbound(
             f"day records {display_lower}",
             f"week best {game_key}",
             f"week best {display_lower}",
-            f"global dow {game_key}",
-            f"global dow {display_lower}",
         ):
             return _handle_dow_records(repo, settings, now, game_key, group_id=group_id)
 
