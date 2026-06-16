@@ -897,18 +897,20 @@ def _collect_global_scores(
     date_from: "date",
     date_to: "date",
     grps: Optional[List] = None,
+    game: Optional[str] = None,
 ) -> List[ScoreRow]:
     """Return all scores across every group for the given date range.
 
     Deduplicates by ``(player_id, game, puzzle_no)`` so a player who
-    switched groups mid-period isn't counted twice.
+    switched groups mid-period isn't counted twice. Pass ``game`` to
+    restrict to a single game (avoids the PostgREST 1000-row cap).
     """
     if grps is None:
         grps = repo.list_groups()
     all_scores: List[ScoreRow] = []
     seen: set = set()
     for grp in grps:
-        for s in repo.list_scores(date_from=date_from, date_to=date_to, group_id=grp.id):
+        for s in repo.list_scores(date_from=date_from, date_to=date_to, group_id=grp.id, game=game):
             key = (s.player_id, s.game, s.puzzle_no)
             if key not in seen:
                 seen.add(key)
@@ -2397,12 +2399,9 @@ def _handle_records(
     next unique score correctly labels as rank 4.
     """
     today = la_date(now)
-    game_scores = [
-        s for s in repo.list_scores(
-            date_from=date(2000, 1, 1), date_to=today, group_id=group_id
-        )
-        if s.game == game
-    ]
+    game_scores = repo.list_scores(
+        date_from=date(2000, 1, 1), date_to=today, group_id=group_id, game=game
+    )
     if not game_scores:
         return f"No {GAME_DISPLAY[game]} scores yet — submit some to set records!"
 
@@ -2425,13 +2424,9 @@ def _handle_dow_records(
     with ties expanded exactly as in the all-time records command.
     """
     today = la_date(now)
-
-    game_scores = [
-        s for s in repo.list_scores(
-            date_from=date(2000, 1, 1), date_to=today, group_id=group_id
-        )
-        if s.game == game
-    ]
+    game_scores = repo.list_scores(
+        date_from=date(2000, 1, 1), date_to=today, group_id=group_id, game=game
+    )
     if not game_scores:
         return f"No {GAME_DISPLAY[game]} scores yet."
 
@@ -2453,10 +2448,7 @@ def _handle_global_records(
 ) -> str:
     """All-time top 20 raw scores for ``game`` across every group."""
     today = la_date(now)
-    game_scores = [
-        s for s in _collect_global_scores(repo, date_from=date(2000, 1, 1), date_to=today)
-        if s.game == game
-    ]
+    game_scores = _collect_global_scores(repo, date_from=date(2000, 1, 1), date_to=today, game=game)
     if not game_scores:
         return f"No {GAME_DISPLAY[game]} scores yet — submit some to set records!"
     lines = [f"{GAME_DISPLAY[game]} — all-time top scores (all groups):"]
@@ -2472,10 +2464,7 @@ def _handle_global_dow_records(
 ) -> str:
     """Top 3 raw scores per weekday (all time) for ``game`` across every group."""
     today = la_date(now)
-    game_scores = [
-        s for s in _collect_global_scores(repo, date_from=date(2000, 1, 1), date_to=today)
-        if s.game == game
-    ]
+    game_scores = _collect_global_scores(repo, date_from=date(2000, 1, 1), date_to=today, game=game)
     if not game_scores:
         return f"No {GAME_DISPLAY[game]} scores yet."
     lines = [f"{GAME_DISPLAY[game]} — top 3 by day of week (all groups, all time):"]
