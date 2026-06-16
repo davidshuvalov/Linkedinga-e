@@ -2418,23 +2418,21 @@ def _handle_dow_records(
     *,
     group_id: int,
 ) -> str:
-    """Best raw score for each day of the week in the current year for ``game``.
+    """Best raw score for each day of the week (all time) for ``game``.
 
     Shows one line per weekday (Mon–Sun) with the holder's name, score,
-    and date.  Days with no scores in the current year are omitted.
+    and date.  Days with no scores are omitted.
     """
     today = la_date(now)
-    year = today.year
-    year_start = date(year, 1, 1)
 
     game_scores = [
         s for s in repo.list_scores(
-            date_from=year_start, date_to=today, group_id=group_id
+            date_from=date(2000, 1, 1), date_to=today, group_id=group_id
         )
         if s.game == game
     ]
     if not game_scores:
-        return f"No {GAME_DISPLAY[game]} scores in {year} yet."
+        return f"No {GAME_DISPLAY[game]} scores yet."
 
     best_by_dow: Dict[int, ScoreRow] = {}
     for s in game_scores:
@@ -2442,12 +2440,12 @@ def _handle_dow_records(
         if dow not in best_by_dow or s.raw_score < best_by_dow[dow].raw_score:
             best_by_dow[dow] = s
 
-    lines = [f"{GAME_DISPLAY[game]} — best score by day ({year}):"]
+    lines = [f"{GAME_DISPLAY[game]} — best score by day (all time):"]
     for dow in range(7):
         if dow in best_by_dow:
             best = best_by_dow[dow]
             score_str = format_raw_score(game, best.raw_score)
-            date_str = best.puzzle_date.strftime("%d %b")
+            date_str = best.puzzle_date.strftime("%d %b %Y")
             lines.append(
                 f"  {_DOW_SHORT[dow]}:  {best.player_name}: {score_str}  ({date_str})"
             )
