@@ -2445,6 +2445,49 @@ def _handle_dow_records(
     return "\n".join(lines)
 
 
+def _handle_global_records(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    game: str,
+) -> str:
+    """All-time top 20 raw scores for ``game`` across every group."""
+    today = la_date(now)
+    game_scores = [
+        s for s in _collect_global_scores(repo, date_from=date(2000, 1, 1), date_to=today)
+        if s.game == game
+    ]
+    if not game_scores:
+        return f"No {GAME_DISPLAY[game]} scores yet — submit some to set records!"
+    lines = [f"{GAME_DISPLAY[game]} — all-time top scores (all groups):"]
+    lines.extend(_records_top_lines(game_scores, game, top_n=20))
+    return "\n".join(lines)
+
+
+def _handle_global_dow_records(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    game: str,
+) -> str:
+    """Top 3 raw scores per weekday (all time) for ``game`` across every group."""
+    today = la_date(now)
+    game_scores = [
+        s for s in _collect_global_scores(repo, date_from=date(2000, 1, 1), date_to=today)
+        if s.game == game
+    ]
+    if not game_scores:
+        return f"No {GAME_DISPLAY[game]} scores yet."
+    lines = [f"{GAME_DISPLAY[game]} — top 3 by day of week (all groups, all time):"]
+    for dow in range(7):
+        dow_scores = [s for s in game_scores if s.puzzle_date.weekday() == dow]
+        if not dow_scores:
+            continue
+        lines.append(f"\n{_DOW_SHORT[dow]}:")
+        lines.extend(_records_top_lines(dow_scores, game, top_n=3))
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -2959,12 +3002,12 @@ def handle_inbound(
             f"global record {game_key}",
             f"global record {display_lower}",
         ):
-            return _handle_records(repo, settings, now, game_key, group_id=group_id)
+            return _handle_global_records(repo, settings, now, game_key)
         if lower in (
             f"global dow {game_key}",
             f"global dow {display_lower}",
         ):
-            return _handle_dow_records(repo, settings, now, game_key, group_id=group_id)
+            return _handle_global_dow_records(repo, settings, now, game_key)
 
     # ``global <date>`` — global recap for a specific date.
     _GLOBAL_DATE_PFXS = ("global ", "all groups ")
@@ -3036,10 +3079,6 @@ def handle_inbound(
             f"records {display_lower}",
             f"record {game_key}",
             f"record {display_lower}",
-            f"global records {game_key}",
-            f"global records {display_lower}",
-            f"global record {game_key}",
-            f"global record {display_lower}",
         ):
             return _handle_records(repo, settings, now, game_key, group_id=group_id)
         if lower in (
@@ -3049,8 +3088,6 @@ def handle_inbound(
             f"day records {display_lower}",
             f"week best {game_key}",
             f"week best {display_lower}",
-            f"global dow {game_key}",
-            f"global dow {display_lower}",
         ):
             return _handle_dow_records(repo, settings, now, game_key, group_id=group_id)
 
