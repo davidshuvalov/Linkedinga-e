@@ -6,7 +6,7 @@ dispatches across all known games and returns the first hit.
 ``raw_score`` convention:
 
 - ``queens``, ``tango``, ``crossclimb``, ``zip``, ``patches``,
-  ``mini_sudoku`` → duration in **seconds** (lower is better).
+  ``mini_sudoku``, ``wend`` → duration in **seconds** (lower is better).
 - ``pinpoint`` → number of guesses used, 1–5 (lower is better).
 
 The regexes are tuned against real share-text samples captured 2026-04.

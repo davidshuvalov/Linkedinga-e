@@ -172,6 +172,7 @@ update groups set recap_to = 'whatsapp:+...' where name_lower = '...';
 | zip          | seconds (lower ↓)   |
 | patches      | seconds (lower ↓)   |
 | mini_sudoku  | seconds (lower ↓)   |
+| wend         | seconds (lower ↓)   |
 | pinpoint     | guess count 1–5 ↓   |
 
 ## Scoring rules
@@ -221,14 +222,14 @@ tuple in `PUZZLE_EPOCH` — no other change required.
 
 ### Game toggle
 
-Not all 7 games need to be tracked. Set the `ENABLED_GAMES` env var to a
+Not all 8 games need to be tracked. Set the `ENABLED_GAMES` env var to a
 comma-separated list. Default:
 
 ```
 ENABLED_GAMES=queens,tango,zip,patches,mini_sudoku
 ```
 
-Pinpoint and Crossclimb are **off by default**. Scores for disabled games
+Pinpoint, Crossclimb, and Wend are **off by default**. Scores for disabled games
 are still parsed and stored (so historical data is preserved if you
 re-enable them later), but they don't appear in recaps, wraps, or the
 leaderboard. The webhook reply adds a note when a disabled game is
