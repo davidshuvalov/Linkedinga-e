@@ -843,8 +843,12 @@ def _detect_rivalry_trigger(
         cursor = cursor - timedelta(weeks=1)
         completed_weeks.append((cursor, cursor + timedelta(days=6)))
 
-    # Build {player_id: points} and {player_id: name} per completed week.
+    # Build {player_id: points}, {player_id: submissions}, and {player_id: name}
+    # per completed week. Submissions are used to gate rivalry detection: a
+    # week only counts as "close" when both players played the same number of
+    # games — otherwise the comparison is unfair (one player simply played more).
     week_maps: List[Dict[int, float]] = []
+    week_subs_maps: List[Dict[int, int]] = []
     name_map: Dict[int, str] = {}  # accumulated across weeks
     for mon, sun in completed_weeks:
         try:
@@ -856,32 +860,47 @@ def _detect_rivalry_trigger(
                 "rivalry: list_scores failed (week %s) — skipping", mon
             )
             week_maps.append({})
+            week_subs_maps.append({})
             continue
         game_keys = list(settings.enabled_games) if settings.enabled_games else []
         if game_keys:
             week_scores = [s for s in week_scores if s.game in game_keys]
         lb = weekly_leaderboard(week_scores)
         wm: Dict[int, float] = {}
+        sm: Dict[int, int] = {}
         for entry in lb:
             pid = entry.player_id
             wm[pid] = entry.total_points
+            sm[pid] = entry.submissions
             if pid not in name_map:
                 name_map[pid] = entry.player_name
         week_maps.append(wm)
+        week_subs_maps.append(sm)
 
-    # Find this player's points in each week.
+    # Find this player's points and submissions in each week.
     player_pts_by_week: List[Optional[float]] = [
         wm.get(player_id) for wm in week_maps
     ]
+    player_subs_by_week: List[Optional[int]] = [
+        sm.get(player_id) for sm in week_subs_maps
+    ]
 
-    # For each rival, count weeks where gap ≤ threshold.
+    # For each rival, count weeks where gap ≤ threshold AND both players
+    # played the same number of games (so the comparison is apples-to-apples).
     rival_stats: Dict[int, Tuple[int, float]] = {}  # rival_id → (close_weeks, total_gap)
     for week_idx, wm in enumerate(week_maps):
         my_pts = player_pts_by_week[week_idx]
         if my_pts is None:
             continue
+        my_subs = player_subs_by_week[week_idx]
+        sm = week_subs_maps[week_idx]
         for rival_id, rival_pts in wm.items():
             if rival_id == player_id:
+                continue
+            # Only compare weeks where both players played the same number of
+            # games — if one player played more, the points aren't comparable.
+            rival_subs = sm.get(rival_id)
+            if rival_subs is None or rival_subs != my_subs:
                 continue
             gap = abs(my_pts - rival_pts)
             if gap > _RIVALRY_THRESHOLD:

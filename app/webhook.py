@@ -75,6 +75,7 @@ _LEADERBOARD_PREFIX_RE = re.compile(
 _HELP_TEXT = (
     "Commands (send `ultrahelp` for full detail):\n"
     "  Scores:    recap · leaderboard · week · month · year · times\n"
+    "  Records:   records · records <game>\n"
     "  Global:    global · global recap · global week · global times\n"
     "  You:       stats · pb · streak · vs · history · trends · pace\n"
     "             best day · worst day · by day\n"
@@ -104,6 +105,8 @@ _ULTRA_HELP_TEXT = (
     "    times — per-game fastest totals this week\n"
     "    month / mtd (+ optional game, e.g. \"month queens\") — MTD summary\n"
     "    year / ytd (+ optional game, e.g. \"year queens\") — YTD summary\n"
+    "    records — all-time top 3 raw scores per game + best by day of week\n"
+    "    records <game> — same for one game (e.g. \"records queens\")\n"
     "\n"
     "  Global (across all groups, common games only):\n"
     "    global — combined leaderboard this week\n"
@@ -2320,6 +2323,139 @@ def _handle_dow_stats(
 
 
 # ---------------------------------------------------------------------------
+# /records command — all-time best raw scores per game with DOW breakdown
+# ---------------------------------------------------------------------------
+
+
+_DOW_SHORT = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _records_top_lines(
+    game_scores: List[ScoreRow], game: str, top_n: int = 3
+) -> List[str]:
+    """Return formatted lines showing the top N score positions (with ties expanded).
+
+    Groups by player and picks each player's personal best, then ranks by
+    that best score.  When multiple players share a rank-N score value every
+    tied player is shown so the caller never silently drops a tied entry.
+    """
+    # Personal best per player (best = lowest raw_score).
+    best_by_player: Dict[int, ScoreRow] = {}
+    for s in game_scores:
+        if s.player_id not in best_by_player or s.raw_score < best_by_player[s.player_id].raw_score:
+            best_by_player[s.player_id] = s
+
+    if not best_by_player:
+        return ["  (no scores yet)"]
+
+    entries = sorted(best_by_player.values(), key=lambda s: (s.raw_score, s.player_name))
+
+    # Threshold: include all entries whose score equals the top_n-th unique score.
+    unique_sorted = sorted(set(s.raw_score for s in entries))
+    cutoff = unique_sorted[min(top_n, len(unique_sorted)) - 1]
+    top_entries = [s for s in entries if s.raw_score <= cutoff]
+
+    lines: List[str] = []
+    rank = 1
+    i = 0
+    while i < len(top_entries):
+        score_val = top_entries[i].raw_score
+        group = [e for e in top_entries if e.raw_score == score_val]
+        rank_str = f"{rank}=" if len(group) > 1 else f"{rank}."
+        for entry in group:
+            date_str = entry.puzzle_date.strftime("%d %b %Y")
+            score_str = format_raw_score(game, entry.raw_score)
+            lines.append(f"  {rank_str:<3} {entry.player_name}: {score_str}  ({date_str})")
+        rank += len(group)
+        i += len(group)
+    return lines
+
+
+def _records_dow_lines(game_scores: List[ScoreRow], game: str, year: int) -> List[str]:
+    """Best raw score for each day of week in ``year``, one line per day."""
+    year_scores = [s for s in game_scores if s.puzzle_date.year == year]
+    if not year_scores:
+        return [f"  (no scores in {year})"]
+
+    best_by_dow: Dict[int, ScoreRow] = {}
+    for s in year_scores:
+        dow = s.puzzle_date.weekday()
+        if dow not in best_by_dow or s.raw_score < best_by_dow[dow].raw_score:
+            best_by_dow[dow] = s
+
+    lines: List[str] = []
+    for dow in range(7):
+        if dow in best_by_dow:
+            best = best_by_dow[dow]
+            score_str = format_raw_score(game, best.raw_score)
+            date_str = best.puzzle_date.strftime("%d %b")
+            lines.append(
+                f"  {_DOW_SHORT[dow]}:  {best.player_name}: {score_str}  ({date_str})"
+            )
+    return lines
+
+
+def _handle_records(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    game_filter: Optional[str] = None,
+    *,
+    group_id: int,
+) -> str:
+    """Show all-time best raw scores per game (top 3+, ties expanded) and the
+    best score for each day of the week in the current year.
+
+    ``game_filter`` restricts output to a single game key.
+    """
+    today = la_date(now)
+    year = today.year
+
+    all_scores = repo.list_scores(
+        date_from=date(2000, 1, 1), date_to=today, group_id=group_id
+    )
+
+    enabled: "FrozenSet[str]"
+    if settings is not None:
+        enabled = settings.enabled_games
+    else:
+        enabled = frozenset(GAMES)
+
+    if game_filter is not None:
+        games_to_show = [game_filter]
+    else:
+        games_to_show = [g for g in GAME_DISPLAY_ORDER if g in enabled]
+
+    # Filter scores to relevant games.
+    relevant = [s for s in all_scores if s.game in games_to_show]
+    if not relevant:
+        scope = f"{GAME_DISPLAY[game_filter]} " if game_filter else ""
+        return f"No {scope}scores yet — submit some to set records!"
+
+    sections: List[str] = []
+    for game in games_to_show:
+        game_scores = [s for s in relevant if s.game == game]
+        if not game_scores:
+            continue
+
+        sections.append(f"{GAME_DISPLAY[game]}:")
+
+        sections.append("  All-time top scores:")
+        sections.extend(_records_top_lines(game_scores, game, top_n=3))
+
+        sections.append(f"  Best by day — {year}:")
+        dow_lines = _records_dow_lines(game_scores, game, year)
+        if dow_lines:
+            sections.extend(dow_lines)
+        else:
+            sections.append(f"  (no scores in {year})")
+
+        sections.append("")
+
+    return "\n".join(sections).rstrip()
+
+
+# ---------------------------------------------------------------------------
 
 
 def _handle_undo(
@@ -2877,6 +3013,21 @@ def handle_inbound(
                     repo, settings, now, period=period_key,
                     game=game_key, group_id=group_id,
                 )
+    # ``records`` / ``records <game>`` — all-time + current-year DOW bests.
+    if lower in ("records", "record", "all time", "alltime", "best scores"):
+        return _handle_records(repo, settings, now, group_id=group_id)
+    for game_key in GAMES:
+        display_lower = GAME_DISPLAY[game_key].lower()
+        if lower in (
+            f"records {game_key}",
+            f"records {display_lower}",
+            f"record {game_key}",
+            f"record {display_lower}",
+        ):
+            return _handle_records(
+                repo, settings, now, game_filter=game_key, group_id=group_id
+            )
+
     if lower in ("missing", "who", "ghosts"):
         return _handle_missing(repo, settings, now, group_id=group_id)
     if lower in ("games", "enabled"):
