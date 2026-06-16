@@ -214,6 +214,23 @@ _ALL_TIME_ANTI_RECORD_TEMPLATES = (
 )
 
 
+# Group DOW record — fastest score for this game on this weekday
+# (e.g. Monday Queens) across all players in the group, all time.
+_GROUP_DOW_RECORD_TEMPLATES = (
+    "NEW group {weekday} {game} record! {name} clocked {new}. {prior_holder}'s {prior} is history.",
+    "{name} just set the best-ever {weekday} {game} for this group: {new} (was {prior_holder}, {prior}).",
+    "Group {weekday} record on {game} falls to {name}: {new}. {prior_holder} held it with {prior}.",
+    "{name} rewrote the group's {weekday} {game} record: {new} beats {prior_holder}'s {prior}.",
+    "Best {weekday} {game} this group has ever seen: {name}, {new}. {prior_holder}'s {prior} is dethroned.",
+    "The {weekday} {game} crown changes hands — {name} with {new} edges out {prior_holder}'s {prior}.",
+    "{name} set a new group benchmark for {game} on {weekday}s: {new} (was {prior_holder}, {prior}).",
+    "Group {weekday} {game} record shattered: {name} clocks {new}. {prior_holder}'s {prior} is a footnote now.",
+    "{name} owns {weekday} {game} in this group now: {new}, beating {prior_holder}'s {prior}.",
+    "New {weekday} {game} high-water mark for the group — {name} with {new}. {prior_holder}'s old {prior} is retired.",
+    "History made on a {weekday}: {name} posted {new} on {game}, best this group has ever seen on this day (was {prior_holder}, {prior}).",
+    "{name} just carved their name into {weekday} {game} history: {new}. {prior_holder}'s {prior} finally falls.",
+)
+
 # Phase D triggers — finer slices of personal history.
 #   * dow_pb       — best ever on this game on this weekday
 #                    (e.g. "fastest Tuesday Queens you've had")
@@ -428,6 +445,7 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "worst_of_day": _WORST_OF_DAY_TEMPLATES,
     "all_time_record": _ALL_TIME_RECORD_TEMPLATES,
     "all_time_anti_record": _ALL_TIME_ANTI_RECORD_TEMPLATES,
+    "group_dow_record": _GROUP_DOW_RECORD_TEMPLATES,
     "dow_pb": _DOW_PB_TEMPLATES,
     "dow_worst": _DOW_WORST_TEMPLATES,
     "year_pb": _YEAR_PB_TEMPLATES,
@@ -470,7 +488,7 @@ _TRIGGER_TRUMPS: Dict[str, frozenset] = {
     }),
     "all_time_record": frozenset({
         "new_pb", "tied_pb", "best_of_day",
-        "dow_pb", "year_pb",
+        "dow_pb", "year_pb", "group_dow_record",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
         "rivalry", "podium_streak",
     }),
@@ -478,6 +496,12 @@ _TRIGGER_TRUMPS: Dict[str, frozenset] = {
         "new_worst", "tied_worst", "worst_of_day",
         "dow_worst",
         "bottom_quartile_personal", "dow_bottom_quartile_personal", "above_floor_today",
+    }),
+    "group_dow_record": frozenset({
+        "new_pb", "tied_pb", "best_of_day",
+        "dow_pb", "year_pb",
+        "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
+        "rivalry", "podium_streak",
     }),
     "best_of_day": frozenset({
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
@@ -661,6 +685,38 @@ def _make_extreme_trigger(
             "_new_raw": str(new_raw),
             "_prior_raw": str(runner_up.raw_score),
             "prior_holder": runner_up.player_name or "—",
+        },
+    )
+
+
+def _detect_group_dow_record_trigger(
+    fastest_dow_top: List[ScoreRow],
+    new_raw: int,
+    player_id: int,
+    weekday: int,
+) -> Optional[Trigger]:
+    """Return a ``group_dow_record`` trigger when the just-inserted score
+    is the all-time fastest for this game on this weekday within the group.
+
+    Requires a runner-up with a strictly worse score so we only fire on a
+    genuine improvement (not a tie), and can name the previous record holder.
+    """
+    if len(fastest_dow_top) < 2:
+        return None
+    leader, runner_up = fastest_dow_top[0], fastest_dow_top[1]
+    if leader.raw_score != new_raw or leader.player_id != player_id:
+        return None
+    if runner_up.raw_score == new_raw:
+        return None  # tied the record, not a strict improvement
+    if runner_up.player_id == player_id:
+        return None  # player holds both spots
+    return Trigger(
+        kind="group_dow_record",
+        format_data={
+            "_new_raw": str(new_raw),
+            "_prior_raw": str(runner_up.raw_score),
+            "prior_holder": runner_up.player_name or "—",
+            "weekday": _WEEKDAY_NAMES[weekday],
         },
     )
 
@@ -1006,6 +1062,25 @@ def gather_submission_triggers(
     )
     if record is not None:
         triggers.append(record)
+
+    weekday = today.weekday()
+    try:
+        fastest_dow_top = repo.get_top_extremes_for_game_dow(
+            game=game, weekday=weekday, n=2, group_id=group_id
+        )
+    except Exception:
+        logger.exception(
+            "get_top_extremes_for_game_dow failed (game=%s, weekday=%d) — "
+            "skipping group DOW record trigger",
+            game,
+            weekday,
+        )
+        fastest_dow_top = []
+    dow_record = _detect_group_dow_record_trigger(
+        fastest_dow_top, new_raw, player_id, weekday
+    )
+    if dow_record is not None:
+        triggers.append(dow_record)
 
     # Phase D: finer slices of personal history. We pull the player's
     # full game history once and hand the same list to every Phase-D
