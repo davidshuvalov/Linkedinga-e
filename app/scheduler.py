@@ -572,7 +572,10 @@ def daily_recap(
     active_players: Dict[int, str] = {s.player_id: s.player_name for s in week_filtered}
 
     lines: List[str] = [header, ""]
-    lines.extend(_per_game_sections(day, day_scores, active_players=active_players))
+    lines.extend(_per_game_sections(
+        day, day_scores,
+        active_players=None if lock_aggregates else active_players,
+    ))
 
     if lock_aggregates:
         return "\n".join(lines).rstrip() + "\n"
