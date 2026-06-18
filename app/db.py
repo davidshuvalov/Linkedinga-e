@@ -64,6 +64,7 @@ class ScoreRow:
     puzzle_no: int
     puzzle_date: date
     raw_score: int
+    is_np: bool = False
 
 
 @dataclass(frozen=True)

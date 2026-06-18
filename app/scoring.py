@@ -40,6 +40,10 @@ from .db import ScoreRow
 # Position → base points. Positions beyond 5 get 0.
 _POSITION_POINTS: Dict[int, int] = {1: 5, 2: 4, 3: 3, 4: 2, 5: 1}
 
+# Sentinel raw_score for not-played entries. Must be larger than any real
+# score so np players always sort last inside assign_daily_points.
+NP_SCORE: int = 999_999
+
 # Minimum number of submissions a player needs to be eligible for the
 # "Best average" prize. Set low enough (5) that a player picking up one
 # game-type a day across a work week qualifies, but high enough that one
@@ -347,31 +351,48 @@ def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, float]:
       applied so the round total stays invariant.
 
     ``scores`` should all be for a single ``(game, puzzle_no)``.
+    Entries with ``is_np=True`` (not-played sentinels) are separated
+    before dispatch and assigned points for the positions they fill
+    after all real players — plain average, same as tied_points.
     """
     if not scores:
         return {}
-    sorted_scores = sorted(scores, key=lambda s: s.raw_score)
-    n = len(sorted_scores)
+
+    real = [s for s in scores if not s.is_np]
+    np_list = [s for s in scores if s.is_np]
+
+    if not real:
+        return {}
+
+    sorted_real = sorted(real, key=lambda s: s.raw_score)
+    n_real = len(sorted_real)
 
     # Pinpoint is guess count (1–5); the ratio/spread model the
     # competitive algorithm uses would treat 1 vs 2 guesses as a 2x
     # "time" difference which is nonsense. Route all pinpoint rounds
     # through the legacy rank system.
-    pinpoint_free = all(s.game not in _NON_TIME_GAMES for s in sorted_scores)
-    big_enough = n >= 3
+    pinpoint_free = all(s.game not in _NON_TIME_GAMES for s in sorted_real)
+    big_enough = n_real >= 3
 
     if pinpoint_free and big_enough:
         players = [
             {"name": s.player_name, "time": s.raw_score}
-            for s in sorted_scores
+            for s in sorted_real
         ]
         results = competitive_score(players)
-        return {
-            sorted_scores[i].player_id: results[i]["final_score"]
-            for i in range(n)
+        result: Dict[int, float] = {
+            sorted_real[i].player_id: results[i]["final_score"]
+            for i in range(n_real)
         }
+    else:
+        result = _legacy_rank_points(sorted_real)
 
-    return _legacy_rank_points(sorted_scores)
+    if np_list:
+        np_pts = _tied_points(n_real + 1, len(np_list))
+        for s in np_list:
+            result[s.player_id] = np_pts
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +400,40 @@ def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, float]:
 # ---------------------------------------------------------------------------
 
 
+def _with_np_entries(
+    group_scores: List[ScoreRow],
+    active_players: Optional[Dict[int, str]],
+) -> List[ScoreRow]:
+    """Return ``group_scores`` augmented with not-played sentinels.
+
+    For every player in ``active_players`` who is absent from
+    ``group_scores``, append a virtual :class:`ScoreRow` with
+    ``is_np=True`` and ``raw_score=NP_SCORE``.  Returns the original
+    list unchanged when ``active_players`` is ``None`` or empty.
+    """
+    if not active_players:
+        return group_scores
+    played = {s.player_id for s in group_scores}
+    first = group_scores[0]
+    np_rows = [
+        ScoreRow(
+            player_id=pid,
+            player_name=name,
+            game=first.game,
+            puzzle_no=first.puzzle_no,
+            puzzle_date=first.puzzle_date,
+            raw_score=NP_SCORE,
+            is_np=True,
+        )
+        for pid, name in active_players.items()
+        if pid not in played
+    ]
+    return list(group_scores) + np_rows
+
+
 def weekly_leaderboard(
     scores: Sequence[ScoreRow],
+    active_players: Optional[Dict[int, str]] = None,
 ) -> List[PlayerWeeklyStats]:
     """Aggregate a batch of scores (one week's worth) into per-player stats.
 
@@ -425,15 +478,19 @@ def weekly_leaderboard(
     last_places: Dict[int, int] = {pid: 0 for pid in first_places}
 
     for group_scores in groups.values():
-        for pid, pts in assign_daily_points(group_scores).items():
+        augmented = _with_np_entries(group_scores, active_players)
+        for pid, pts in assign_daily_points(augmented).items():
             totals[pid] += pts
         # First / last only count when there's real competition — a lone
         # submitter would otherwise sweep both metrics absurdly.
-        if len(group_scores) < 2:
+        # Only real (non-np) entries are considered so np players don't
+        # "steal" the last-place slot from whoever actually played worst.
+        real_in_group = [s for s in group_scores if not s.is_np]
+        if len(real_in_group) < 2:
             continue
-        best_raw = min(s.raw_score for s in group_scores)
-        worst_raw = max(s.raw_score for s in group_scores)
-        for s in group_scores:
+        best_raw = min(s.raw_score for s in real_in_group)
+        worst_raw = max(s.raw_score for s in real_in_group)
+        for s in real_in_group:
             if s.raw_score == best_raw:
                 first_places[s.player_id] += 1
             if s.raw_score == worst_raw:

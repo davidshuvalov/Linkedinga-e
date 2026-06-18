@@ -28,6 +28,7 @@ from .puzzles import (
 )
 from .scoring import (
     _NON_TIME_GAMES,
+    NP_SCORE,
     assign_daily_points,
     game_leaders,
     prize_allocations,
@@ -182,6 +183,7 @@ def _player_game_totals(
 def _per_game_sections(
     day: date,
     day_scores: Sequence[ScoreRow],
+    active_players: Optional[Dict[int, str]] = None,
 ) -> List[str]:
     """Build the per-game rankings block for ``day``.
 
@@ -189,6 +191,10 @@ def _per_game_sections(
     content. Games with no submissions for the day are silently skipped.
     Groups are ordered by ``GAME_DISPLAY_ORDER`` and then by puzzle number
     (usually one puzzle per game per day, but this is future-proof).
+
+    When ``active_players`` is provided, any player absent from a game
+    group receives a virtual not-played entry (shown as "np") and earns
+    the remaining position points shared equally among all absentees.
     """
     groups: Dict[Tuple[str, int], List[ScoreRow]] = {}
     for s in day_scores:
@@ -201,15 +207,32 @@ def _per_game_sections(
             key=lambda k: k[1],
         )
         for key in matching:
-            group_scores = sorted(groups[key], key=lambda s: s.raw_score)
+            real_scores = sorted(groups[key], key=lambda s: s.raw_score)
+            # Inject np entries for active players who didn't submit.
+            if active_players:
+                played = {s.player_id for s in real_scores}
+                np_rows = [
+                    ScoreRow(
+                        player_id=pid,
+                        player_name=name,
+                        game=key[0],
+                        puzzle_no=key[1],
+                        puzzle_date=day,
+                        raw_score=NP_SCORE,
+                        is_np=True,
+                    )
+                    for pid, name in active_players.items()
+                    if pid not in played
+                ]
+                group_scores = real_scores + np_rows
+            else:
+                group_scores = real_scores
             points_map = assign_daily_points(group_scores)
             lines.append(f"{GAME_DISPLAY[game]} #{key[1]}")
             for s in group_scores:
                 pts = points_map[s.player_id]
-                lines.append(
-                    f"  {s.player_name} — "
-                    f"{format_raw_score(game, s.raw_score)} ({_pts(pts)})"
-                )
+                score_str = "np" if s.is_np else format_raw_score(game, s.raw_score)
+                lines.append(f"  {s.player_name} — {score_str} ({_pts(pts)})")
             lines.append("")
     # Drop the trailing blank so the caller controls spacing.
     while lines and lines[-1] == "":
@@ -241,6 +264,7 @@ def _weekly_leaderboard_lines(
     prior_scores: Optional[Sequence[ScoreRow]] = None,
     *,
     absent_player_names: Optional[Sequence[str]] = None,
+    active_players: Optional[Dict[int, str]] = None,
 ) -> List[str]:
     """Render the cumulative weekly leaderboard as a compact list.
 
@@ -257,12 +281,15 @@ def _weekly_leaderboard_lines(
     no scores this week. They get an explicit "Haven't played this
     week" footer so the leaderboard reads as a roster (everyone in
     the group is visible) rather than only the people who showed up.
+
+    ``active_players``, when provided, is forwarded to
+    :func:`weekly_leaderboard` so not-played points are included.
     """
-    lb = weekly_leaderboard(week_scores)
+    lb = weekly_leaderboard(week_scores, active_players=active_players)
     if not lb:
         return []
 
-    prior_lb = weekly_leaderboard(list(prior_scores)) if prior_scores else []
+    prior_lb = weekly_leaderboard(list(prior_scores), active_players=active_players) if prior_scores else []
     prior_ranks = {p.player_id: i for i, p in enumerate(prior_lb, start=1)}
     show_arrows = bool(prior_lb)
 
@@ -427,6 +454,7 @@ _GAME_STANDINGS_TOP_N = 3
 
 def _per_game_running_totals(
     week_scores: Sequence[ScoreRow],
+    active_players: Optional[Dict[int, str]] = None,
 ) -> List[str]:
     """Per-game running point totals for the week so far.
 
@@ -450,11 +478,15 @@ def _per_game_running_totals(
     per_game_totals: Dict[str, Dict[int, float]] = {}
     player_names: Dict[int, str] = {}
     for (game, _), group_scores in groups.items():
+        from .scoring import _with_np_entries
+        augmented = _with_np_entries(group_scores, active_players)
         bucket = per_game_totals.setdefault(game, {})
-        for pid, pts in assign_daily_points(group_scores).items():
+        for pid, pts in assign_daily_points(augmented).items():
             bucket[pid] = bucket.get(pid, 0.0) + pts
     for s in week_scores:
         player_names[s.player_id] = s.player_name
+    if active_players:
+        player_names.update(active_players)
 
     def _compact(val: float) -> str:
         """Integer-valued totals stay as ``5``; fractional as ``5.8``."""
@@ -535,8 +567,12 @@ def daily_recap(
         ]
         return f"{header}\n\n{filler}\n"
 
+    # Players active this week — used to inject not-played entries so
+    # absentees still earn the remaining position points.
+    active_players: Dict[int, str] = {s.player_id: s.player_name for s in week_filtered}
+
     lines: List[str] = [header, ""]
-    lines.extend(_per_game_sections(day, day_scores))
+    lines.extend(_per_game_sections(day, day_scores, active_players=active_players))
 
     if lock_aggregates:
         return "\n".join(lines).rstrip() + "\n"
@@ -553,7 +589,7 @@ def daily_recap(
     # Per-game running totals across the whole week — complements the
     # overall "Week so far" leaderboard below by showing who's ahead in
     # each game individually, not just on aggregate points.
-    game_totals_lines = _per_game_running_totals(week_so_far)
+    game_totals_lines = _per_game_running_totals(week_so_far, active_players=active_players)
     if game_totals_lines:
         lines.append("")
         lines.extend(game_totals_lines)
@@ -568,6 +604,7 @@ def daily_recap(
         title="Week so far",
         prior_scores=prior_scores,
         absent_player_names=absent_player_names,
+        active_players=active_players,
     )
     if lb_lines:
         lines.append("")
@@ -669,6 +706,8 @@ def weekly_wrap(
         ]
         return f"{header}\n\n{filler}\n"
 
+    active_players: Dict[int, str] = {s.player_id: s.player_name for s in week_filtered}
+
     lines: List[str] = [header, ""]
 
     # Final day's per-game rankings
@@ -676,7 +715,7 @@ def weekly_wrap(
     if final_day_scores:
         lines.append(f"{week_end.strftime('%a %d %b')}:")
         lines.append("")
-        lines.extend(_per_game_sections(week_end, final_day_scores))
+        lines.extend(_per_game_sections(week_end, final_day_scores, active_players=active_players))
         lines.append("")
 
     # Week totals leaderboard
@@ -684,6 +723,7 @@ def weekly_wrap(
         week_filtered,
         title="Week totals",
         absent_player_names=absent_player_names,
+        active_players=active_players,
     ))
 
     # Per-game weekly winners
@@ -693,7 +733,7 @@ def weekly_wrap(
         lines.extend(winners)
 
     # Prizes
-    prize_lines = _prize_lines(prize_allocations(weekly_leaderboard(week_filtered)))
+    prize_lines = _prize_lines(prize_allocations(weekly_leaderboard(week_filtered, active_players=active_players)))
     if prize_lines:
         lines.append("")
         lines.extend(prize_lines)
