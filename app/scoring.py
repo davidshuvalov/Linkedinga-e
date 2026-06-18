@@ -234,6 +234,22 @@ def _tied_points(rank: int, count: int) -> float:
     return total / count
 
 
+def _np_pts_below(min_real_pts: float, n_np: int) -> float:
+    """Points for ``n_np`` not-played entries, guaranteed strictly below
+    ``min_real_pts``.
+
+    Scans the legacy position table from rank 1 upward to find the first
+    rank whose legacy value is *strictly less than* ``min_real_pts``, then
+    awards ``_tied_points`` from that anchor.  This prevents the coincidence
+    where competitive scoring compresses last-real-place to the same value
+    as the next legacy position (e.g., competitive 3rd = 2 pts = legacy 4th).
+    """
+    anchor = 1
+    while _POSITION_POINTS.get(anchor, 0) >= min_real_pts:
+        anchor += 1
+    return _tied_points(anchor, n_np)
+
+
 @dataclass(frozen=True)
 class PlayerWeeklyStats:
     player_id: int
@@ -388,7 +404,8 @@ def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, float]:
         result = _legacy_rank_points(sorted_real)
 
     if np_list:
-        np_pts = _tied_points(n_real + 1, len(np_list))
+        min_real_pts = min(result.values())
+        np_pts = _np_pts_below(min_real_pts, len(np_list))
         for s in np_list:
             result[s.player_id] = np_pts
 
