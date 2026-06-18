@@ -645,6 +645,7 @@ def _handle_recap(
         repo, settings, day,
         include_missing_today_nag=(day == today),
         group_id=group_id,
+        now=now,
     )
     return body
 
@@ -711,7 +712,7 @@ def _handle_wrap(
     from .jobs import render_wrap
 
     reference_day = la_date(now)
-    body, _ = render_wrap(repo, settings, reference_day, group_id=group_id)
+    body, _ = render_wrap(repo, settings, reference_day, group_id=group_id, now=now)
     return body
 
 
@@ -1014,6 +1015,7 @@ def _handle_global_recap(
             if s.game in common
         ]
 
+    day_is_complete = target_day < today
     if target_day.weekday() == 6:  # Sunday → weekly wrap
         return weekly_wrap(
             monday, sunday, week_scores,
@@ -1021,6 +1023,7 @@ def _handle_global_recap(
             month_scores=month_scores,
             year_scores=year_scores,
             absent_player_names=[],
+            day_is_complete=day_is_complete,
         )
     return daily_recap(
         target_day, week_scores,
@@ -1029,6 +1032,7 @@ def _handle_global_recap(
         year_scores=year_scores,
         include_missing_today_nag=False,
         absent_player_names=[],
+        day_is_complete=day_is_complete,
     )
 
 
