@@ -532,6 +532,7 @@ def daily_recap(
     include_missing_today_nag: bool = True,
     lock_aggregates: bool = False,
     absent_player_names: Optional[Sequence[str]] = None,
+    day_is_complete: bool = False,
 ) -> str:
     """Format a daily recap for ``day``.
 
@@ -568,11 +569,19 @@ def daily_recap(
         return f"{header}\n\n{filler}\n"
 
     # Players active this week — used to inject not-played entries so
-    # absentees still earn the remaining position points.
-    active_players: Dict[int, str] = {s.player_id: s.player_name for s in week_filtered}
+    # absentees still earn the remaining position points. Only populated
+    # when the day is fully complete (cron or past-day recap); mid-day
+    # paths leave it None so np entries never appear for a live day.
+    active_players: Optional[Dict[int, str]] = (
+        {s.player_id: s.player_name for s in week_filtered}
+        if day_is_complete else None
+    )
 
     lines: List[str] = [header, ""]
-    lines.extend(_per_game_sections(day, day_scores, active_players=active_players))
+    lines.extend(_per_game_sections(
+        day, day_scores,
+        active_players=None if lock_aggregates else active_players,
+    ))
 
     if lock_aggregates:
         return "\n".join(lines).rstrip() + "\n"
@@ -674,6 +683,7 @@ def weekly_wrap(
     month_scores: Optional[Sequence[ScoreRow]] = None,
     year_scores: Optional[Sequence[ScoreRow]] = None,
     absent_player_names: Optional[Sequence[str]] = None,
+    day_is_complete: bool = False,
 ) -> str:
     """Format a weekly wrap covering ``[week_start, week_end]`` inclusive.
 
@@ -706,7 +716,10 @@ def weekly_wrap(
         ]
         return f"{header}\n\n{filler}\n"
 
-    active_players: Dict[int, str] = {s.player_id: s.player_name for s in week_filtered}
+    active_players: Optional[Dict[int, str]] = (
+        {s.player_id: s.player_name for s in week_filtered}
+        if day_is_complete else None
+    )
 
     lines: List[str] = [header, ""]
 

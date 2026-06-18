@@ -84,6 +84,7 @@ def render_daily(
     *,
     include_missing_today_nag: bool = True,
     group_id: int,
+    now: Optional[datetime] = None,
 ) -> Tuple[str, List[str]]:
     """Build the daily-recap body + DM target list for ``target_day``.
 
@@ -97,7 +98,15 @@ def render_daily(
     this on (the nag is the whole point of an active-day recap);
     on-demand recaps for *past* days drop it because the nag doesn't
     apply retroactively.
+
+    ``now`` is used to determine whether ``target_day`` is in the past
+    (i.e. the day is fully over). Not-played entries are only injected
+    for completed days; same-day renders (early-fire, on-demand recap)
+    never show np.
     """
+    la_today = la_date(now or datetime.now(settings.tz))
+    day_is_complete = target_day < la_today
+
     monday, sunday = week_bounds(target_day)
     week_scores = repo.list_scores(
         date_from=monday, date_to=sunday, group_id=group_id
@@ -131,6 +140,7 @@ def render_daily(
             month_scores=month_scores,
             year_scores=year_scores,
             absent_player_names=absent,
+            day_is_complete=day_is_complete,
         )
     else:
         body = daily_recap(
@@ -140,6 +150,7 @@ def render_daily(
             year_scores=year_scores,
             include_missing_today_nag=include_missing_today_nag,
             absent_player_names=absent,
+            day_is_complete=day_is_complete,
         )
 
     dm_targets = repo.list_active_whatsapp_ids(
@@ -177,6 +188,7 @@ def render_wrap(
     reference_day: date,
     *,
     group_id: int,
+    now: Optional[datetime] = None,
 ) -> Tuple[str, List[str]]:
     """Build the weekly-wrap body regardless of which day ``reference_day`` is.
 
@@ -191,12 +203,14 @@ def render_wrap(
     week_scores = repo.list_scores(
         date_from=monday, date_to=sunday, group_id=group_id
     )
+    la_today = la_date(now or datetime.now(settings.tz))
     body = weekly_wrap(
         monday, sunday, week_scores,
         enabled_games=settings.enabled_games,
         absent_player_names=absent_player_names_for_week(
             repo, reference_day, week_scores, group_id=group_id
         ),
+        day_is_complete=sunday < la_today,
     )
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday, group_id=group_id
@@ -258,7 +272,7 @@ def _run_daily_recap_for_group(
     )
 
     body, dm_targets = render_daily(
-        repo, settings, target_day, group_id=group.id
+        repo, settings, target_day, group_id=group.id, now=now
     )
     send_recap(
         settings, body,
@@ -389,7 +403,7 @@ def _run_weekly_wrap_early_for_group(
     )
 
     body, dm_targets = render_daily(
-        repo, settings, target_day, group_id=group.id
+        repo, settings, target_day, group_id=group.id, now=now
     )
     send_recap(
         settings, body,
@@ -1180,7 +1194,7 @@ def maybe_fire_early_recap(
         recap_type, today, group.name,
     )
     body, dm_targets = render_daily(
-        repo, settings, today, group_id=group_id
+        repo, settings, today, group_id=group_id, now=now
     )
     send_recap(
         settings, body,
