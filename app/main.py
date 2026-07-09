@@ -27,6 +27,7 @@ when ``TWILIO_ACCOUNT_SID`` is not set.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -355,9 +356,28 @@ _ERROR_REPLY = (
     "The admins have been notified — please try again in a bit."
 )
 
+_TIMEOUT_REPLY = (
+    "Sorry, that took too long to put together. "
+    "Please try again in a moment."
+)
+
+# Twilio abandons a webhook request after ~15 seconds and logs Error
+# 11200 (HTTP retrieval failure) — the sender then sees nothing at all.
+# Budget comfortably below that so a slow handler still returns valid
+# TwiML in time for Twilio to relay the apology.
+_HANDLER_TIMEOUT_SECONDS = 12.0
+
+# Dedicated pool for handler execution so a timed-out handler can keep
+# running to completion (its DB writes still land) without holding up
+# the HTTP response. Bounded so a pile-up of slow handlers queues here
+# instead of exhausting server threads.
+_handler_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="webhook-handler"
+)
+
 
 @app.post("/webhook")
-async def webhook(
+def webhook(
     from_: str = Form(..., alias="From"),
     body: str = Form("", alias="Body"),
     profile_name: str = Form("", alias="ProfileName"),
@@ -367,13 +387,24 @@ async def webhook(
         get_puzzle_validator
     ),
 ) -> Response:
+    # Deliberately a sync (``def``) route: ``handle_inbound`` and every
+    # Supabase call under it are blocking I/O. As ``async def`` they ran
+    # on the event loop itself, so ONE in-flight message froze every
+    # concurrent request — other senders' webhooks and Railway health
+    # checks queued until it finished, blew Twilio's ~15s deadline, and
+    # surfaced as Error 11200. Sync routes run in Starlette's threadpool,
+    # so requests process in parallel and the loop stays responsive.
+    #
     # Any exception from handle_inbound (Supabase outage, misconfigured
     # tables, bad regex input, etc.) must NOT bubble up as a 500 — Twilio
     # can't relay a reply from a 500, so the sender sees silence and the
     # Twilio console shows a webhook error. Catch, log the full traceback
-    # (visible in Railway logs), and return a valid TwiML apology.
+    # (visible in Railway logs), and return a valid TwiML apology. Same
+    # for a handler that's merely slow: answer with an apology before
+    # Twilio gives up on us.
     try:
-        reply: Optional[str] = handle_inbound(
+        future = _handler_pool.submit(
+            handle_inbound,
             repo,
             from_=from_,
             body=body,
@@ -383,6 +414,16 @@ async def webhook(
             expected_puzzle_no=puzzle_validator,
             settings=settings,
         )
+        reply: Optional[str] = future.result(timeout=_HANDLER_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        logger.warning(
+            "handle_inbound exceeded %.0fs for from=%s body=%r — "
+            "returning timeout apology (handler keeps running)",
+            _HANDLER_TIMEOUT_SECONDS,
+            from_,
+            (body or "")[:200],
+        )
+        reply = _TIMEOUT_REPLY
     except Exception:
         logger.exception(
             "handle_inbound failed for from=%s body=%r",
