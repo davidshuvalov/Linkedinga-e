@@ -592,6 +592,38 @@ class TestStatusCallbackWiring:
             app.dependency_overrides.clear()
 
 
+class TestWebhookTimeout:
+    """A handler that outlives the internal deadline must still get a
+    valid TwiML reply back to Twilio — otherwise Twilio abandons the
+    request at ~15s and logs Error 11200 (HTTP retrieval failure)."""
+
+    def test_slow_handler_returns_timeout_apology(
+        self, client, monkeypatch, caplog
+    ):
+        import time
+
+        import app.main as main_mod
+
+        def slow_handler(*args, **kwargs):
+            time.sleep(1.0)
+            return "too late to matter"
+
+        monkeypatch.setattr(main_mod, "handle_inbound", slow_handler)
+        monkeypatch.setattr(main_mod, "_HANDLER_TIMEOUT_SECONDS", 0.1)
+
+        with caplog.at_level("WARNING", logger="app.main"):
+            r = client.post(
+                "/webhook",
+                data={"From": "whatsapp:+61400000000", "Body": "recap"},
+            )
+        assert r.status_code == 200
+        root = ET.fromstring(r.text)
+        messages = root.findall("Message")
+        assert len(messages) == 1
+        assert "took too long" in messages[0].text
+        assert any("exceeded" in rec.message for rec in caplog.records)
+
+
 class TestTwilioStatusEndpoint:
     def test_failure_status_is_logged_at_warning(self, caplog):
         client = TestClient(app)
