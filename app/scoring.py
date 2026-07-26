@@ -234,19 +234,22 @@ def _tied_points(rank: int, count: int) -> float:
     return total / count
 
 
-def _np_pts_below(min_real_pts: float, n_np: int) -> float:
-    """Points for ``n_np`` not-played entries, guaranteed strictly below
-    ``min_real_pts``.
+def _np_pts(n_real: int, n_np: int) -> float:
+    """Points for ``n_np`` not-played entries, scored as if each player had
+    turned in a really bad score — dead last.
 
-    Scans the legacy position table from rank 1 upward to find the first
-    rank whose legacy value is *strictly less than* ``min_real_pts``, then
-    awards ``_tied_points`` from that anchor.  This prevents the coincidence
-    where competitive scoring compresses last-real-place to the same value
-    as the next legacy position (e.g., competitive 3rd = 2 pts = legacy 4th).
+    The anchor is the position *after* the ``n_real`` real players, floored
+    at the last rung of a full field (rank 5). Flooring is the whole point:
+    a lone absentee always lands on the bottom position (1 pt) instead of
+    riding up next to a fast, tightly-packed field. Under the old rule the
+    anchor tracked the day's slowest *real* score, so when the real times
+    were compressed near the top a no-show could bank almost as much as the
+    players who actually showed up (e.g. slowest real = 3.5 pts → np = 3).
+    Now a no-show is worth a really-bad-but-real result regardless of how
+    tight the day's real pack was. Multiple absentees tie for the bottom and
+    split those positions, same as ``_tied_points`` everywhere else.
     """
-    anchor = 1
-    while _POSITION_POINTS.get(anchor, 0) >= min_real_pts:
-        anchor += 1
+    anchor = max(n_real + 1, len(_POSITION_POINTS))
     return _tied_points(anchor, n_np)
 
 
@@ -368,8 +371,10 @@ def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, float]:
 
     ``scores`` should all be for a single ``(game, puzzle_no)``.
     Entries with ``is_np=True`` (not-played sentinels) are separated
-    before dispatch and assigned points for the positions they fill
-    after all real players — plain average, same as tied_points.
+    before dispatch and scored as if the player turned in a really bad
+    score — dead last, floored at the bottom of a full field — so an
+    absence never banks near-winning points on a compressed day
+    (see :func:`_np_pts`).
     """
     if not scores:
         return {}
@@ -404,8 +409,7 @@ def assign_daily_points(scores: Sequence[ScoreRow]) -> Dict[int, float]:
         result = _legacy_rank_points(sorted_real)
 
     if np_list:
-        min_real_pts = min(result.values())
-        np_pts = _np_pts_below(min_real_pts, len(np_list))
+        np_pts = _np_pts(n_real, len(np_list))
         for s in np_list:
             result[s.player_id] = np_pts
 

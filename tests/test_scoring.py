@@ -279,6 +279,81 @@ class TestAssignDailyPoints:
 
 
 # ---------------------------------------------------------------------------
+# not-played (np) scoring
+# ---------------------------------------------------------------------------
+
+
+def _np_row(pid: int, name: str, game: str, puzzle_no: int) -> ScoreRow:
+    from app.scoring import NP_SCORE
+
+    return ScoreRow(
+        player_id=pid,
+        player_name=name,
+        game=game,
+        puzzle_no=puzzle_no,
+        puzzle_date=D,
+        raw_score=NP_SCORE,
+        is_np=True,
+    )
+
+
+class TestNotPlayedScoring:
+    def test_np_gets_last_place_regardless_of_compression(self):
+        # Real times are tightly packed near the top, so the slowest real
+        # player still banks a healthy score. A no-show must NOT ride up
+        # with them — it lands on the bottom rung (1 pt), as if the player
+        # turned in a really bad score.
+        scores = [
+            _row(1, "Adam", "tango", 656, 33),
+            _row(2, "Duviuvi1", "tango", 656, 37),
+            _row(3, "Simon", "tango", 656, 37),
+            _np_row(4, "Ben", "tango", 656),
+        ]
+        r = assign_daily_points(scores)
+        assert r[4] == 1.0
+        # And it never beats an actual played score.
+        assert r[4] <= min(r[1], r[2], r[3])
+
+    def test_np_floor_is_independent_of_spread(self):
+        # Widely-spread real times: the no-show still gets the same bottom
+        # value as the compressed case above.
+        scores = [
+            _row(1, "Simon", "queens", 816, 25),
+            _row(2, "Adam", "queens", 816, 46),
+            _row(3, "Duviuvi1", "queens", 816, 72),
+            _np_row(4, "Ben", "queens", 816),
+        ]
+        r = assign_daily_points(scores)
+        assert r[4] == 1.0
+
+    def test_multiple_np_split_the_bottom(self):
+        # Two absentees tie for the bottom and split the last positions.
+        scores = [
+            _row(1, "Adam", "zip", 495, 12),
+            _row(2, "Simon", "zip", 495, 22),
+            _row(3, "Duviuvi1", "zip", 495, 22),
+            _np_row(4, "Ben", "zip", 495),
+            _np_row(5, "Cara", "zip", 495),
+        ]
+        r = assign_daily_points(scores)
+        # ranks 5 and 6 → (1 + 0) / 2 = 0.5 each
+        assert r[4] == r[5] == 0.5
+
+    def test_np_in_full_field_scores_zero(self):
+        # Five real players already fill 5..1; a sixth-place no-show is 0.
+        scores = [
+            _row(1, "A", "queens", 816, 10),
+            _row(2, "B", "queens", 816, 20),
+            _row(3, "C", "queens", 816, 30),
+            _row(4, "D", "queens", 816, 40),
+            _row(5, "E", "queens", 816, 50),
+            _np_row(6, "F", "queens", 816),
+        ]
+        r = assign_daily_points(scores)
+        assert r[6] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # weekly_leaderboard
 # ---------------------------------------------------------------------------
 
