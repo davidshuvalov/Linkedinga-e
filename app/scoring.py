@@ -496,6 +496,24 @@ def weekly_leaderboard(
             total_time[s.player_id] += s.raw_score
             time_based_submissions[s.player_id] += 1
 
+    # ``active_players`` can name someone with no scores in ``scores``
+    # at all. The common caller derives it from the same slice it
+    # passes in, but the prior-standings snapshot behind the rank
+    # arrows compares a *partial* week against the full week's roster,
+    # so anyone whose first score lands after the cut-off shows up here
+    # with nothing banked. They still collect not-played points from
+    # :func:`_with_np_entries`, so seed their accumulators — otherwise
+    # the first np award below KeyErrors.
+    for pid, name in (active_players or {}).items():
+        player_names.setdefault(pid, name)
+        totals.setdefault(pid, 0.0)
+        games_by_player.setdefault(pid, set())
+        days_by_player.setdefault(pid, set())
+        submissions.setdefault(pid, 0)
+        first_places.setdefault(pid, 0)
+        total_time.setdefault(pid, 0)
+        time_based_submissions.setdefault(pid, 0)
+
     last_places: Dict[int, int] = {pid: 0 for pid in first_places}
 
     for group_scores in groups.values():
