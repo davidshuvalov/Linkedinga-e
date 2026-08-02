@@ -11,7 +11,9 @@ Reply / silence matrix:
 - random chatter (no game name + no ``lnkd.in/``) . **silent**
 - score-like text that fails to parse ............ reply + log (we want
   feedback when a real share gets mangled)
-- valid score, wrong puzzle number ............... reply (reject)
+- valid score, up to 7 days old .................. reply (confirm,
+  filed under that puzzle's own LA day)
+- valid score, future or >7 days old ............. reply (reject)
 - valid score, duplicate ......................... reply (reject)
 - valid score, fresh ............................. reply (confirm)
 - ``stats`` / ``unparsed`` commands .............. reply
@@ -42,7 +44,13 @@ from .parsers import (
     looks_like_score,
     parse_any,
 )
-from .puzzles import la_date, month_bounds, week_bounds, year_bounds
+from .puzzles import (
+    MAX_BACKDATE_DAYS,
+    la_date,
+    month_bounds,
+    week_bounds,
+    year_bounds,
+)
 
 # Max look-back for the "N days ago" command. Cap at 6 so users can
 # still grab any day within the current week (Mon–Sat from Sunday)
@@ -155,7 +163,11 @@ _ULTRA_HELP_TEXT = (
     "\n"
     "Submit a score by pasting the LinkedIn share text, e.g.:\n"
     "  Queens #714\n"
-    "  0:10"
+    "  0:10\n"
+    "\n"
+    "Forgot to send one? Paste an old share any time in the next 7\n"
+    "days — the puzzle number tells me which day it belongs to and it\n"
+    "gets scored against that round, not today's."
 )
 
 # Help text shown when an un-onboarded sender runs ``help``. Kept
@@ -648,6 +660,29 @@ def _handle_recap(
         now=now,
     )
     return body
+
+
+def _recap_already_sent(
+    repo: Repository, day: date, *, group_id: int
+) -> bool:
+    """Has ``day``'s recap (daily, or the weekly wrap on a Sunday)
+    already gone out for this group?
+
+    Used to warn a late submitter that they've just moved standings
+    the group has already seen. Never raises — a repo hiccup here
+    only costs us the extra sentence, and must not sink the ack for
+    a perfectly good score.
+    """
+    recap_type = "weekly" if day.weekday() == 6 else "daily"
+    try:
+        return repo.has_recap_been_sent(day, recap_type, group_id=group_id)
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception(
+            "recap-sent check failed for %s", day
+        )
+        return False
 
 
 def _handle_all_week(
@@ -3236,20 +3271,32 @@ def handle_inbound(
 
     pretty_game = GAME_DISPLAY[parsed.game]
 
-    # Reject stale/future puzzle numbers. LinkedIn rolls puzzles at
-    # midnight US Pacific, so ``expected_puzzle_no`` uses LA time to pick
-    # today's live number regardless of where the submitter lives.
+    # Place the submission on its LA puzzle day. LinkedIn rolls puzzles
+    # at midnight US Pacific, so ``expected_puzzle_no`` gives today's
+    # live number regardless of where the submitter lives, and the gap
+    # to the submitted number is how many days back it belongs.
+    #
+    # Backdating is allowed up to ``MAX_BACKDATE_DAYS`` so someone who
+    # forgot to paste yesterday's share can still get it counted.
+    # Future numbers are still rejected outright — there's no such
+    # score yet, so it can only be a typo or a wind-up.
+    days_back = 0
     if expected_puzzle_no is not None:
         expected = expected_puzzle_no(parsed.game, now)
-        if parsed.puzzle_no != expected:
-            if parsed.puzzle_no < expected:
-                when = "yesterday" if parsed.puzzle_no == expected - 1 else "an older day"
-            else:
-                when = "tomorrow" if parsed.puzzle_no == expected + 1 else "a future day"
+        days_back = expected - parsed.puzzle_no
+        if days_back < 0:
+            when = "tomorrow" if days_back == -1 else "a future day"
             return (
                 f"That's {pretty_game} #{parsed.puzzle_no} ({when}'s puzzle). "
-                f"Today's {pretty_game} is #{expected} — I can only record "
-                "today's scores. (LinkedIn resets at midnight US Pacific.)"
+                f"Today's {pretty_game} is #{expected} — I can't record a "
+                "score for a puzzle that hasn't dropped yet. "
+                "(LinkedIn resets at midnight US Pacific.)"
+            )
+        if days_back > MAX_BACKDATE_DAYS:
+            return (
+                f"That's {pretty_game} #{parsed.puzzle_no}, {days_back} days "
+                f"old. Today's is #{expected} — I can only take scores from "
+                f"the last {MAX_BACKDATE_DAYS} days."
             )
 
     # ``sender`` was resolved at the top of the dispatcher; reuse it
@@ -3261,7 +3308,10 @@ def handle_inbound(
     # 4:45pm Sydney submission (still yesterday in LA) files under
     # yesterday's LA date and a 5:15pm one lands under today's. Keeps
     # daily/weekly windows consistent with LinkedIn's own puzzle days.
-    puzzle_date = la_date(now)
+    # ``days_back`` then walks it further back for a late submission, so
+    # the score scores against the round it was actually played in.
+    puzzle_date = la_date(now) - timedelta(days=days_back)
+    is_backdated = days_back > 0
 
     inserted = repo.insert_score(
         player_id=player.id,
@@ -3313,6 +3363,7 @@ def handle_inbound(
             new_raw=parsed.raw_score,
             today=puzzle_date,
             deliver=False,
+            same_day=not is_backdated,
             group_id=group_id,
         )
     except Exception:
@@ -3349,7 +3400,10 @@ def handle_inbound(
     # away rather than waiting for the LA-midnight cron. Wrapped in
     # try/except so a failure in the recap path can't sink the
     # acknowledgment of a perfectly valid submission.
-    if settings is not None:
+    #
+    # Skipped for backdated scores: the check is about *today's* round,
+    # which a late submission for an older puzzle can't complete.
+    if settings is not None and not is_backdated:
         try:
             from .jobs import maybe_fire_early_recap
 
@@ -3364,24 +3418,32 @@ def handle_inbound(
 
     # Group broadcasts: photo finish + comeback (fire-and-forget; never
     # block the submission ack if these fail).
+    #
+    # Both read the live race — "one game left this week", "just took
+    # the lead" — so they only fire for a same-day submission. Blasting
+    # the group about a race snapshot from four days ago would be
+    # nonsense. Badge checks below are date-anchored and still run: a
+    # badge genuinely earned on Tuesday shouldn't be forfeited because
+    # the share got pasted on Friday.
     if settings is not None and parsed.game in enabled_games:
         from .jobs import _group_recap_to as _group_recap_to_from_group
         _recap_to = _group_recap_to_from_group(settings, sender_group)
-        try:
-            from .notifications import maybe_broadcast_photo_finish
-            maybe_broadcast_photo_finish(
-                repo, settings,
-                group_id=group_id,
-                today=puzzle_date,
-                group_recap_to=_recap_to,
-                enabled_games=enabled_games,
-            )
-        except Exception:
-            import logging
-            logging.getLogger(__name__).exception(
-                "maybe_broadcast_photo_finish failed after insert by player %s",
-                player.id,
-            )
+        if not is_backdated:
+            try:
+                from .notifications import maybe_broadcast_photo_finish
+                maybe_broadcast_photo_finish(
+                    repo, settings,
+                    group_id=group_id,
+                    today=puzzle_date,
+                    group_recap_to=_recap_to,
+                    enabled_games=enabled_games,
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "maybe_broadcast_photo_finish failed after insert by player %s",
+                    player.id,
+                )
         # Badge checks after submission.
         try:
             from .badges import check_badges_after_submission, notify_new_badges
@@ -3402,28 +3464,43 @@ def handle_inbound(
                 "badge checks failed after insert by player %s", player.id
             )
 
-        try:
-            from .notifications import maybe_broadcast_comeback
-            maybe_broadcast_comeback(
-                repo, settings,
-                player_id=player.id,
-                player_name=player.display_name,
-                group_id=group_id,
-                today=puzzle_date,
-                group_recap_to=_recap_to,
-                enabled_games=enabled_games,
-            )
-        except Exception:
-            import logging
-            logging.getLogger(__name__).exception(
-                "maybe_broadcast_comeback failed after insert by player %s",
-                player.id,
-            )
+        if not is_backdated:
+            try:
+                from .notifications import maybe_broadcast_comeback
+                maybe_broadcast_comeback(
+                    repo, settings,
+                    player_id=player.id,
+                    player_name=player.display_name,
+                    group_id=group_id,
+                    today=puzzle_date,
+                    group_recap_to=_recap_to,
+                    enabled_games=enabled_games,
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "maybe_broadcast_comeback failed after insert by player %s",
+                    player.id,
+                )
 
     confirmation = (
         f"Got it, {player.display_name}. "
         f"{pretty_game} #{parsed.puzzle_no}: {pretty_new}.{off_note}"
     )
+    if is_backdated:
+        # Say which day it landed on — the submitter needs to know it
+        # wasn't filed as today, and if that day's recap has already
+        # gone out, why the standings they saw have just moved.
+        when = "yesterday" if days_back == 1 else f"{days_back} days ago"
+        note = (
+            f" Filed under {puzzle_date.strftime('%a %d %b')} ({when})."
+        )
+        if _recap_already_sent(repo, puzzle_date, group_id=group_id):
+            note += (
+                f" That day's recap already went out, so its standings "
+                f"have shifted."
+            )
+        confirmation += note
     extras = [b for b in (pb_body, day_complete_body) if b]
     if extras:
         return confirmation + "\n\n" + "\n\n".join(extras)

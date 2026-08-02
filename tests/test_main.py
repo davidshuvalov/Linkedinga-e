@@ -483,7 +483,15 @@ class TestPuzzleValidation:
         finally:
             app.dependency_overrides.clear()
 
-    def test_stale_puzzle_is_rejected_and_not_stored(self, repo):
+    def test_yesterdays_puzzle_is_accepted_and_backdated(self, repo):
+        """Late submissions are the point: #720 against a live #721 is
+        yesterday's puzzle, so it's stored under yesterday's LA date
+        rather than bounced."""
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        from app.puzzles import la_date
+
         client = self._client_with_validator(repo, lambda game, now: 721)
         try:
             r = client.post(
@@ -495,9 +503,30 @@ class TestPuzzleValidation:
                 },
             )
             assert r.status_code == 200
-            assert "#720" in r.text
-            assert "#721" in r.text
+            assert "Got it" in r.text
             assert "yesterday" in r.text.lower()
+            assert len(repo.scores) == 1
+            assert repo.scores[0]["puzzle_no"] == 720
+            assert repo.scores[0]["puzzle_date"] == la_date(
+                datetime.now(ZoneInfo("Australia/Sydney"))
+            ) - timedelta(days=1)
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_puzzle_older_than_a_week_is_rejected(self, repo):
+        client = self._client_with_validator(repo, lambda game, now: 721)
+        try:
+            r = client.post(
+                "/webhook",
+                data={
+                    "From": "whatsapp:+61400000001",
+                    "Body": "Queens #713\n1:05",
+                    "ProfileName": "Alice",
+                },
+            )
+            assert r.status_code == 200
+            assert "#713" in r.text
+            assert "last 7 days" in r.text
             assert len(repo.scores) == 0
         finally:
             app.dependency_overrides.clear()

@@ -11,8 +11,12 @@ number is live for every player worldwide in that window.
 :data:`PUZZLE_EPOCH` pins, for each game, the puzzle number that was
 live on a known LA date. Adding the LA-day delta from that reference
 gives the number LinkedIn is currently serving. :func:`expected_puzzle_no`
-is the small helper the webhook uses to reject stale/future submissions
-so the leaderboard only ever contains today's scores.
+is the small helper the webhook uses to place a submission on the right
+LA day: the gap between the submitted number and the live one *is* the
+number of days back it belongs, which is how a late "I forgot to send
+yesterday's" share still lands on yesterday's leaderboard. Submissions
+more than :data:`MAX_BACKDATE_DAYS` old — and any number LinkedIn
+hasn't served yet — are rejected.
 
 To advance the epoch (e.g. if LinkedIn skips a number): update the tuple
 for that game — no other code change required.
@@ -25,6 +29,12 @@ from typing import Dict, Tuple
 from zoneinfo import ZoneInfo
 
 LA = ZoneInfo("America/Los_Angeles")
+
+# How many LA days back a score may be submitted for. 0 would mean
+# "today's puzzle only" (the original rule); 7 lets someone catch up
+# on a week they forgot to paste in, without letting them reopen a
+# month-old leaderboard.
+MAX_BACKDATE_DAYS = 7
 
 
 # (reference LA date, puzzle number live on that date).
