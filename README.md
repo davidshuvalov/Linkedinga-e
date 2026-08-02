@@ -93,9 +93,10 @@ python -m app.cli wrap --week-of 2026-04-15 --demo
 Daily grouping in the scoring logic uses `(game, puzzle_no)` rather
 than the stored `puzzle_date`, so a shared daily round is scored as a
 single head-to-head even when two players' submissions straddle the
-LA-midnight rollover. Because submissions are also validated against
-the currently-live puzzle number (see "Puzzle-number validation"
-below), a single round only ever carries one puzzle_no anyway.
+LA-midnight rollover — or when one of them pastes their share a few
+days late (see "Puzzle numbers, and submitting a day late" below).
+The puzzle number is the round's identity; `puzzle_date` is derived
+from it, so a round only ever carries one puzzle_no.
 
 ### Wiring up the real Twilio sandbox
 
@@ -199,23 +200,48 @@ Ties: average the position points the tied players would fill, then round
 Weekly total = sum of daily points across **enabled** games only. Weeks
 run **Monday to Sunday in LA time**, matching LinkedIn's puzzle days.
 
-## Puzzle-number validation
+## Puzzle numbers, and submitting a day late
 
 LinkedIn rolls a new puzzle for each game at **midnight US Pacific**,
 honouring US DST. The previous day's puzzle expires at the same moment.
-The bot enforces "one round at a time" by validating every submission
-against the currently-live puzzle number — anything stale (yesterday's)
-or future (tomorrow's / a typo) is rejected with a friendly explanation
-and **not** recorded.
 
 How it works: `app/puzzles.py` pins a per-game epoch (puzzle number live
 on 2026-04-22 LA). `expected_puzzle_no(game, now)` returns today's
 expected number by adding the LA-day delta. `zoneinfo` handles DST.
 
-Example rejection:
+The gap between the number you paste and the live one **is** how many
+days back your score belongs, which is what makes late submissions
+work: forgot to send yesterday's Queens? Paste it today and it's filed
+under yesterday, scored against the players you actually played
+against.
 
-> That's Zip #407 (a future day's puzzle). Today's Zip is #401 — I can
-> only record today's scores. (LinkedIn resets at midnight US Pacific.)
+> Got it, Alice. Queens #723: 1:20. Filed under Thu 23 Apr (yesterday).
+
+Limits (`MAX_BACKDATE_DAYS = 7`):
+
+- **Up to 7 days back.** Older than that and it's refused — reopening
+  a month-old leaderboard isn't worth it.
+- **Future numbers are always refused.** LinkedIn hasn't served that
+  puzzle yet, so the score can't exist.
+- **One submission per puzzle, still.** The existing
+  `UNIQUE(player_id, game, puzzle_no)` dedup applies to late shares
+  too, so you can't quietly re-submit yesterday with a better time.
+- If that day's recap has already gone out, the confirmation says so —
+  the standings the group saw have just moved.
+
+Two side-effects are deliberately skipped for a backdated score,
+because they describe a *live* round: the group photo-finish /
+comeback broadcasts, and the early-fire recap. Personal notifications
+still fire, minus the present-tense ones ("first on the board today"),
+which would read as nonsense days later.
+
+Example rejections:
+
+> That's Zip #407 (tomorrow's puzzle). Today's Zip is #401 — I can't
+> record a score for a puzzle that hasn't dropped yet.
+
+> That's Queens #716, 8 days old. Today's is #724 — I can only take
+> scores from the last 7 days.
 
 To advance the epoch (e.g. if LinkedIn skips a number): update the
 tuple in `PUZZLE_EPOCH` — no other change required.

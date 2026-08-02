@@ -6,7 +6,7 @@ the actual state the repo ended up in after handling a message.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -3615,3 +3615,184 @@ class TestGlobalRecapWrapTimes:
         assert "Mini Sudoku" in reply
         assert "Alice" in reply
         assert "Bob" not in reply
+
+
+class TestBackdatedSubmissions:
+    """Scores can be submitted for a puzzle up to a week old — the
+    "I forgot to paste yesterday's" path. The puzzle number itself
+    says which LA day the score belongs to, so a late share still
+    lands on the round it was actually played in."""
+
+    # NOW is 14 Apr 2026 19:00 Sydney = 14 Apr 02:00 LA.
+    TODAY_LA = date(2026, 4, 14)
+
+    @staticmethod
+    def _validator(live_no):
+        """Stand-in for app.puzzles.expected_puzzle_no pinned to a
+        known live number, so tests don't move with the epoch."""
+        return lambda game, now: live_no
+
+    def _submit(self, repo, body, *, live_no=721, sender="whatsapp:+61400000001",
+                now=None, settings=None):
+        return handle_inbound(
+            repo,
+            from_=sender,
+            body=body,
+            profile_name="Alice",
+            now=now or NOW,
+            expected_puzzle_no=self._validator(live_no),
+            settings=settings,
+        )
+
+    def test_yesterdays_puzzle_is_stored_under_yesterday(self, repo):
+        reply = self._submit(repo, "Queens #720\n1:05")
+
+        assert "Got it" in reply
+        assert len(repo.scores) == 1
+        assert repo.scores[0]["puzzle_no"] == 720
+        assert repo.scores[0]["puzzle_date"] == self.TODAY_LA - timedelta(days=1)
+
+    def test_reply_names_the_day_it_landed_on(self, repo):
+        reply = self._submit(repo, "Queens #720\n1:05")
+        assert "Mon 13 Apr" in reply
+        assert "yesterday" in reply
+
+    def test_three_days_back_reply_counts_the_days(self, repo):
+        reply = self._submit(repo, "Queens #718\n1:05")
+        assert "3 days ago" in reply
+        assert repo.scores[0]["puzzle_date"] == self.TODAY_LA - timedelta(days=3)
+
+    def test_todays_puzzle_reply_has_no_backdate_note(self, repo):
+        reply = self._submit(repo, "Queens #721\n1:05")
+        assert "Filed under" not in reply
+        assert repo.scores[0]["puzzle_date"] == self.TODAY_LA
+
+    def test_exactly_seven_days_back_is_accepted(self, repo):
+        reply = self._submit(repo, "Queens #714\n1:05")
+        assert "Got it" in reply
+        assert repo.scores[0]["puzzle_date"] == self.TODAY_LA - timedelta(days=7)
+
+    def test_eight_days_back_is_rejected(self, repo):
+        reply = self._submit(repo, "Queens #713\n1:05")
+        assert "last 7 days" in reply
+        assert len(repo.scores) == 0
+
+    def test_future_puzzle_is_still_rejected(self, repo):
+        reply = self._submit(repo, "Queens #722\n1:05")
+        assert "tomorrow" in reply.lower()
+        assert "hasn't dropped yet" in reply
+        assert len(repo.scores) == 0
+
+    def test_far_future_puzzle_is_still_rejected(self, repo):
+        reply = self._submit(repo, "Queens #999\n1:05")
+        assert "future day" in reply.lower()
+        assert len(repo.scores) == 0
+
+    def test_resubmitting_a_backdated_score_is_refused(self, repo):
+        """The existing per-(player, game, puzzle) dedup covers late
+        submissions too — you can't quietly improve yesterday's time."""
+        self._submit(repo, "Queens #720\n1:05")
+        reply = self._submit(repo, "Queens #720\n0:30")
+
+        assert "already submitted" in reply
+        assert len(repo.scores) == 1
+        assert repo.scores[0]["raw_score"] == 65  # the original 1:05
+
+    def test_backdated_score_counts_on_its_own_day(self, repo):
+        """The whole point: a late score scores against the round it
+        was played in, not against today's."""
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        yesterday = self.TODAY_LA - timedelta(days=1)
+        # Bob submitted yesterday on time.
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=720,
+            puzzle_date=yesterday, raw_score=90, share_text="x",
+        )
+        # Alice pastes hers a day late, with a better time.
+        self._submit(repo, "Queens #720\n1:05")
+
+        from app.scoring import assign_daily_points
+        rows = repo.list_scores(date_from=yesterday, date_to=yesterday,
+                                group_id=repo.default_group.id)
+        assert {r.player_id for r in rows} == {alice.id, bob.id}
+        pts = assign_daily_points(rows)
+        assert pts[alice.id] > pts[bob.id]  # 1:05 beats 1:30
+
+    def test_backdated_submission_warns_when_recap_already_sent(self, repo):
+        yesterday = self.TODAY_LA - timedelta(days=1)
+        repo.mark_recap_sent(yesterday, "daily")
+        reply = self._submit(repo, "Queens #720\n1:05")
+
+        assert "Got it" in reply
+        assert "standings have shifted" in reply
+        assert len(repo.scores) == 1
+
+    def test_backdated_submission_skips_live_group_broadcasts(self, repo):
+        """Photo-finish / comeback alerts describe the live race —
+        they must not fire for a four-day-old score."""
+        from unittest.mock import patch
+        with patch("app.notifications.maybe_broadcast_photo_finish") as pf, \
+             patch("app.notifications.maybe_broadcast_comeback") as cb, \
+             patch("app.jobs.maybe_fire_early_recap") as early:
+            self._submit(
+                repo, "Queens #717\n1:05",
+                settings=_settings_with_default_games(),
+            )
+        pf.assert_not_called()
+        cb.assert_not_called()
+        early.assert_not_called()
+
+    def test_same_day_submission_still_runs_live_broadcasts(self, repo):
+        from unittest.mock import patch
+        with patch("app.notifications.maybe_broadcast_photo_finish") as pf, \
+             patch("app.notifications.maybe_broadcast_comeback") as cb, \
+             patch("app.jobs.maybe_fire_early_recap") as early:
+            self._submit(
+                repo, "Queens #721\n1:05",
+                settings=_settings_with_default_games(),
+            )
+        pf.assert_called_once()
+        cb.assert_called_once()
+        early.assert_called_once()
+
+    def test_backdated_score_skips_present_tense_zingers(self, repo):
+        """"First on the board today" reads as nonsense on a score
+        pasted in three days late — those triggers are dropped, the
+        day-agnostic ones (PB, all-time record) still fire."""
+        reply = self._submit(
+            repo, "Queens #718\n1:05",
+            settings=_settings_with_default_games(),
+        )
+        assert "Got it" in reply
+        assert "today" not in reply.lower().split("filed under")[0]
+
+    def test_same_day_score_keeps_present_tense_zingers(self, repo):
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        # Someone already on the board today, slower — Alice's entry
+        # takes "best of the day".
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        repo.insert_score(
+            player_id=bob.id, game="queens", puzzle_no=721,
+            puzzle_date=self.TODAY_LA, raw_score=200, share_text="x",
+        )
+        reply = self._submit(
+            repo, "Queens #721\n1:05",
+            settings=_settings_with_default_games(),
+        )
+        assert "Got it" in reply
+        # Some day-flavoured zinger came along for the ride.
+        assert len(reply.splitlines()) > 1
+
+    def test_no_validator_means_no_backdating(self, repo):
+        """Without a puzzle validator (unit-test wiring) there's no
+        live number to measure against, so everything files as today."""
+        reply = handle_inbound(
+            repo,
+            from_="whatsapp:+61400000001",
+            body="Queens #365 | 1:23",
+            profile_name="Alice",
+            now=NOW,
+        )
+        assert "Got it" in reply
+        assert repo.scores[0]["puzzle_date"] == self.TODAY_LA

@@ -1506,6 +1506,16 @@ def render_personal_best_message(
     return render_trigger(trigger, player_name=player_name, game=game)
 
 
+# Trigger kinds whose copy is written in the present tense — "best of
+# the day", "first on the board today". Correct for a live submission,
+# nonsense for one pasted in three days late, so the backdated path
+# drops them and falls back to the day-agnostic triggers (PB, all-time
+# record, weekday best…).
+_LIVE_DAY_TRIGGER_KINDS = frozenset(
+    {"best_of_day", "worst_of_day", "first_today", "above_floor_today"}
+)
+
+
 def maybe_notify_personal_best(
     repo: Repository,
     settings: Optional[Settings],
@@ -1515,6 +1525,7 @@ def maybe_notify_personal_best(
     new_raw: int,
     today: Optional[date] = None,
     deliver: bool = True,
+    same_day: bool = True,
     group_id: int,
 ) -> Optional[str]:
     """DM ``player`` a one-line zinger when the just-inserted submission
@@ -1537,6 +1548,12 @@ def maybe_notify_personal_best(
     can be folded into the score-confirmation reply instead of
     arriving as a second message; the body is returned directly for
     the caller to append.
+
+    ``same_day`` is ``False`` for a backdated submission (a share
+    pasted in days after the puzzle it belongs to). The detectors are
+    all anchored on ``today`` so they stay correct either way, but the
+    present-tense triggers in :data:`_LIVE_DAY_TRIGGER_KINDS` would
+    read as if the round were still live — those are dropped.
     """
     try:
         all_scores = repo.list_player_scores(player.id, group_id=group_id)
@@ -1582,6 +1599,10 @@ def maybe_notify_personal_best(
         group_id=group_id,
         settings=settings,
     )
+    if not same_day:
+        triggers = [
+            t for t in triggers if t.kind not in _LIVE_DAY_TRIGGER_KINDS
+        ]
     if not triggers:
         return None
 
