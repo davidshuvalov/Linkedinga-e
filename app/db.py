@@ -68,6 +68,21 @@ class ScoreRow:
 
 
 @dataclass(frozen=True)
+class Team:
+    """A named subset of a group whose members' points are summed.
+
+    Teams are scoped to a group, so ``name_lower`` is only unique
+    within ``group_id`` — two groups can each run a team called
+    "Reds". ``name`` keeps the original casing for display.
+    """
+
+    id: int
+    group_id: int
+    name: str
+    name_lower: str
+
+
+@dataclass(frozen=True)
 class Badge:
     id: int
     player_id: int
@@ -130,6 +145,47 @@ class Repository(Protocol):
         ``Settings.enabled_games`` value. Games are stored as a frozenset
         of game keys (e.g. ``frozenset({'queens', 'zip', 'tango'})``).
         """
+        ...
+
+    # ---- teams -----------------------------------------------------------
+
+    def create_team(self, *, group_id: int, name: str) -> "Team":
+        """Create a team inside ``group_id``, or return the existing one
+        when ``lower(name)`` already exists there. Same create-or-join
+        shape as :meth:`get_or_create_group`, one level down."""
+        ...
+
+    def find_team_by_name(self, *, group_id: int, name: str) -> Optional["Team"]:
+        """Return the team in ``group_id`` whose ``name_lower`` matches,
+        or ``None``."""
+        ...
+
+    def list_teams(self, group_id: int) -> List["Team"]:
+        """Every team in ``group_id``, ordered by id (creation order)."""
+        ...
+
+    def delete_team(self, team_id: int) -> None:
+        """Drop a team and all of its memberships. Players themselves
+        (and their scores) are untouched — they just stop belonging to
+        a team."""
+        ...
+
+    def add_team_member(
+        self, *, team_id: int, group_id: int, player_id: int
+    ) -> None:
+        """Put ``player_id`` on ``team_id``. A player belongs to at most
+        one team per group, so this *moves* them off any other team in
+        the same group rather than adding a second membership."""
+        ...
+
+    def remove_team_member(self, *, group_id: int, player_id: int) -> bool:
+        """Drop ``player_id`` from whichever team they're on in
+        ``group_id``. Returns ``False`` when they weren't on one."""
+        ...
+
+    def list_team_memberships(self, group_id: int) -> Dict[int, int]:
+        """``{player_id: team_id}`` for every membership in ``group_id``.
+        One query feeds the whole team leaderboard render."""
         ...
 
     # ---- scores / recaps -------------------------------------------------
@@ -380,6 +436,11 @@ class InMemoryRepository:
     # badge_id → Badge; (player_id, group_id, kind, game) → badge_id
     _badges: Dict[int, "Badge"] = field(default_factory=dict)
     _badges_by_key: Dict[tuple, int] = field(default_factory=dict)
+    # team_id → Team, plus (group_id, player_id) → team_id for the
+    # one-team-per-player-per-group invariant.
+    _teams: Dict[int, "Team"] = field(default_factory=dict)
+    _next_team_id: int = 1
+    _team_membership: Dict[Tuple[int, int], int] = field(default_factory=dict)
 
     # ---- groups ----------------------------------------------------------
 
@@ -437,6 +498,62 @@ class InMemoryRepository:
             enabled_games=frozenset(games) if games else None,
         )
         self._groups[group_id] = updated
+
+    # ---- teams -----------------------------------------------------------
+
+    def create_team(self, *, group_id: int, name: str) -> Team:
+        existing = self.find_team_by_name(group_id=group_id, name=name)
+        if existing is not None:
+            return existing
+        team = Team(
+            id=self._next_team_id,
+            group_id=group_id,
+            name=name,
+            name_lower=name.lower(),
+        )
+        self._next_team_id += 1
+        self._teams[team.id] = team
+        return team
+
+    def find_team_by_name(self, *, group_id: int, name: str) -> Optional[Team]:
+        key = name.lower()
+        for team in self._teams.values():
+            if team.group_id == group_id and team.name_lower == key:
+                return team
+        return None
+
+    def list_teams(self, group_id: int) -> List[Team]:
+        return [
+            self._teams[tid]
+            for tid in sorted(self._teams)
+            if self._teams[tid].group_id == group_id
+        ]
+
+    def delete_team(self, team_id: int) -> None:
+        team = self._teams.pop(team_id, None)
+        if team is None:
+            return
+        for key, tid in list(self._team_membership.items()):
+            if tid == team_id:
+                del self._team_membership[key]
+
+    def add_team_member(
+        self, *, team_id: int, group_id: int, player_id: int
+    ) -> None:
+        # Keyed on (group, player) so re-adding an already-teamed
+        # player overwrites rather than duplicating — the in-memory
+        # mirror of the unique (group_id, player_id) constraint.
+        self._team_membership[(group_id, player_id)] = team_id
+
+    def remove_team_member(self, *, group_id: int, player_id: int) -> bool:
+        return self._team_membership.pop((group_id, player_id), None) is not None
+
+    def list_team_memberships(self, group_id: int) -> Dict[int, int]:
+        return {
+            pid: tid
+            for (gid, pid), tid in self._team_membership.items()
+            if gid == group_id
+        }
 
     # ---- players ---------------------------------------------------------
 
@@ -778,6 +895,11 @@ class SupabaseRepository:
         # set group_id, reads ignore the kwarg. Lets the app boot on a
         # pre-migration schema instead of dying on column-missing.
         self._has_group_columns = self._detect_group_columns()
+        # Teams landed later still. Same graceful-degradation deal:
+        # reads come back empty and mutations raise a message pointing
+        # at the migration, rather than every `team` command blowing up
+        # with a raw Postgres error.
+        self._has_team_tables = self._detect_team_tables()
 
     def _detect_notifications_column(self) -> bool:
         """Probe whether ``players.notifications_enabled`` exists.
@@ -829,6 +951,23 @@ class SupabaseRepository:
                 "Group columns missing (%s). Run `db/schema.sql` to "
                 "enable group isolation. Until then, every read/write "
                 "behaves as a single shared leaderboard.",
+                exc,
+            )
+            return False
+
+    def _detect_team_tables(self) -> bool:
+        """Probe whether the teams / team_members tables exist."""
+        try:
+            self._client.table("teams").select("id").limit(1).execute()
+            self._client.table("team_members").select("id").limit(1).execute()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Teams tables missing (%s). Run `db/schema.sql` to "
+                "enable the `team` commands. Until then the group has "
+                "no teams and team standings are omitted.",
                 exc,
             )
             return False
@@ -973,6 +1112,118 @@ class SupabaseRepository:
             .eq("id", group_id)
             .execute()
         )
+
+    # ---- teams -----------------------------------------------------------
+
+    _TEAM_MIGRATION_HINT = (
+        "teams tables missing — run db/schema.sql before using team commands"
+    )
+
+    @staticmethod
+    def _row_to_team(row: Dict[str, Any]) -> Team:
+        return Team(
+            id=row["id"],
+            group_id=row["group_id"],
+            name=row["name"],
+            name_lower=row["name_lower"],
+        )
+
+    def create_team(self, *, group_id: int, name: str) -> Team:
+        if not self._has_team_tables:
+            raise RuntimeError(self._TEAM_MIGRATION_HINT)
+        existing = self.find_team_by_name(group_id=group_id, name=name)
+        if existing is not None:
+            return existing
+        inserted = (
+            self._client.table("teams")
+            .insert(
+                {
+                    "group_id": group_id,
+                    "name": name,
+                    "name_lower": name.lower(),
+                }
+            )
+            .execute()
+        )
+        return self._row_to_team(inserted.data[0])
+
+    def find_team_by_name(self, *, group_id: int, name: str) -> Optional[Team]:
+        if not self._has_team_tables:
+            return None
+        resp = (
+            self._client.table("teams")
+            .select("id, group_id, name, name_lower")
+            .eq("group_id", group_id)
+            .eq("name_lower", name.lower())
+            .limit(1)
+            .execute()
+        )
+        if not resp.data:
+            return None
+        return self._row_to_team(resp.data[0])
+
+    def list_teams(self, group_id: int) -> List[Team]:
+        if not self._has_team_tables:
+            return []
+        resp = (
+            self._client.table("teams")
+            .select("id, group_id, name, name_lower")
+            .eq("group_id", group_id)
+            .order("id")
+            .execute()
+        )
+        return [self._row_to_team(r) for r in resp.data or []]
+
+    def delete_team(self, team_id: int) -> None:
+        if not self._has_team_tables:
+            raise RuntimeError(self._TEAM_MIGRATION_HINT)
+        # Memberships cascade on the FK, but delete them explicitly so
+        # the behaviour doesn't depend on the schema being current.
+        self._client.table("team_members").delete().eq("team_id", team_id).execute()
+        self._client.table("teams").delete().eq("id", team_id).execute()
+
+    def add_team_member(
+        self, *, team_id: int, group_id: int, player_id: int
+    ) -> None:
+        if not self._has_team_tables:
+            raise RuntimeError(self._TEAM_MIGRATION_HINT)
+        # Delete-then-insert rather than upsert: the unique key is
+        # (group_id, player_id), so this is how a player moves teams.
+        self.remove_team_member(group_id=group_id, player_id=player_id)
+        (
+            self._client.table("team_members")
+            .insert(
+                {
+                    "team_id": team_id,
+                    "group_id": group_id,
+                    "player_id": player_id,
+                }
+            )
+            .execute()
+        )
+
+    def remove_team_member(self, *, group_id: int, player_id: int) -> bool:
+        if not self._has_team_tables:
+            raise RuntimeError(self._TEAM_MIGRATION_HINT)
+        resp = (
+            self._client.table("team_members")
+            .delete()
+            .eq("group_id", group_id)
+            .eq("player_id", player_id)
+            .execute()
+        )
+        return bool(resp.data)
+
+    def list_team_memberships(self, group_id: int) -> Dict[int, int]:
+        if not self._has_team_tables:
+            return {}
+        resp = (
+            self._client.table("team_members")
+            .select("player_id, team_id")
+            .eq("group_id", group_id)
+            .execute()
+        )
+        return {r["player_id"]: r["team_id"] for r in resp.data or []}
 
     def get_or_create_player(
         self, whatsapp_id: str, display_name: str

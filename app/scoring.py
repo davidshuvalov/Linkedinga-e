@@ -295,6 +295,40 @@ class PlayerWeeklyStats:
 
 
 @dataclass(frozen=True)
+class TeamStanding:
+    """One team's aggregated slice of a period leaderboard.
+
+    ``total_points`` is the plain sum of its members' ``total_points``
+    — a team's score *is* its players' scores added together, so a
+    bigger roster is a real advantage. ``member_count`` is the roster
+    size (including members who scored nothing this period), while
+    ``scoring_members`` only holds the ones that appear in the
+    underlying leaderboard, ordered by points desc.
+
+    There's deliberately no team-level ``distinct_games`` /
+    ``days_played``: those are per-player counts, so summing them
+    double-counts a round two teammates both played, and the union
+    can't be recovered from the counts alone. ``submissions`` sums
+    cleanly because each submission belongs to exactly one player.
+    """
+
+    team_id: int
+    team_name: str
+    total_points: float
+    member_count: int
+    scoring_members: Tuple[PlayerWeeklyStats, ...] = ()
+    submissions: int = 0
+
+    @property
+    def average_points(self) -> float:
+        """Points per roster member — the size-adjusted view, shown
+        alongside the total so uneven teams are legible."""
+        if self.member_count == 0:
+            return 0.0
+        return self.total_points / self.member_count
+
+
+@dataclass(frozen=True)
 class GameLeader:
     game: str
     player_id: int
@@ -555,6 +589,72 @@ def weekly_leaderboard(
     ]
     leaderboard.sort(key=lambda p: (-p.total_points, p.player_id))
     return leaderboard
+
+
+# ---------------------------------------------------------------------------
+# team_standings
+# ---------------------------------------------------------------------------
+
+
+def team_standings(
+    leaderboard: Sequence[PlayerWeeklyStats],
+    memberships: Mapping[int, int],
+    team_names: Mapping[int, str],
+) -> List[TeamStanding]:
+    """Fold a player leaderboard into team totals.
+
+    ``leaderboard`` is whatever :func:`weekly_leaderboard` produced for
+    the period — this function is period-agnostic, so the same call
+    works for a week, a month, or a year. ``memberships`` maps
+    ``player_id -> team_id`` and ``team_names`` maps ``team_id -> name``;
+    both come straight from the repository.
+
+    Every team in ``team_names`` appears in the result, including ones
+    whose members all sat the period out (total 0.0) — a team dropping
+    off the board entirely would read as "deleted" rather than "lost".
+    Players with no team are simply skipped; callers that want to show
+    them render an "unteamed" line from the same leaderboard.
+    """
+    totals: Dict[int, float] = {tid: 0.0 for tid in team_names}
+    members: Dict[int, List[PlayerWeeklyStats]] = {tid: [] for tid in team_names}
+    submissions: Dict[int, int] = {tid: 0 for tid in team_names}
+    # Roster size counts every membership row, not just the players who
+    # turned up — that's what makes ``average_points`` honest.
+    roster: Dict[int, int] = {tid: 0 for tid in team_names}
+
+    for team_id in memberships.values():
+        if team_id in roster:
+            roster[team_id] += 1
+
+    stats_by_player = {p.player_id: p for p in leaderboard}
+    for player_id, team_id in memberships.items():
+        if team_id not in totals:
+            continue
+        stats = stats_by_player.get(player_id)
+        if stats is None:
+            continue
+        totals[team_id] += stats.total_points
+        members[team_id].append(stats)
+        submissions[team_id] += stats.submissions
+
+    standings = [
+        TeamStanding(
+            team_id=tid,
+            team_name=team_names[tid],
+            total_points=round(totals[tid], 1),
+            member_count=roster[tid],
+            scoring_members=tuple(
+                sorted(
+                    members[tid],
+                    key=lambda p: (-p.total_points, p.player_id),
+                )
+            ),
+            submissions=submissions[tid],
+        )
+        for tid in team_names
+    ]
+    standings.sort(key=lambda t: (-t.total_points, t.team_id))
+    return standings
 
 
 # ---------------------------------------------------------------------------
