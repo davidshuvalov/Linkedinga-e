@@ -807,10 +807,16 @@ def _handle_wrap(
 
 
 def _fmt_pts(value: float) -> str:
-    """Compact points rendering: ``5`` for ints, ``5.8`` for fractions."""
-    if abs(value - round(value)) < 1e-9:
-        return str(int(round(value)))
-    return f"{value:.1f}"
+    """Compact points rendering: ``5`` for ints, ``5.8`` for fractions.
+
+    Thin alias so the many call sites here stay short; the shared
+    implementation lives in :mod:`app.scheduler` alongside the other
+    point formatters, so the recap and the webhook can't drift apart
+    on rounding.
+    """
+    from .scheduler import compact_points
+
+    return compact_points(value)
 
 
 def _week_filtered_scores(
@@ -945,7 +951,7 @@ def _handle_leaderboard(
         # arrows compare the requested day's board to the preceding
         # day's board (None on Monday → no arrows, by design).
         prior = [s for s in filtered if s.puzzle_date < target_day]
-        from .jobs import absent_player_names_for_week
+        from .jobs import absent_player_names_for_week, safe_team_standings_lines
         from .scheduler import _game_winners_lines, _prize_lines
         from .scoring import prize_allocations, weekly_leaderboard as _score_weekly_lb
         lines = list(_weekly_leaderboard_lines(
@@ -956,6 +962,14 @@ def _handle_leaderboard(
                 repo, target_day, filtered, group_id=group_id
             ),
         ))
+        # Teams lead when the group has them; the individual board
+        # below reads as the breakdown. Same order as the recap/wrap.
+        teams = safe_team_standings_lines(
+            repo, settings, filtered, group_id=group_id,
+            title="Team standings (week):",
+        )
+        if teams:
+            lines = teams + [""] + lines
         winners = _game_winners_lines(filtered)
         if winners:
             lines += [""] + list(winners)
@@ -3019,62 +3033,6 @@ def _team_member_names(
     return memberships, names
 
 
-def _team_standings_lines(
-    repo: Repository,
-    scores: Sequence[ScoreRow],
-    *,
-    group_id: int,
-    title: str,
-) -> List[str]:
-    """Render the team standings block for a slice of scores.
-
-    Returns ``[]`` when the group has no teams, which is what keeps
-    the block invisible for groups that never opted in.
-    """
-    from .scoring import team_standings, weekly_leaderboard
-
-    teams = repo.list_teams(group_id)
-    if not teams:
-        return []
-    memberships, player_names = _team_member_names(repo, group_id=group_id)
-    team_names = {t.id: t.name for t in teams}
-    lb = weekly_leaderboard(list(scores))
-    standings = team_standings(lb, memberships, team_names)
-
-    lines = [title]
-    for i, t in enumerate(standings, start=1):
-        players_word = "player" if t.member_count == 1 else "players"
-        lines.append(
-            f"  {i}. {t.team_name} — {_fmt_pts(t.total_points)} pts "
-            f"({t.member_count} {players_word}, "
-            f"{_fmt_pts(round(t.average_points, 1))} avg)"
-        )
-        scored_ids = {p.player_id for p in t.scoring_members}
-        parts = [
-            f"{p.player_name} {_fmt_pts(p.total_points)}"
-            for p in t.scoring_members
-        ]
-        # Members who sat the period out still show, on 0 — a silent
-        # omission would read as "not on the team".
-        parts += [
-            f"{player_names.get(pid, '?')} 0"
-            for pid, tid in sorted(memberships.items())
-            if tid == t.team_id and pid not in scored_ids
-        ]
-        if parts:
-            lines.append(f"       {' · '.join(parts)}")
-
-    # Anyone in the group who scored but isn't on a team — otherwise
-    # their points vanish from this view with no explanation.
-    unteamed = [p for p in lb if p.player_id not in memberships]
-    if unteamed:
-        listed = " · ".join(
-            f"{p.player_name} {_fmt_pts(p.total_points)}" for p in unteamed
-        )
-        lines.append(f"  Not on a team: {listed}")
-    return lines
-
-
 def _handle_teams_list(repo: Repository, *, group_id: int) -> str:
     """``teams`` — the group's teams and who's on them."""
     teams = repo.list_teams(group_id)
@@ -3362,8 +3320,10 @@ def _handle_team_leaderboard(
         and s.puzzle_date <= today
         and (game is None or s.game == game)
     ]
+    from .jobs import team_standings_lines
+
     scope = f" ({GAME_DISPLAY[game]})" if game else ""
-    lines = _team_standings_lines(
+    lines = team_standings_lines(
         repo, filtered, group_id=group_id,
         title=f"Team standings{scope} — {label}:",
     )

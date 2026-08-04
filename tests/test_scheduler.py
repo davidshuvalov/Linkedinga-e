@@ -48,11 +48,16 @@ class TestDailyRecap:
         out = daily_recap(TUE, scores, ENABLED)
         assert "Daily recap — Tue 14 Apr 2026" in out
         assert "Queens #714" in out
+        # The daily per-game block is compact: one line per game, each
+        # player as "<name> <score> (<points>)" with no "pts" unit —
+        # the unit repeated six times across one line was pure noise.
         # 1st place always hits the +2 cap under competitive_score:
-        # base 5 + 2 = 7.0 pts. Intermediate values depend on the
-        # proportional debit; assert "pts" appears 3x for sanity.
-        assert out.count(" pts)") == 3
-        assert "(7 pts)" in out  # 7.0 → "7 pts" under the clean formatter
+        # base 5 + 2 = 7.0.
+        game_line = next(ln for ln in out.splitlines() if ln.startswith("Queens #714"))
+        assert game_line.count(" · ") == 2  # three players on one line
+        assert "Alice 0:10 (7)" in game_line
+        for name in ("Alice", "Bob", "Charlie"):
+            assert name in game_line
         # "Day totals" was replaced by the cumulative "Week so far"
         # leaderboard — same numbers but framed across the whole week.
         assert "Week so far:" in out
@@ -65,8 +70,8 @@ class TestDailyRecap:
             _row(2, "Bob",   "queens", 714, 20),
         ]
         out = daily_recap(TUE, scores, ENABLED)
-        assert "(5 pts)" in out
-        assert "(4 pts)" in out
+        assert "Alice 0:10 (5)" in out
+        assert "Bob 0:20 (4)" in out
 
     def test_day_totals_include_round_count(self):
         # Suffix is "T: <total time>, G:<submissions>" — submissions

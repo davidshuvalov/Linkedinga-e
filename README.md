@@ -339,6 +339,24 @@ per-game rankings + final week totals + per-game weekly winners +
 three prizes) so the entire end-of-week roundup arrives in one
 forwardable message.
 
+### Message length
+
+The daily recap folds each game's rankings onto **one line**:
+
+```
+Queens #702: Alice 0:51 (5) · Bob 1:04 (4) · Carol 1:17 (3)
+```
+
+rather than a header plus a line per player. Same information, about a
+fifth of the lines — with 5 games and 6 players the old layout spent 35
+lines on that block alone and pushed the message past WhatsApp's
+comfortable length, especially once team standings were added.
+
+The **weekly wrap keeps the roomier one-line-per-player layout** for
+its final-day rankings. It's a once-a-week read, so the extra length
+buys readability there. The `all` / `history` command is likewise
+untouched — it's an explicit "show me everything" request.
+
 In Sydney that means:
 
 - Apr–Oct (AEST + PDT): ~**5pm Sydney every day**.
@@ -481,10 +499,16 @@ player leaderboard — there's no separate scoring path, so a bigger
 roster is a real advantage. The `(N players, X avg)` suffix on each
 row shows the size-adjusted view alongside it.
 
-Once a group has at least one team, the **weekly wrap** gains a "Team
-standings" block at the bottom. `team leaderboard` sits behind the
-same no-peek gate as the player leaderboard (see below); `teams` and
-`team <name>` don't, since a roster carries no scores.
+Once a group has at least one team, a **Team standings** block appears
+automatically in the daily recap, the weekly wrap, and the
+`leaderboard` command — positioned **above** the individual
+leaderboard, since for a group playing in teams the team result is the
+headline and the per-player board is the detail behind it. Groups with
+no teams see no change anywhere.
+
+`team leaderboard` sits behind the same no-peek gate as the player
+leaderboard (see below); `teams` and `team <name>` don't, since a
+roster carries no scores.
 
 **Look at scores**
 
