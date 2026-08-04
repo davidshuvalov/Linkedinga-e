@@ -13,6 +13,7 @@ Three layers get covered here:
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -20,7 +21,7 @@ import pytest
 
 from app.config import Settings
 from app.db import InMemoryRepository, ScoreRow
-from app.jobs import render_wrap
+from app.jobs import render_daily, render_wrap
 from app.puzzles import la_date
 from app.scoring import PlayerWeeklyStats, team_standings, weekly_leaderboard
 from app.webhook import handle_inbound
@@ -632,6 +633,11 @@ class TestTeamIsolation:
 # ---------------------------------------------------------------------------
 
 
+def _block_order(body: str, *headings: str) -> list:
+    """Index of each heading in ``body``, for asserting block order."""
+    return [body.index(h) for h in headings]
+
+
 class TestWrapTeamBlock:
     def test_wrap_gains_a_team_block(self, crew):
         repo, settings, _ = crew
@@ -641,6 +647,40 @@ class TestWrapTeamBlock:
         )
         assert "Team standings:" in body
         assert "1. Reds —" in body
+
+    def test_teams_sit_above_the_individual_board(self, crew):
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        body, _targets = render_wrap(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        teams_at, players_at = _block_order(
+            body, "Team standings:", "Week totals:"
+        )
+        assert teams_at < players_at
+
+    def test_wrap_keeps_the_roomy_per_game_layout(self):
+        """The wrap is a once-a-week read, so it deliberately keeps the
+        one-line-per-player per-game block that the daily recap folds.
+
+        Goes through the formatter directly: the wrap's per-game block
+        covers the week's *final* day, which the shared fixture (Mon +
+        today) doesn't reach.
+        """
+        from app.scheduler import weekly_wrap
+
+        sunday = date(2026, 8, 9)
+        rows = [
+            ScoreRow(1, "Alice", "queens", 706, sunday, 60),
+            ScoreRow(2, "Bob", "queens", 706, sunday, 71),
+        ]
+        body = weekly_wrap(MONDAY, sunday, rows, frozenset({"queens"}))
+        assert "Queens #706" in body
+        # One line per player, each carrying the "pts" unit...
+        assert "  Alice — 1:00 (5 pts)" in body
+        assert "  Bob — 1:11 (4 pts)" in body
+        # ...and no folded "a · b" run anywhere above the totals.
+        assert " · " not in body.split("Week totals:")[0]
 
     def test_wrap_unchanged_without_teams(self, crew):
         repo, settings, _ = crew
@@ -664,3 +704,128 @@ class TestWrapTeamBlock:
         )
         assert "Week totals:" in body
         assert "Team standings" not in body
+
+
+class TestRecapTeamBlock:
+    """Teams in the scheduled / on-demand daily recap."""
+
+    def test_recap_gains_a_team_block(self, crew):
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        assert "Team standings (week):" in body
+        assert "1. Reds —" in body
+
+    def test_teams_sit_above_the_individual_board(self, crew):
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        teams_at, players_at = _block_order(
+            body, "Team standings (week):", "Week so far:"
+        )
+        assert teams_at < players_at
+
+    def test_recap_unchanged_without_teams(self, crew):
+        repo, settings, _ = crew
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        assert "Team standings" not in body
+
+    def test_recap_survives_a_failing_teams_backend(self, crew, monkeypatch):
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice")
+
+        def boom(_group_id):
+            raise RuntimeError("teams table missing")
+
+        monkeypatch.setattr(repo, "list_teams", boom)
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        assert "Week so far:" in body
+        assert "Team standings" not in body
+
+    def test_past_day_recap_excludes_later_scores(self, crew):
+        """A past-day recap's team totals must match the individual
+        board it sits above — both are "as of" that day, so scores
+        submitted after it can't leak in."""
+        repo, settings, players = crew
+        _send(repo, settings, "team Reds: Alice")
+        body, _targets = render_daily(
+            repo, settings, MONDAY, group_id=repo.default_group.id, now=NOW
+        )
+        monday_only = [
+            p.total_points
+            for p in weekly_leaderboard(
+                repo.list_scores(date_from=MONDAY, date_to=MONDAY)
+            )
+            if p.player_id == players["Alice"].id
+        ][0]
+        assert f"1. Reds — {monday_only:g} pts" in body
+
+
+class TestLeaderboardTeamBlock:
+    """Teams in the ``leaderboard`` command."""
+
+    def test_leaderboard_leads_with_teams(self, crew):
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        reply = _send(repo, settings, "leaderboard")
+        teams_at, players_at = _block_order(
+            reply, "Team standings (week):", "Week so far —"
+        )
+        assert teams_at < players_at
+
+    def test_leaderboard_unchanged_without_teams(self, crew):
+        repo, settings, _ = crew
+        reply = _send(repo, settings, "leaderboard")
+        assert "Team standings" not in reply
+        assert reply.startswith("Week so far —")
+
+    def test_per_game_leaderboard_has_no_team_block(self, crew):
+        """``leaderboard queens`` is a single-game view; the team block
+        is week-wide, so mixing them would misread as a per-game team
+        standing."""
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        assert "Team standings" not in _send(repo, settings, "leaderboard queens")
+
+
+class TestCompactDailySections:
+    """The daily per-game block folds onto one line per game."""
+
+    def test_one_line_per_game(self, crew):
+        repo, settings, _ = crew
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        game_lines = [ln for ln in body.splitlines() if ln.startswith("Queens #")]
+        assert len(game_lines) == 1
+        # All four players on that single line.
+        assert game_lines[0].count(" · ") == 3
+        for name in ("Alice", "Bob", "Carol", "Dave"):
+            assert name in game_lines[0]
+
+    def test_scores_and_points_both_survive_the_fold(self, crew):
+        repo, settings, players = crew
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        line = next(ln for ln in body.splitlines() if ln.startswith("Queens #"))
+        # "<name> <formatted score> (<points>)" — Alice is fastest.
+        assert re.search(r"Alice \d+:\d\d \(\d", line)
+
+    def test_recap_is_materially_shorter(self, crew):
+        """The whole point of the fold. A 4-player, 2-game group used
+        to spend 12 lines on the per-game block; now it spends 2."""
+        repo, settings, _ = crew
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        per_game = body.split("Game standings")[0]
+        assert len(per_game.splitlines()) < 8

@@ -44,7 +44,7 @@ from .puzzles import (
     week_bounds,
     year_bounds,
 )
-from .scheduler import daily_recap, weekly_wrap
+from .scheduler import compact_points, daily_recap, weekly_wrap
 from .scoring import PlayerWeeklyStats, weekly_leaderboard
 from .sender import send_dm, send_recap
 
@@ -133,6 +133,17 @@ def render_daily(
         repo, target_day, week_scores, group_id=group_id
     )
 
+    # Standings "as of" target_day, matching the leaderboard the
+    # formatters build — a past-day recap must not fold in scores that
+    # landed after the day it's describing.
+    teams = safe_team_standings_lines(
+        repo, settings,
+        [s for s in week_scores if s.puzzle_date <= target_day],
+        group_id=group_id,
+        title="Team standings:" if _is_sunday(target_day)
+        else "Team standings (week):",
+    )
+
     if _is_sunday(target_day):
         body = weekly_wrap(
             monday, sunday, week_scores,
@@ -141,9 +152,7 @@ def render_daily(
             year_scores=year_scores,
             absent_player_names=absent,
             day_is_complete=day_is_complete,
-        )
-        body = append_team_standings(
-            body, repo, settings, week_scores, group_id=group_id
+            team_lines=teams,
         )
     else:
         body = daily_recap(
@@ -154,6 +163,7 @@ def render_daily(
             include_missing_today_nag=include_missing_today_nag,
             absent_player_names=absent,
             day_is_complete=day_is_complete,
+            team_lines=teams,
         )
 
     dm_targets = repo.list_active_whatsapp_ids(
@@ -185,35 +195,93 @@ def absent_player_names_for_week(
     )
 
 
-def append_team_standings(
-    body: str,
+def team_standings_lines(
     repo: Repository,
-    settings: Settings,
-    week_scores: Sequence[ScoreRow],
+    scores: Sequence[ScoreRow],
     *,
     group_id: int,
-) -> str:
-    """Append the team-standings block to a weekly wrap body.
+    title: str = "Team standings:",
+) -> List[str]:
+    """Render the team-standings block for a slice of scores.
 
-    A no-op for groups with no teams, which is every group until
-    someone runs ``team <name>: ...`` — so the wrap format is
-    unchanged for anyone who hasn't opted in. Failures here are
-    swallowed: a missing teams table (pre-migration schema) must not
-    cost the group its weekly wrap.
+    Returns ``[]`` when the group has no teams, which is what keeps
+    the block invisible for groups that never opted in — and lets
+    every caller decide placement with a plain ``if lines:``.
+
+    Lives here rather than in the pure formatters because it needs
+    repo reads; :mod:`app.scheduler` takes the finished lines as a
+    parameter so it stays I/O-free.
     """
-    from .webhook import _team_standings_lines
+    from .scoring import team_standings
 
+    teams = repo.list_teams(group_id)
+    if not teams:
+        return []
+    memberships = repo.list_team_memberships(group_id)
+    player_names = {
+        p.id: p.display_name for p in repo.list_players_in_group(group_id)
+    }
+    lb = weekly_leaderboard(list(scores))
+    standings = team_standings(lb, memberships, {t.id: t.name for t in teams})
+
+    lines = [title]
+    for i, t in enumerate(standings, start=1):
+        players_word = "player" if t.member_count == 1 else "players"
+        lines.append(
+            f"  {i}. {t.team_name} — {compact_points(t.total_points)} pts "
+            f"({t.member_count} {players_word}, "
+            f"{compact_points(round(t.average_points, 1))} avg)"
+        )
+        scored_ids = {p.player_id for p in t.scoring_members}
+        parts = [
+            f"{p.player_name} {compact_points(p.total_points)}"
+            for p in t.scoring_members
+        ]
+        # Members who sat the period out still show, on 0 — a silent
+        # omission would read as "not on the team".
+        parts += [
+            f"{player_names.get(pid, '?')} 0"
+            for pid, tid in sorted(memberships.items())
+            if tid == t.team_id and pid not in scored_ids
+        ]
+        if parts:
+            lines.append(f"       {' · '.join(parts)}")
+
+    # Anyone in the group who scored but isn't on a team — otherwise
+    # their points vanish from this view with no explanation.
+    unteamed = [p for p in lb if p.player_id not in memberships]
+    if unteamed:
+        listed = " · ".join(
+            f"{p.player_name} {compact_points(p.total_points)}"
+            for p in unteamed
+        )
+        lines.append(f"  Not on a team: {listed}")
+    return lines
+
+
+def safe_team_standings_lines(
+    repo: Repository,
+    settings: Settings,
+    scores: Sequence[ScoreRow],
+    *,
+    group_id: int,
+    title: str = "Team standings:",
+) -> List[str]:
+    """:func:`team_standings_lines` over enabled games only, with
+    failures swallowed.
+
+    The recap and wrap are the group's core output; a missing teams
+    table (pre-migration schema) or any other repo hiccup must not
+    cost them the whole message over a nice-to-have block.
+    """
     try:
-        filtered = [s for s in week_scores if s.game in settings.enabled_games]
-        lines = _team_standings_lines(
-            repo, filtered, group_id=group_id, title="Team standings:"
+        filtered = [s for s in scores if s.game in settings.enabled_games]
+        return team_standings_lines(
+            repo, filtered, group_id=group_id, title=title
         )
     except Exception:  # noqa: BLE001 — teams are a nice-to-have here
-        logger.exception("team standings render failed — omitting from wrap")
-        return body
-    if not lines:
-        return body
-    return body.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n"
+        logger.exception("team standings render failed — omitting block")
+        return []
 
 
 def render_wrap(
@@ -245,9 +313,9 @@ def render_wrap(
             repo, reference_day, week_scores, group_id=group_id
         ),
         day_is_complete=sunday < la_today,
-    )
-    body = append_team_standings(
-        body, repo, settings, week_scores, group_id=group_id
+        team_lines=safe_team_standings_lines(
+            repo, settings, week_scores, group_id=group_id
+        ),
     )
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday, group_id=group_id

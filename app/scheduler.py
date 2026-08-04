@@ -146,6 +146,21 @@ def _pts(points: float) -> str:
     return f"{points:.1f} pts"
 
 
+def compact_points(value: float) -> str:
+    """Bare points value with no unit: ``5`` for integers, ``5.8`` for
+    fractions.
+
+    The counterpart to :func:`_pts` for places that render many values
+    on one line (per-game standings, team rosters) where repeating
+    "pts" every few characters is pure noise. Shared so the daily
+    recap, the team block, and the webhook's inline renders can't
+    drift apart on rounding.
+    """
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    return f"{value:.1f}"
+
+
 def _rounds_word(n: int) -> str:
     """Submissions count (every individual round played). ``distinct_games``
     — the number of *game types* touched — tops out at 7 and undercounts
@@ -184,6 +199,8 @@ def _per_game_sections(
     day: date,
     day_scores: Sequence[ScoreRow],
     active_players: Optional[Dict[int, str]] = None,
+    *,
+    compact: bool = False,
 ) -> List[str]:
     """Build the per-game rankings block for ``day``.
 
@@ -195,6 +212,17 @@ def _per_game_sections(
     When ``active_players`` is provided, any player absent from a game
     group receives a virtual not-played entry (shown as "np") and earns
     the remaining position points shared equally among all absentees.
+
+    ``compact`` folds each game onto a single line::
+
+        Queens #702: Alice 0:51 (5) · Bob 1:04 (4) · Carol 1:17 (3)
+
+    instead of a header plus one line per player. Same information,
+    roughly a fifth of the lines — this block is the bulk of the daily
+    recap, which was running past WhatsApp's comfortable length once
+    team standings were added. The daily recap uses it; the weekly wrap
+    deliberately doesn't, since it's a once-a-week read where the
+    roomier layout is worth the length.
     """
     groups: Dict[Tuple[str, int], List[ScoreRow]] = {}
     for s in day_scores:
@@ -228,6 +256,17 @@ def _per_game_sections(
             else:
                 group_scores = real_scores
             points_map = assign_daily_points(group_scores)
+            if compact:
+                parts = [
+                    f"{s.player_name} "
+                    f"{'np' if s.is_np else format_raw_score(game, s.raw_score)}"
+                    f" ({compact_points(points_map[s.player_id])})"
+                    for s in group_scores
+                ]
+                lines.append(
+                    f"{GAME_DISPLAY[game]} #{key[1]}: " + " · ".join(parts)
+                )
+                continue
             lines.append(f"{GAME_DISPLAY[game]} #{key[1]}")
             for s in group_scores:
                 pts = points_map[s.player_id]
@@ -488,11 +527,7 @@ def _per_game_running_totals(
     if active_players:
         player_names.update(active_players)
 
-    def _compact(val: float) -> str:
-        """Integer-valued totals stay as ``5``; fractional as ``5.8``."""
-        if abs(val - round(val)) < 1e-9:
-            return str(int(round(val)))
-        return f"{val:.1f}"
+    _compact = compact_points
 
     lines: List[str] = ["Game standings (week):"]
     any_rendered = False
@@ -533,6 +568,7 @@ def daily_recap(
     lock_aggregates: bool = False,
     absent_player_names: Optional[Sequence[str]] = None,
     day_is_complete: bool = False,
+    team_lines: Optional[Sequence[str]] = None,
 ) -> str:
     """Format a daily recap for ``day``.
 
@@ -556,6 +592,15 @@ def daily_recap(
     recap when the requester has only partially submitted today's
     games — they see rankings for the games they've played but no
     aggregate competitive data they haven't earned access to yet.
+
+    ``team_lines`` is a pre-rendered team-standings block (see
+    :func:`app.jobs.team_standings_lines`). It's passed in rather than
+    computed here because it needs repo reads and this formatter is
+    pure. When present it sits **above** the "Week so far" leaderboard:
+    for a group that plays in teams the team result is the headline and
+    the individual board is the detail behind it. Groups with no teams
+    pass ``None`` and see no change. Suppressed under
+    ``lock_aggregates`` along with every other aggregate.
     """
     header = f"Daily recap — {day.strftime('%a %d %b %Y')}"
 
@@ -581,6 +626,7 @@ def daily_recap(
     lines.extend(_per_game_sections(
         day, day_scores,
         active_players=None if lock_aggregates else active_players,
+        compact=True,
     ))
 
     if lock_aggregates:
@@ -615,6 +661,11 @@ def daily_recap(
         absent_player_names=absent_player_names,
         active_players=active_players,
     )
+    # Teams first when the group has them — the individual board reads
+    # as the breakdown underneath, not the other way round.
+    if team_lines:
+        lines.append("")
+        lines.extend(team_lines)
     if lb_lines:
         lines.append("")
         lines.extend(lb_lines)
@@ -684,6 +735,7 @@ def weekly_wrap(
     year_scores: Optional[Sequence[ScoreRow]] = None,
     absent_player_names: Optional[Sequence[str]] = None,
     day_is_complete: bool = False,
+    team_lines: Optional[Sequence[str]] = None,
 ) -> str:
     """Format a weekly wrap covering ``[week_start, week_end]`` inclusive.
 
@@ -729,6 +781,13 @@ def weekly_wrap(
         lines.append(f"{week_end.strftime('%a %d %b')}:")
         lines.append("")
         lines.extend(_per_game_sections(week_end, final_day_scores, active_players=active_players))
+        lines.append("")
+
+    # Final team standings, above the individual board — same
+    # reasoning as daily_recap: teams are the headline result for a
+    # group that plays in them.
+    if team_lines:
+        lines.extend(team_lines)
         lines.append("")
 
     # Week totals leaderboard
