@@ -796,36 +796,46 @@ class TestLeaderboardTeamBlock:
         assert "Team standings" not in _send(repo, settings, "leaderboard queens")
 
 
-class TestCompactDailySections:
-    """The daily per-game block folds onto one line per game."""
+class TestDailyPerGameLayout:
+    """The daily per-game block keeps one line per player.
 
-    def test_one_line_per_game(self, crew):
+    A folded one-line-per-game variant was shipped and reverted for
+    being unreadable at six players; these pin the layout so it
+    doesn't drift back by accident.
+    """
+
+    def test_one_line_per_player_under_a_game_heading(self, crew):
         repo, settings, _ = crew
         body, _targets = render_daily(
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
-        game_lines = [ln for ln in body.splitlines() if ln.startswith("Queens #")]
-        assert len(game_lines) == 1
-        # All four players on that single line.
-        assert game_lines[0].count(" · ") == 3
+        lines = body.splitlines()
+        heading_at = next(
+            i for i, ln in enumerate(lines) if ln.startswith("Queens #")
+        )
+        # The heading carries the game and puzzle number only — no
+        # player data folded onto it.
+        assert ":" not in lines[heading_at]
+        player_lines = [
+            ln for ln in lines[heading_at + 1: heading_at + 5]
+            if ln.startswith("  ")
+        ]
+        assert len(player_lines) == 4
         for name in ("Alice", "Bob", "Carol", "Dave"):
-            assert name in game_lines[0]
+            assert any(ln.startswith(f"  {name} — ") for ln in player_lines), name
 
-    def test_scores_and_points_both_survive_the_fold(self, crew):
-        repo, settings, players = crew
+    def test_points_keep_their_unit(self, crew):
+        repo, settings, _ = crew
         body, _targets = render_daily(
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
-        line = next(ln for ln in body.splitlines() if ln.startswith("Queens #"))
-        # "<name> <formatted score> (<points>)" — Alice is fastest.
-        assert re.search(r"Alice \d+:\d\d \(\d", line)
+        assert re.search(r"^  Alice — \d+:\d\d \(\d+(\.\d)? pts\)$",
+                         body, re.MULTILINE)
 
-    def test_recap_is_materially_shorter(self, crew):
-        """The whole point of the fold. A 4-player, 2-game group used
-        to spend 12 lines on the per-game block; now it spends 2."""
+    def test_no_interpunct_folding_anywhere_in_the_per_game_block(self, crew):
         repo, settings, _ = crew
         body, _targets = render_daily(
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
         per_game = body.split("Game standings")[0]
-        assert len(per_game.splitlines()) < 8
+        assert " · " not in per_game

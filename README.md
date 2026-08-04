@@ -341,21 +341,30 @@ forwardable message.
 
 ### Message length
 
-The daily recap folds each game's rankings onto **one line**:
+The daily recap is long — with 5 games and 6 players the per-game
+rankings alone run ~35 lines, and team standings add more.
+
+A folded one-line-per-game layout was tried to fix that:
 
 ```
-Queens #702: Alice 0:51 (5) · Bob 1:04 (4) · Carol 1:17 (3)
+Queens #702: Alice 0:51 (5) · Bob 1:04 (4) · Carol 1:17 (3) · ...
 ```
 
-rather than a header plus a line per player. Same information, about a
-fifth of the lines — with 5 games and 6 players the old layout spent 35
-lines on that block alone and pushed the message past WhatsApp's
-comfortable length, especially once team standings were added.
+It cut the recap from 62 lines to 28, and was **reverted**: at six
+players the line wraps into a dense run of names and interpuncts, and
+picking your own result out of it takes real effort. The per-game
+rankings are the part people actually read, so they keep the room —
 
-The **weekly wrap keeps the roomier one-line-per-player layout** for
-its final-day rankings. It's a once-a-week read, so the extra length
-buys readability there. The `all` / `history` command is likewise
-untouched — it's an explicit "show me everything" request.
+```
+Queens #702
+  Alice — 0:51 (5 pts)
+  Bob — 1:04 (4 pts)
+```
+
+If the recap needs shortening again, cut a *block* rather than
+compressing this one. `Game standings (week)` is the obvious
+candidate: it's a top-3-per-game summary that the `Week so far`
+leaderboard and the `leaderboard <game>` command already cover.
 
 In Sydney that means:
 
