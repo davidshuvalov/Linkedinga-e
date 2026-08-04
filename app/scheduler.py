@@ -199,8 +199,6 @@ def _per_game_sections(
     day: date,
     day_scores: Sequence[ScoreRow],
     active_players: Optional[Dict[int, str]] = None,
-    *,
-    compact: bool = False,
 ) -> List[str]:
     """Build the per-game rankings block for ``day``.
 
@@ -213,16 +211,12 @@ def _per_game_sections(
     group receives a virtual not-played entry (shown as "np") and earns
     the remaining position points shared equally among all absentees.
 
-    ``compact`` folds each game onto a single line::
-
-        Queens #702: Alice 0:51 (5) · Bob 1:04 (4) · Carol 1:17 (3)
-
-    instead of a header plus one line per player. Same information,
-    roughly a fifth of the lines — this block is the bulk of the daily
-    recap, which was running past WhatsApp's comfortable length once
-    team standings were added. The daily recap uses it; the weekly wrap
-    deliberately doesn't, since it's a once-a-week read where the
-    roomier layout is worth the length.
+    One line per player, deliberately. A folded one-line-per-game
+    variant was tried to shorten the daily recap and reverted: at six
+    players the line wrapped into a dense run of "name score (pts)"
+    separated by interpuncts, and finding your own result in it took
+    real effort. This block is the part of the recap people actually
+    read, so it keeps the room. Shorten the recap elsewhere.
     """
     groups: Dict[Tuple[str, int], List[ScoreRow]] = {}
     for s in day_scores:
@@ -256,17 +250,6 @@ def _per_game_sections(
             else:
                 group_scores = real_scores
             points_map = assign_daily_points(group_scores)
-            if compact:
-                parts = [
-                    f"{s.player_name} "
-                    f"{'np' if s.is_np else format_raw_score(game, s.raw_score)}"
-                    f" ({compact_points(points_map[s.player_id])})"
-                    for s in group_scores
-                ]
-                lines.append(
-                    f"{GAME_DISPLAY[game]} #{key[1]}: " + " · ".join(parts)
-                )
-                continue
             lines.append(f"{GAME_DISPLAY[game]} #{key[1]}")
             for s in group_scores:
                 pts = points_map[s.player_id]
@@ -626,7 +609,6 @@ def daily_recap(
     lines.extend(_per_game_sections(
         day, day_scores,
         active_players=None if lock_aggregates else active_players,
-        compact=True,
     ))
 
     if lock_aggregates:
