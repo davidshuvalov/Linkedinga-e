@@ -200,6 +200,39 @@ update groups
 set enabled_games = '["mini_sudoku","patches","queens","tango","zip"]'
 where enabled_games is null;
 
+-- ---------- teams ----------
+-- A team is a named subset of a group whose members' points are
+-- summed into a single standing. Teams live inside a group (two
+-- groups can each have a team called "Reds" without colliding), so
+-- ``name_lower`` is unique per ``group_id`` rather than globally.
+create table if not exists teams (
+    id          bigserial primary key,
+    group_id    bigint      not null references groups(id) on delete cascade,
+    name        text        not null,
+    name_lower  text        not null,
+    created_at  timestamptz not null default now(),
+    unique (group_id, name_lower)
+);
+
+create index if not exists teams_group_id_idx on teams (group_id);
+
+-- Membership is one team per player per group — the unique on
+-- (group_id, player_id) is what makes "add Alice to the Reds" move
+-- her out of whatever team she was in rather than double-count her
+-- points. ``group_id`` is denormalised from ``teams`` so that
+-- constraint can exist at all.
+create table if not exists team_members (
+    id          bigserial primary key,
+    team_id     bigint      not null references teams(id)   on delete cascade,
+    group_id    bigint      not null references groups(id)  on delete cascade,
+    player_id   bigint      not null references players(id) on delete cascade,
+    created_at  timestamptz not null default now(),
+    unique (group_id, player_id)
+);
+
+create index if not exists team_members_team_id_idx  on team_members (team_id);
+create index if not exists team_members_group_id_idx on team_members (group_id);
+
 -- ---------- badges ----------
 -- Persistent achievement rows. badge_kind + game together form the
 -- uniqueness key so a player can hold e.g. centurion for both Queens

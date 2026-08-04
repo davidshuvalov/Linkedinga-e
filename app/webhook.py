@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta
-from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from .config import Settings
-from .db import Group, Repository, ScoreRow
+from .db import Group, Player, Repository, ScoreRow, Team
 from .parsers import (
     GAME_DISPLAY,
     GAME_DISPLAY_ORDER,
@@ -87,6 +87,7 @@ _HELP_TEXT = (
     "  Global:    global · global recap · global week · global times\n"
     "  You:       stats · pb · streak · vs · history · trends · pace\n"
     "             best day · worst day · by day\n"
+    "  Teams:     teams · team <name>: <players> · team leaderboard\n"
     "  Setup:     group · switch · name · notify · undo · track\n"
     "  Misc:      rules · prizes · missing · games\n"
     "  Fun:       brag · gripe · nag · 42\n"
@@ -104,6 +105,15 @@ _ULTRA_HELP_TEXT = (
     "    track all — track all available games\n"
     "    track reset — revert to the global default game set\n"
     "    games — show which games your group is currently tracking\n"
+    "\n"
+    "  Teams (members' points are added together):\n"
+    "    team <name>: <player>, <player> — create a team (or add to it)\n"
+    "    team add <name>: <player>, ... — add more players later\n"
+    "    team remove <player>, ... — take players off their team\n"
+    "    team delete <name> — disband a team (scores are kept)\n"
+    "    teams — list this group's teams and rosters\n"
+    "    team <name> — one team's roster\n"
+    "    team leaderboard [game|month|year] — combined team standings\n"
     "\n"
     "  Leaderboards:\n"
     "    leaderboard — full weekly standings\n"
@@ -193,6 +203,46 @@ _MAX_GROUP_NAME_LENGTH = 40
 # create so the original spelling shows up in replies.
 _GROUP_RE = re.compile(r"^group\s+(\S.*)$", re.IGNORECASE)
 _SWITCH_RE = re.compile(r"^switch\s+(\S.*)$", re.IGNORECASE)
+
+# ---- teams ---------------------------------------------------------------
+# A team is a named subset of one group whose members' points are added
+# together. Same length ceiling reasoning as group names, one notch
+# tighter because team names share a line with the roster in the
+# standings render.
+_MAX_TEAM_NAME_LENGTH = 30
+
+# ``team ...`` / ``teams ...``. Bare ``team`` / ``teams`` is handled
+# separately (it lists the group's teams) so this only matches the
+# argument-carrying forms.
+_TEAM_RE = re.compile(r"^teams?\s+(\S.*)$", re.IGNORECASE)
+
+# Sub-command verbs. Reserved as team names too — ``team add`` has to
+# mean "add members", so a team *called* "add" would be unreachable.
+_TEAM_LEADERBOARD_WORDS = frozenset({"leaderboard", "standings", "table"})
+_TEAM_DELETE_WORDS = frozenset({"delete", "disband", "drop"})
+_TEAM_RESERVED_NAMES = (
+    _TEAM_LEADERBOARD_WORDS
+    | _TEAM_DELETE_WORDS
+    | frozenset({
+        "add", "remove", "leave", "kick", "help", "list",
+        "week", "month", "mtd", "year", "ytd",
+    })
+)
+
+# Separators between the team name and its member list. Colon is the
+# documented form; ``=`` and ``-`` are accepted because people type
+# them interchangeably in chat.
+_TEAM_NAME_SEP_RE = re.compile(r"\s*[:=]\s*|\s+-\s+")
+
+# Members are comma-separated in the documented form. ``and`` / ``&``
+# are normalised to commas first so "Alice and Bob" works, and a list
+# with no commas at all falls back to whitespace splitting so
+# ``team reds alice bob`` does the obvious thing.
+_TEAM_MEMBER_AND_RE = re.compile(r"\s*(?:,|&|\band\b|\+|\n)\s*", re.IGNORECASE)
+
+# ``me`` / ``myself`` resolve to the sender, so you can put yourself on
+# a team without typing your own display name.
+_TEAM_SELF_WORDS = frozenset({"me", "myself", "i"})
 
 # Format hint when a message looks score-ish but didn't parse. Doesn't
 # dump the full command list — the user clearly meant to submit a score.
@@ -2808,6 +2858,583 @@ def _handle_switch(
     )
 
 
+# ---------------------------------------------------------------------------
+# Teams — named subsets of a group whose members' points are added up
+# ---------------------------------------------------------------------------
+
+
+_TEAM_USAGE = (
+    "Teams add their members' points together into one standing.\n"
+    "\n"
+    "  team <name>: <player>, <player> — create a team (or add to it)\n"
+    "  team add <name>: <player>, ... — add more players later\n"
+    "  team remove <player>, ... — take players off their team\n"
+    "  team delete <name> — disband a team\n"
+    "  teams — list the teams in your group\n"
+    "  team <name> — one team's roster\n"
+    "  team leaderboard [game|month|year] — team standings\n"
+    "\n"
+    "E.g. `team Reds: Alice, Bob, me`. Players must already be in "
+    "your group. Everyone can be on one team at a time; adding "
+    "someone to a second team moves them."
+)
+
+
+def _validate_team_name(raw: str) -> Tuple[Optional[str], Optional[str]]:
+    """Strip + validate a team name. Returns ``(name, error)`` with
+    exactly one non-None, same contract as :func:`_validate_group_name`.
+
+    Sub-command verbs are rejected outright: ``team add`` already
+    means "add members", so a team called "add" could never be
+    addressed again.
+    """
+    name = raw.strip()
+    if not name:
+        return None, "Team name can't be empty. Use: team <name>: <players>"
+    if len(name) > _MAX_TEAM_NAME_LENGTH:
+        return (
+            None,
+            f"Team name too long ({len(name)} chars; "
+            f"max {_MAX_TEAM_NAME_LENGTH}).",
+        )
+    if name.lower() in _TEAM_RESERVED_NAMES:
+        return (
+            None,
+            f"`{name}` is a team command, so it can't be a team name. "
+            "Pick something else.",
+        )
+    return name, None
+
+
+def _split_member_names(raw: str) -> List[str]:
+    """Split a member list into individual names.
+
+    Commas are the documented separator; ``and`` / ``&`` / ``+`` /
+    newlines are normalised to commas so chat-shaped input works. A
+    list with no separator at all falls back to whitespace splitting,
+    which is what makes ``team reds alice bob`` do the obvious thing —
+    at the cost of not supporting spaces in names in that form, hence
+    the comma form in the docs.
+
+    De-duplicates case-insensitively, preserving first-seen order.
+    """
+    parts = [p.strip() for p in _TEAM_MEMBER_AND_RE.split(raw)]
+    parts = [p for p in parts if p]
+    if len(parts) <= 1:
+        parts = [p for p in raw.split() if p]
+    seen: set = set()
+    out: List[str] = []
+    for p in parts:
+        if p.lower() in seen:
+            continue
+        seen.add(p.lower())
+        out.append(p)
+    return out
+
+
+def _parse_team_create(rest: str) -> Tuple[str, List[str]]:
+    """Split ``<name>: <p1>, <p2>`` into ``(name, member_names)``.
+
+    Falls back to "first word is the name, the rest are members" when
+    there's no ``:`` / ``=`` separator, so single-word team names can
+    skip the punctuation. Returns an empty member list when only a
+    name was given — the caller decides whether that's a lookup or an
+    error.
+    """
+    split = _TEAM_NAME_SEP_RE.split(rest, maxsplit=1)
+    if len(split) == 2:
+        return split[0].strip(), _split_member_names(split[1])
+    head, _, tail = rest.partition(" ")
+    return head.strip(), _split_member_names(tail)
+
+
+def _resolve_team_members(
+    repo: Repository,
+    names: Sequence[str],
+    *,
+    group_id: int,
+    sender_player_id: int,
+) -> Tuple[List[Player], List[str]]:
+    """Match display names to players in the group.
+
+    Returns ``(matched, unknown)``. Matching is case-insensitive and
+    exact first; a name that matches exactly one player as a prefix
+    also resolves, so ``Alex`` finds ``Alexandra`` when she's the only
+    Alex. ``me`` / ``myself`` / ``i`` resolve to the sender.
+    """
+    roster = repo.list_players_in_group(group_id)
+    by_lower: Dict[str, List[Player]] = {}
+    for p in roster:
+        by_lower.setdefault(p.display_name.strip().lower(), []).append(p)
+
+    matched: List[Player] = []
+    unknown: List[str] = []
+    seen_ids: set = set()
+    for raw in names:
+        key = raw.strip().lower()
+        found: Optional[Player] = None
+        if key in _TEAM_SELF_WORDS:
+            found = next((p for p in roster if p.id == sender_player_id), None)
+        elif key in by_lower:
+            found = by_lower[key][0]
+        else:
+            prefixed = [
+                p for p in roster
+                if p.display_name.strip().lower().startswith(key)
+            ]
+            if len(prefixed) == 1:
+                found = prefixed[0]
+        if found is None:
+            unknown.append(raw.strip())
+        elif found.id not in seen_ids:
+            seen_ids.add(found.id)
+            matched.append(found)
+    return matched, unknown
+
+
+def _unknown_members_reply(
+    repo: Repository, unknown: Sequence[str], *, group_id: int
+) -> str:
+    """Error listing the names that didn't match, plus the roster so
+    the sender can see the spelling the bot knows them by."""
+    roster = repo.list_players_in_group(group_id)
+    known = ", ".join(sorted((p.display_name for p in roster), key=str.lower))
+    plural = "players" if len(unknown) > 1 else "player"
+    return (
+        f"Couldn't find {plural}: {', '.join(unknown)}.\n"
+        f"In your group: {known or '(nobody yet)'}\n"
+        "Everyone has to join the group before they can be put on a team."
+    )
+
+
+def _team_member_names(
+    repo: Repository, *, group_id: int
+) -> Tuple[Dict[int, int], Dict[int, str]]:
+    """``(memberships, player_names)`` for one group — the two lookups
+    every team render needs, fetched once."""
+    memberships = repo.list_team_memberships(group_id)
+    names = {
+        p.id: p.display_name for p in repo.list_players_in_group(group_id)
+    }
+    return memberships, names
+
+
+def _team_standings_lines(
+    repo: Repository,
+    scores: Sequence[ScoreRow],
+    *,
+    group_id: int,
+    title: str,
+) -> List[str]:
+    """Render the team standings block for a slice of scores.
+
+    Returns ``[]`` when the group has no teams, which is what keeps
+    the block invisible for groups that never opted in.
+    """
+    from .scoring import team_standings, weekly_leaderboard
+
+    teams = repo.list_teams(group_id)
+    if not teams:
+        return []
+    memberships, player_names = _team_member_names(repo, group_id=group_id)
+    team_names = {t.id: t.name for t in teams}
+    lb = weekly_leaderboard(list(scores))
+    standings = team_standings(lb, memberships, team_names)
+
+    lines = [title]
+    for i, t in enumerate(standings, start=1):
+        players_word = "player" if t.member_count == 1 else "players"
+        lines.append(
+            f"  {i}. {t.team_name} — {_fmt_pts(t.total_points)} pts "
+            f"({t.member_count} {players_word}, "
+            f"{_fmt_pts(round(t.average_points, 1))} avg)"
+        )
+        scored_ids = {p.player_id for p in t.scoring_members}
+        parts = [
+            f"{p.player_name} {_fmt_pts(p.total_points)}"
+            for p in t.scoring_members
+        ]
+        # Members who sat the period out still show, on 0 — a silent
+        # omission would read as "not on the team".
+        parts += [
+            f"{player_names.get(pid, '?')} 0"
+            for pid, tid in sorted(memberships.items())
+            if tid == t.team_id and pid not in scored_ids
+        ]
+        if parts:
+            lines.append(f"       {' · '.join(parts)}")
+
+    # Anyone in the group who scored but isn't on a team — otherwise
+    # their points vanish from this view with no explanation.
+    unteamed = [p for p in lb if p.player_id not in memberships]
+    if unteamed:
+        listed = " · ".join(
+            f"{p.player_name} {_fmt_pts(p.total_points)}" for p in unteamed
+        )
+        lines.append(f"  Not on a team: {listed}")
+    return lines
+
+
+def _handle_teams_list(repo: Repository, *, group_id: int) -> str:
+    """``teams`` — the group's teams and who's on them."""
+    teams = repo.list_teams(group_id)
+    if not teams:
+        return (
+            "No teams in this group yet.\n"
+            "\n" + _TEAM_USAGE
+        )
+    memberships, player_names = _team_member_names(repo, group_id=group_id)
+    lines = [f"Teams ({len(teams)}):"]
+    for t in teams:
+        members = sorted(
+            (player_names.get(pid, "?") for pid, tid in memberships.items()
+             if tid == t.id),
+            key=str.lower,
+        )
+        roster = ", ".join(members) if members else "(nobody yet)"
+        lines.append(f"  {t.name}: {roster}")
+    unteamed = sorted(
+        (name for pid, name in player_names.items() if pid not in memberships),
+        key=str.lower,
+    )
+    if unteamed:
+        lines.append("")
+        lines.append(f"Not on a team: {', '.join(unteamed)}")
+    lines.append("")
+    lines.append("`team leaderboard` for combined standings.")
+    return "\n".join(lines)
+
+
+def _handle_team_create(
+    repo: Repository,
+    raw_rest: str,
+    *,
+    group_id: int,
+    sender_player_id: int,
+    require_existing: bool = False,
+) -> str:
+    """``team <name>: <players>`` — create the team (or add to it).
+
+    With ``require_existing`` (the ``team add <name>: ...`` route) an
+    unknown team name is an error instead of a silent create, mirroring
+    how ``switch`` guards against typos spawning groups.
+    """
+    raw_name, member_names = _parse_team_create(raw_rest)
+    name, error = _validate_team_name(raw_name)
+    if error is not None:
+        return error
+    assert name is not None
+
+    existing = repo.find_team_by_name(group_id=group_id, name=name)
+    if require_existing and existing is None:
+        return (
+            f"No team called `{name}` in this group. "
+            f"Run `team {name}: <players>` to create it."
+        )
+    if not member_names:
+        if existing is not None:
+            return _handle_team_show(
+                repo, existing, group_id=group_id
+            )
+        return (
+            f"Who's on `{name}`? Try: team {name}: Alice, Bob\n"
+            "Separate names with commas."
+        )
+
+    matched, unknown = _resolve_team_members(
+        repo, member_names, group_id=group_id,
+        sender_player_id=sender_player_id,
+    )
+    if unknown:
+        return _unknown_members_reply(repo, unknown, group_id=group_id)
+
+    team = existing or repo.create_team(group_id=group_id, name=name)
+    memberships = repo.list_team_memberships(group_id)
+    moved: List[str] = []
+    added: List[str] = []
+    already: List[str] = []
+    other_team_names = {
+        t.id: t.name for t in repo.list_teams(group_id) if t.id != team.id
+    }
+    for player in matched:
+        previous = memberships.get(player.id)
+        if previous == team.id:
+            already.append(player.display_name)
+            continue
+        repo.add_team_member(
+            team_id=team.id, group_id=group_id, player_id=player.id
+        )
+        if previous in other_team_names:
+            moved.append(f"{player.display_name} (from {other_team_names[previous]})")
+        else:
+            added.append(player.display_name)
+
+    if not added and not moved:
+        # Nothing changed — an "Added to ..." header here would read as
+        # a lie, so say what actually happened instead.
+        return (
+            f"{', '.join(already)} "
+            f"{'is' if len(already) == 1 else 'are'} already on "
+            f"`{team.name}`. Send `team {team.name}` for the roster."
+        )
+
+    lines = [
+        f"Added to `{team.name}`:" if existing is not None
+        else f"Created team `{team.name}`:"
+    ]
+    if added:
+        lines.append(f"  {', '.join(added)}")
+    if moved:
+        lines.append(f"  Moved over: {', '.join(moved)}")
+    if already:
+        lines.append(f"  Already there: {', '.join(already)}")
+    lines.append("")
+    lines.append(
+        "Their points are added together from here — "
+        "`team leaderboard` for the combined standings."
+    )
+    return "\n".join(lines)
+
+
+def _handle_team_show(
+    repo: Repository, team: Team, *, group_id: int
+) -> str:
+    """One team's roster. Points come from ``team leaderboard`` — this
+    is the "who's on it" view."""
+    memberships, player_names = _team_member_names(repo, group_id=group_id)
+    members = sorted(
+        (player_names.get(pid, "?") for pid, tid in memberships.items()
+         if tid == team.id),
+        key=str.lower,
+    )
+    if not members:
+        return (
+            f"`{team.name}` has no players yet. "
+            f"Add some with: team add {team.name}: Alice, Bob"
+        )
+    return (
+        f"{team.name} ({len(members)}):\n"
+        + "\n".join(f"  - {m}" for m in members)
+        + "\n\n`team leaderboard` for combined standings."
+    )
+
+
+def _handle_team_remove(
+    repo: Repository,
+    raw_rest: str,
+    *,
+    group_id: int,
+    sender_player_id: int,
+) -> str:
+    """``team remove <players>`` — take players off whatever team
+    they're on. Doesn't touch their scores."""
+    member_names = _split_member_names(raw_rest)
+    if not member_names:
+        return "Usage: team remove <player>, <player>"
+    matched, unknown = _resolve_team_members(
+        repo, member_names, group_id=group_id,
+        sender_player_id=sender_player_id,
+    )
+    if unknown:
+        return _unknown_members_reply(repo, unknown, group_id=group_id)
+    removed: List[str] = []
+    untouched: List[str] = []
+    for player in matched:
+        if repo.remove_team_member(group_id=group_id, player_id=player.id):
+            removed.append(player.display_name)
+        else:
+            untouched.append(player.display_name)
+    if not removed:
+        return f"{', '.join(untouched)} wasn't on a team to begin with."
+    lines = [f"Removed from their team: {', '.join(removed)}"]
+    if untouched:
+        lines.append(f"Not on a team anyway: {', '.join(untouched)}")
+    lines.append("Their scores are untouched — only the team link is gone.")
+    return "\n".join(lines)
+
+
+def _handle_team_delete(
+    repo: Repository, raw_name: str, *, group_id: int
+) -> str:
+    """``team delete <name>`` — disband a team, keeping every score."""
+    name = raw_name.strip()
+    if not name:
+        return "Usage: team delete <name>"
+    team = repo.find_team_by_name(group_id=group_id, name=name)
+    if team is None:
+        return f"No team called `{name}` in this group. Send `teams` to see them."
+    memberships = repo.list_team_memberships(group_id)
+    member_count = sum(1 for tid in memberships.values() if tid == team.id)
+    repo.delete_team(team.id)
+    players_word = "player" if member_count == 1 else "players"
+    return (
+        f"Disbanded `{team.name}` ({member_count} {players_word} freed up). "
+        "All their scores stay exactly where they were."
+    )
+
+
+def _parse_team_leaderboard_scope(
+    words: Sequence[str],
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """Parse the optional scope after ``team leaderboard``.
+
+    Returns ``(period, game, error)`` where ``period`` is one of
+    ``week`` / ``month`` / ``year`` and ``game`` is a game key or
+    ``None``. Both can be given in either order
+    (``team leaderboard month queens``).
+    """
+    period = "week"
+    game: Optional[str] = None
+    for word in words:
+        if word in ("week", "wk", "this week"):
+            period = "week"
+        elif word in ("month", "mtd"):
+            period = "month"
+        elif word in ("year", "ytd"):
+            period = "year"
+        else:
+            key = _parse_single_game_key(word)
+            if key is None:
+                return period, game, (
+                    f"Don't know `{word}`. Try: team leaderboard, "
+                    "team leaderboard queens, team leaderboard month."
+                )
+            game = key
+    return period, game, None
+
+
+def _handle_team_leaderboard(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    raw_rest: str,
+    *,
+    group_id: int,
+    from_: Optional[str],
+    profile_name: str,
+) -> str:
+    """``team leaderboard [game] [month|year]`` — combined standings.
+
+    Each team's points are its members' points added together, over
+    the requested period. Gated by the same no-peek rule as the player
+    leaderboard when the period includes today, since it exposes the
+    same day's results.
+    """
+    if settings is None:
+        return "Team standings aren't available in this context."
+    words = [w for w in raw_rest.strip().lower().split() if w]
+    period, game, error = _parse_team_leaderboard_scope(words)
+    if error is not None:
+        return error
+
+    if not repo.list_teams(group_id):
+        return (
+            "No teams in this group yet.\n"
+            "\n" + _TEAM_USAGE
+        )
+
+    today = la_date(now)
+    if period == "month":
+        start, end = month_bounds(today)
+        label = today.strftime("%B %Y")
+    elif period == "year":
+        start, end = year_bounds(today)
+        label = today.strftime("%Y")
+    else:
+        start, end = week_bounds(today)
+        label = f"week of {start.strftime('%a %d %b %Y')}"
+
+    # Every period here runs up to today, so the no-peek gate applies
+    # to all three — the standings would otherwise leak today's
+    # results to someone who hasn't played.
+    if from_ is not None and settings.enabled_games:
+        played = _games_played_today_by(
+            repo, from_, profile_name, today, settings.enabled_games,
+            group_id=group_id,
+        )
+        if played != set(settings.enabled_games):
+            return _no_peek_leaderboard(played, settings.enabled_games)
+
+    scores = repo.list_scores(date_from=start, date_to=end, group_id=group_id)
+    filtered = [
+        s for s in scores
+        if s.game in settings.enabled_games
+        and s.puzzle_date <= today
+        and (game is None or s.game == game)
+    ]
+    scope = f" ({GAME_DISPLAY[game]})" if game else ""
+    lines = _team_standings_lines(
+        repo, filtered, group_id=group_id,
+        title=f"Team standings{scope} — {label}:",
+    )
+    if not lines:
+        return "No teams in this group yet. Send `team` for how to make one."
+    if not filtered:
+        lines.append("")
+        lines.append("(No scores in this period yet.)")
+    return "\n".join(lines)
+
+
+def _handle_team(
+    repo: Repository,
+    settings: Optional[Settings],
+    now: datetime,
+    raw_rest: str,
+    *,
+    group_id: int,
+    sender_player_id: int,
+    from_: str,
+    profile_name: str,
+) -> str:
+    """Dispatcher for everything under the ``team`` / ``teams`` verb.
+
+    ``raw_rest`` is the message with the leading verb stripped, in its
+    original casing — team names are stored as typed.
+    """
+    rest = raw_rest.strip()
+    if not rest:
+        return _handle_teams_list(repo, group_id=group_id)
+
+    head, _, tail = rest.partition(" ")
+    head_lower = head.lower()
+
+    if head_lower in ("help", "?"):
+        return _TEAM_USAGE
+    if head_lower == "list":
+        return _handle_teams_list(repo, group_id=group_id)
+    if head_lower in _TEAM_LEADERBOARD_WORDS:
+        return _handle_team_leaderboard(
+            repo, settings, now, tail, group_id=group_id,
+            from_=from_, profile_name=profile_name,
+        )
+    # ``team month`` / ``team year`` / ``team queens`` — leaderboard
+    # scopes usable without spelling out "leaderboard".
+    if head_lower in ("week", "month", "mtd", "year", "ytd") or (
+        _parse_single_game_key(head_lower) is not None
+        and repo.find_team_by_name(group_id=group_id, name=head) is None
+    ):
+        return _handle_team_leaderboard(
+            repo, settings, now, rest, group_id=group_id,
+            from_=from_, profile_name=profile_name,
+        )
+    if head_lower == "add":
+        return _handle_team_create(
+            repo, tail, group_id=group_id,
+            sender_player_id=sender_player_id, require_existing=True,
+        )
+    if head_lower in ("remove", "leave", "kick"):
+        return _handle_team_remove(
+            repo, tail, group_id=group_id,
+            sender_player_id=sender_player_id,
+        )
+    if head_lower in _TEAM_DELETE_WORDS:
+        return _handle_team_delete(repo, tail, group_id=group_id)
+
+    return _handle_team_create(
+        repo, rest, group_id=group_id, sender_player_id=sender_player_id,
+    )
+
+
 def _onboarding_prompt() -> str:
     """Welcome message for un-onboarded senders. Combines the
     group-pick instruction with a short tour of how the bot works
@@ -3123,6 +3750,18 @@ def handle_inbound(
         return _handle_missing(repo, settings, now, group_id=group_id)
     if lower in ("games", "enabled"):
         return _handle_games(settings, group=sender_group)
+    # ``team`` / ``teams`` — named subsets of the group whose members'
+    # points are added together. Checked before the generic parsers
+    # below so a team name can't be swallowed by a date / game match.
+    if lower in ("team", "teams"):
+        return _handle_teams_list(repo, group_id=group_id)
+    team_match = _TEAM_RE.match(body_stripped)
+    if team_match is not None:
+        return _handle_team(
+            repo, settings, now, team_match.group(1),
+            group_id=group_id, sender_player_id=sender.id,
+            from_=from_, profile_name=profile_name,
+        )
     if lower in ("track", "tracking") or lower.startswith("track "):
         raw_args = lower[len("track"):].strip() if lower.startswith("track") else ""
         return _handle_track(repo, settings, sender_group, raw_args)

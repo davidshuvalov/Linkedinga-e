@@ -134,6 +134,13 @@ Tables:
 - `recap_log(id, group_id, recap_date, recap_type, sent_at)` with
   `UNIQUE(group_id, recap_date, recap_type)` so per-group recap
   idempotency doesn't collide across groups.
+- `teams(id, group_id, name, name_lower, created_at)` with
+  `UNIQUE(group_id, name_lower)` — a team is a named subset of one
+  group, so two groups can each run a team called "Reds".
+- `team_members(id, team_id, group_id, player_id, created_at)` with
+  `UNIQUE(group_id, player_id)` — that unique is what enforces one
+  team per player per group, so adding someone to a second team
+  moves them rather than double-counting their points.
 - `unparsed_messages(id, whatsapp_id, body, created_at)` — captures share-text
   that looked like a score but failed parsing, so we can tune regexes when
   LinkedIn changes their format.
@@ -440,6 +447,44 @@ dispatch.
 | ----------------- | -------- |
 | `group <name>`    | Create a new group with that name **or** join an existing one (case-insensitive lookup). Onboards the sender so the rest of the commands unlock. |
 | `switch <name>`   | Move to a different existing group. Errors with a hint to use `group <name>` if the target doesn't exist. **Past scores stay in the group they were earned in** — switching is forward-only. |
+
+**Teams**
+
+A team is a named subset of a group whose members' points are **added
+together** into a single standing. Teams are optional — a group with
+no teams behaves exactly as before, and the team block simply doesn't
+appear anywhere.
+
+Each player is on at most one team per group, so adding someone to a
+second team *moves* them rather than counting their points twice.
+Teams are group-scoped: two groups can each have a "Reds" without
+colliding, and you can't put someone from another group on your team.
+
+| Command | Response |
+| ------- | -------- |
+| `team <name>: <player>, <player>` | Create a team with those players. If the team already exists, adds them to it. Names are matched case-insensitively against your group's players; `me` means you. Every name has to resolve or nothing is written. |
+| `team add <name>: <player>, ...` | Add players to an **existing** team. Errors if the team doesn't exist (the strict sibling of the create-or-add form, same as `switch` vs `group`). |
+| `team remove <player>, ...` | Take players off whatever team they're on. Scores are untouched. |
+| `team delete <name>` / `team disband <name>` | Disband a team. Every score stays exactly where it was. |
+| `teams` | List this group's teams, their rosters, and anyone not on a team. |
+| `team <name>` | One team's roster. |
+| `team leaderboard` / `team standings` | Combined team standings for the week — each team's total, roster size, points-per-player, and the per-member breakdown. Anyone with points but no team gets a "Not on a team" line so their score doesn't just vanish. |
+| `team leaderboard <game>` | Same, restricted to one game (e.g. `team leaderboard queens`). |
+| `team month` / `team year` | Same, over the month or year to date. |
+
+Separators are flexible: `team Reds: Alice, Bob`, `team Reds: Alice and
+Bob`, and `team Reds Alice Bob` all work. Use the colon form for team
+names with spaces in them.
+
+A team's total is the plain sum of its members' points on the ordinary
+player leaderboard — there's no separate scoring path, so a bigger
+roster is a real advantage. The `(N players, X avg)` suffix on each
+row shows the size-adjusted view alongside it.
+
+Once a group has at least one team, the **weekly wrap** gains a "Team
+standings" block at the bottom. `team leaderboard` sits behind the
+same no-peek gate as the player leaderboard (see below); `teams` and
+`team <name>` don't, since a roster carries no scores.
 
 **Look at scores**
 

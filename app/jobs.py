@@ -142,6 +142,9 @@ def render_daily(
             absent_player_names=absent,
             day_is_complete=day_is_complete,
         )
+        body = append_team_standings(
+            body, repo, settings, week_scores, group_id=group_id
+        )
     else:
         body = daily_recap(
             target_day, week_scores,
@@ -182,6 +185,37 @@ def absent_player_names_for_week(
     )
 
 
+def append_team_standings(
+    body: str,
+    repo: Repository,
+    settings: Settings,
+    week_scores: Sequence[ScoreRow],
+    *,
+    group_id: int,
+) -> str:
+    """Append the team-standings block to a weekly wrap body.
+
+    A no-op for groups with no teams, which is every group until
+    someone runs ``team <name>: ...`` — so the wrap format is
+    unchanged for anyone who hasn't opted in. Failures here are
+    swallowed: a missing teams table (pre-migration schema) must not
+    cost the group its weekly wrap.
+    """
+    from .webhook import _team_standings_lines
+
+    try:
+        filtered = [s for s in week_scores if s.game in settings.enabled_games]
+        lines = _team_standings_lines(
+            repo, filtered, group_id=group_id, title="Team standings:"
+        )
+    except Exception:  # noqa: BLE001 — teams are a nice-to-have here
+        logger.exception("team standings render failed — omitting from wrap")
+        return body
+    if not lines:
+        return body
+    return body.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n"
+
+
 def render_wrap(
     repo: Repository,
     settings: Settings,
@@ -211,6 +245,9 @@ def render_wrap(
             repo, reference_day, week_scores, group_id=group_id
         ),
         day_is_complete=sunday < la_today,
+    )
+    body = append_team_standings(
+        body, repo, settings, week_scores, group_id=group_id
     )
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday, group_id=group_id
