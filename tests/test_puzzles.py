@@ -25,9 +25,36 @@ SYDNEY = ZoneInfo("Australia/Sydney")
 LA = ZoneInfo("America/Los_Angeles")
 
 
+def _la_noon(day: date) -> datetime:
+    """Midday LA on ``day`` — far enough from either midnight that no
+    DST transition can shift which LA date it lands on."""
+    return datetime(day.year, day.month, day.day, 12, 0, tzinfo=LA)
+
+
 class TestEpochCoverage:
     def test_every_game_has_an_epoch(self):
         assert set(PUZZLE_EPOCH) == set(GAMES)
+
+    def test_games_may_pin_different_reference_dates(self):
+        """Each game's epoch is independent, and at least one game
+        genuinely differs.
+
+        Most games were pinned together on 2026-04-22, but Wend
+        launched later and is pinned to its own first-puzzle date.
+        The delta arithmetic is per-game, so a shared anchor is never
+        safe to assume — the tests below anchor on each game's own
+        reference date for exactly this reason.
+        """
+        ref_dates = {ref_date for ref_date, _ in PUZZLE_EPOCH.values()}
+        assert len(ref_dates) > 1
+
+    def test_wend_epoch_is_pinned_to_its_launch(self):
+        """Pinned deliberately: Wend #1 was confirmed live on
+        2026-06-09 (back-solved from Wend #8 on 2026-06-16 and
+        cross-checked against Patches). Changing this shifts every
+        Wend submission onto a different day, so it should only move
+        with fresh evidence from a real share."""
+        assert PUZZLE_EPOCH["wend"] == (date(2026, 6, 9), 1)
 
 
 class TestLaDate:
@@ -48,20 +75,23 @@ class TestLaDate:
 
 
 class TestExpectedPuzzleNo:
+    """Each case anchors on the game's *own* reference date. Anchoring
+    every game on one shared date only worked while they happened to
+    share one, and broke the moment Wend was pinned to its real launch
+    day — a false failure that said nothing about the epoch math."""
+
     def test_reference_date_returns_reference_number(self):
-        # Midday LA on 22 Apr 2026 is unambiguously the reference day.
-        ts = datetime(2026, 4, 22, 12, 0, tzinfo=LA)
-        for game, (_, ref_no) in PUZZLE_EPOCH.items():
-            assert expected_puzzle_no(game, ts) == ref_no
+        for game, (ref_date, ref_no) in PUZZLE_EPOCH.items():
+            assert expected_puzzle_no(game, _la_noon(ref_date)) == ref_no
 
     def test_one_day_later_increments_by_one(self):
-        ts = datetime(2026, 4, 23, 12, 0, tzinfo=LA)
-        for game, (_, ref_no) in PUZZLE_EPOCH.items():
+        for game, (ref_date, ref_no) in PUZZLE_EPOCH.items():
+            ts = _la_noon(ref_date + timedelta(days=1))
             assert expected_puzzle_no(game, ts) == ref_no + 1
 
     def test_one_day_earlier_decrements_by_one(self):
-        ts = datetime(2026, 4, 21, 12, 0, tzinfo=LA)
-        for game, (_, ref_no) in PUZZLE_EPOCH.items():
+        for game, (ref_date, ref_no) in PUZZLE_EPOCH.items():
+            ts = _la_noon(ref_date - timedelta(days=1))
             assert expected_puzzle_no(game, ts) == ref_no - 1
 
     def test_sydney_4pm_is_still_yesterdays_puzzle(self):
@@ -83,10 +113,11 @@ class TestExpectedPuzzleNo:
             expected_puzzle_no("not_a_real_game", ts)
 
     def test_weekly_span(self):
-        """Day deltas work cleanly across a week."""
-        for delta in range(-30, 31):
-            ts = datetime(2026, 4, 22, 12, 0, tzinfo=LA) + timedelta(days=delta)
-            for game, (_, ref_no) in PUZZLE_EPOCH.items():
+        """Day deltas work cleanly a month either side of each game's
+        own epoch, including across the DST boundaries in that span."""
+        for game, (ref_date, ref_no) in PUZZLE_EPOCH.items():
+            for delta in range(-30, 31):
+                ts = _la_noon(ref_date + timedelta(days=delta))
                 assert expected_puzzle_no(game, ts) == ref_no + delta
 
 
