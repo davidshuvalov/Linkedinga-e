@@ -44,7 +44,7 @@ from .puzzles import (
     week_bounds,
     year_bounds,
 )
-from .scheduler import compact_points, daily_recap, weekly_wrap
+from .scheduler import TeamView, daily_recap, weekly_wrap
 from .scoring import PlayerWeeklyStats, weekly_leaderboard
 from .sender import send_dm, send_recap
 
@@ -133,16 +133,10 @@ def render_daily(
         repo, target_day, week_scores, group_id=group_id
     )
 
-    # Standings "as of" target_day, matching the leaderboard the
-    # formatters build — a past-day recap must not fold in scores that
-    # landed after the day it's describing.
-    teams = safe_team_standings_lines(
-        repo, settings,
-        [s for s in week_scores if s.puzzle_date <= target_day],
-        group_id=group_id,
-        title="Team standings:" if _is_sunday(target_day)
-        else "Team standings (week):",
-    )
+    # Rosters only — the formatters fold them against the same "as of
+    # target_day" leaderboard they render, so a past-day recap's team
+    # totals can't pick up scores that landed after the day it describes.
+    teams = safe_team_view(repo, group_id=group_id)
 
     if _is_sunday(target_day):
         body = weekly_wrap(
@@ -152,7 +146,7 @@ def render_daily(
             year_scores=year_scores,
             absent_player_names=absent,
             day_is_complete=day_is_complete,
-            team_lines=teams,
+            teams=teams,
         )
     else:
         body = daily_recap(
@@ -163,7 +157,7 @@ def render_daily(
             include_missing_today_nag=include_missing_today_nag,
             absent_player_names=absent,
             day_is_complete=day_is_complete,
-            team_lines=teams,
+            teams=teams,
         )
 
     dm_targets = repo.list_active_whatsapp_ids(
@@ -195,93 +189,41 @@ def absent_player_names_for_week(
     )
 
 
-def team_standings_lines(
-    repo: Repository,
-    scores: Sequence[ScoreRow],
-    *,
-    group_id: int,
-    title: str = "Team standings:",
-) -> List[str]:
-    """Render the team-standings block for a slice of scores.
+def team_view(repo: Repository, *, group_id: int) -> Optional[TeamView]:
+    """Read a group's team rosters into a :class:`~app.scheduler.TeamView`.
 
-    Returns ``[]`` when the group has no teams, which is what keeps
-    the block invisible for groups that never opted in — and lets
-    every caller decide placement with a plain ``if lines:``.
+    Returns ``None`` when the group has no teams, which is what keeps
+    the team section invisible for groups that never opted in — every
+    caller can pass the result straight through and let the formatter
+    decide.
 
-    Lives here rather than in the pure formatters because it needs
-    repo reads; :mod:`app.scheduler` takes the finished lines as a
-    parameter so it stays I/O-free.
+    Lives here rather than in the pure formatters because it needs repo
+    reads; :mod:`app.scheduler` takes the finished rosters as a
+    parameter so it stays I/O-free. Note it deliberately returns
+    *rosters*, not points: the formatters fold teams out of the same
+    leaderboard they render underneath, so the two can't disagree.
     """
-    from .scoring import team_standings
-
     teams = repo.list_teams(group_id)
     if not teams:
-        return []
-    memberships = repo.list_team_memberships(group_id)
-    player_names = {
-        p.id: p.display_name for p in repo.list_players_in_group(group_id)
-    }
-    lb = weekly_leaderboard(list(scores))
-    standings = team_standings(lb, memberships, {t.id: t.name for t in teams})
-
-    lines = [title]
-    for i, t in enumerate(standings, start=1):
-        players_word = "player" if t.member_count == 1 else "players"
-        lines.append(
-            f"  {i}. {t.team_name} — {compact_points(t.total_points)} pts "
-            f"({t.member_count} {players_word}, "
-            f"{compact_points(round(t.average_points, 1))} avg)"
-        )
-        scored_ids = {p.player_id for p in t.scoring_members}
-        parts = [
-            f"{p.player_name} {compact_points(p.total_points)}"
-            for p in t.scoring_members
-        ]
-        # Members who sat the period out still show, on 0 — a silent
-        # omission would read as "not on the team".
-        parts += [
-            f"{player_names.get(pid, '?')} 0"
-            for pid, tid in sorted(memberships.items())
-            if tid == t.team_id and pid not in scored_ids
-        ]
-        if parts:
-            lines.append(f"       {' · '.join(parts)}")
-
-    # Anyone in the group who scored but isn't on a team — otherwise
-    # their points vanish from this view with no explanation.
-    unteamed = [p for p in lb if p.player_id not in memberships]
-    if unteamed:
-        listed = " · ".join(
-            f"{p.player_name} {compact_points(p.total_points)}"
-            for p in unteamed
-        )
-        lines.append(f"  Not on a team: {listed}")
-    return lines
+        return None
+    return TeamView(
+        team_names={t.id: t.name for t in teams},
+        memberships=repo.list_team_memberships(group_id),
+    )
 
 
-def safe_team_standings_lines(
-    repo: Repository,
-    settings: Settings,
-    scores: Sequence[ScoreRow],
-    *,
-    group_id: int,
-    title: str = "Team standings:",
-) -> List[str]:
-    """:func:`team_standings_lines` over enabled games only, with
-    failures swallowed.
+def safe_team_view(repo: Repository, *, group_id: int) -> Optional[TeamView]:
+    """:func:`team_view` with failures swallowed.
 
     The recap and wrap are the group's core output; a missing teams
     table (pre-migration schema) or any other repo hiccup must not
-    cost them the whole message over a nice-to-have block.
+    cost them the whole message over a nice-to-have section.
     """
     try:
-        filtered = [s for s in scores if s.game in settings.enabled_games]
-        return team_standings_lines(
-            repo, filtered, group_id=group_id, title=title
-        )
+        return team_view(repo, group_id=group_id)
     except Exception:  # noqa: BLE001 — teams are a nice-to-have here
-        logger.exception("team standings render failed — omitting block")
-        return []
+        logger.exception("team roster read failed — omitting team section")
+        return None
 
 
 def render_wrap(
@@ -313,9 +255,7 @@ def render_wrap(
             repo, reference_day, week_scores, group_id=group_id
         ),
         day_is_complete=sunday < la_today,
-        team_lines=safe_team_standings_lines(
-            repo, settings, week_scores, group_id=group_id
-        ),
+        teams=safe_team_view(repo, group_id=group_id),
     )
     dm_targets = repo.list_active_whatsapp_ids(
         date_from=monday, date_to=sunday, group_id=group_id

@@ -308,8 +308,9 @@ class TeamStanding:
     There's deliberately no team-level ``distinct_games`` /
     ``days_played``: those are per-player counts, so summing them
     double-counts a round two teammates both played, and the union
-    can't be recovered from the counts alone. ``submissions`` sums
-    cleanly because each submission belongs to exactly one player.
+    can't be recovered from the counts alone. ``submissions`` and
+    ``total_time`` sum cleanly because each submission (and the
+    seconds it took) belongs to exactly one player.
     """
 
     team_id: int
@@ -318,6 +319,11 @@ class TeamStanding:
     member_count: int
     scoring_members: Tuple[PlayerWeeklyStats, ...] = ()
     submissions: int = 0
+    # Same units and exclusions as the per-player fields: seconds across
+    # time-based games only (pinpoint's guess count would corrupt the
+    # sum), with the contributing round count alongside it.
+    total_time: int = 0
+    time_based_submissions: int = 0
 
     @property
     def average_points(self) -> float:
@@ -326,6 +332,13 @@ class TeamStanding:
         if self.member_count == 0:
             return 0.0
         return self.total_points / self.member_count
+
+    @property
+    def average_time(self) -> float:
+        """Mean seconds per time-based round across the whole roster."""
+        if self.time_based_submissions == 0:
+            return 0.0
+        return self.total_time / self.time_based_submissions
 
 
 @dataclass(frozen=True)
@@ -618,6 +631,8 @@ def team_standings(
     totals: Dict[int, float] = {tid: 0.0 for tid in team_names}
     members: Dict[int, List[PlayerWeeklyStats]] = {tid: [] for tid in team_names}
     submissions: Dict[int, int] = {tid: 0 for tid in team_names}
+    total_time: Dict[int, int] = {tid: 0 for tid in team_names}
+    timed_subs: Dict[int, int] = {tid: 0 for tid in team_names}
     # Roster size counts every membership row, not just the players who
     # turned up — that's what makes ``average_points`` honest.
     roster: Dict[int, int] = {tid: 0 for tid in team_names}
@@ -636,6 +651,8 @@ def team_standings(
         totals[team_id] += stats.total_points
         members[team_id].append(stats)
         submissions[team_id] += stats.submissions
+        total_time[team_id] += stats.total_time
+        timed_subs[team_id] += stats.time_based_submissions
 
     standings = [
         TeamStanding(
@@ -650,6 +667,8 @@ def team_standings(
                 )
             ),
             submissions=submissions[tid],
+            total_time=total_time[tid],
+            time_based_submissions=timed_subs[tid],
         )
         for tid in team_names
     ]

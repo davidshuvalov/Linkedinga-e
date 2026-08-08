@@ -951,9 +951,11 @@ def _handle_leaderboard(
         # arrows compare the requested day's board to the preceding
         # day's board (None on Monday → no arrows, by design).
         prior = [s for s in filtered if s.puzzle_date < target_day]
-        from .jobs import absent_player_names_for_week, safe_team_standings_lines
+        from .jobs import absent_player_names_for_week, safe_team_view
         from .scheduler import _game_winners_lines, _prize_lines
         from .scoring import prize_allocations, weekly_leaderboard as _score_weekly_lb
+        # Teams lead the table when the group has them; the player rows
+        # below read as the breakdown. Same shape as the recap/wrap.
         lines = list(_weekly_leaderboard_lines(
             filtered,
             title=f"Week so far — {header_date}",
@@ -961,15 +963,9 @@ def _handle_leaderboard(
             absent_player_names=absent_player_names_for_week(
                 repo, target_day, filtered, group_id=group_id
             ),
+            teams=safe_team_view(repo, group_id=group_id),
+            day_scores=[s for s in filtered if s.puzzle_date == target_day],
         ))
-        # Teams lead when the group has them; the individual board
-        # below reads as the breakdown. Same order as the recap/wrap.
-        teams = safe_team_standings_lines(
-            repo, settings, filtered, group_id=group_id,
-            title="Team standings (week):",
-        )
-        if teams:
-            lines = teams + [""] + lines
         winners = _game_winners_lines(filtered)
         if winners:
             lines += [""] + list(winners)
@@ -1439,10 +1435,14 @@ def _handle_period_leaderboard(
         return rendered
 
     # Full summary: leaderboard + game winners + prizes.
+    from .jobs import safe_team_view
+
     lines = period_summary(
         f"{period.title()} so far — {period_label}",
         filtered,
         settings.enabled_games,
+        teams=safe_team_view(repo, group_id=group_id),
+        day_scores=[s for s in filtered if s.puzzle_date == today],
     )
     return "\n".join(lines)
 
@@ -2886,7 +2886,7 @@ _TEAM_USAGE = (
     "  team delete <name> — disband a team\n"
     "  teams — list the teams in your group\n"
     "  team <name> — one team's roster\n"
-    "  team leaderboard [game|month|year] — team standings\n"
+    "  team leaderboard [game|today|month|year] — team standings\n"
     "\n"
     "E.g. `team Reds: Alice, Bob, me`. Players must already be in "
     "your group. Everyone can be on one team at a time; adding "
@@ -3237,14 +3237,16 @@ def _parse_team_leaderboard_scope(
     """Parse the optional scope after ``team leaderboard``.
 
     Returns ``(period, game, error)`` where ``period`` is one of
-    ``week`` / ``month`` / ``year`` and ``game`` is a game key or
-    ``None``. Both can be given in either order
+    ``today`` / ``week`` / ``month`` / ``year`` and ``game`` is a game
+    key or ``None``. Both can be given in either order
     (``team leaderboard month queens``).
     """
     period = "week"
     game: Optional[str] = None
     for word in words:
-        if word in ("week", "wk", "this week"):
+        if word in ("today", "day"):
+            period = "today"
+        elif word in ("week", "wk", "this week"):
             period = "week"
         elif word in ("month", "mtd"):
             period = "month"
@@ -3255,7 +3257,8 @@ def _parse_team_leaderboard_scope(
             if key is None:
                 return period, game, (
                     f"Don't know `{word}`. Try: team leaderboard, "
-                    "team leaderboard queens, team leaderboard month."
+                    "team leaderboard today, team leaderboard queens, "
+                    "team leaderboard month."
                 )
             game = key
     return period, game, None
@@ -3271,12 +3274,14 @@ def _handle_team_leaderboard(
     from_: Optional[str],
     profile_name: str,
 ) -> str:
-    """``team leaderboard [game] [month|year]`` — combined standings.
+    """``team leaderboard [game] [today|week|month|year]`` — combined
+    standings.
 
     Each team's points are its members' points added together, over
-    the requested period. Gated by the same no-peek rule as the player
-    leaderboard when the period includes today, since it exposes the
-    same day's results.
+    the requested period, rendered as the same table the recap uses:
+    team rows on top, the player rows they're built from underneath.
+    Gated by the same no-peek rule as the player leaderboard since
+    every period here runs up to today.
     """
     if settings is None:
         return "Team standings aren't available in this context."
@@ -3292,7 +3297,10 @@ def _handle_team_leaderboard(
         )
 
     today = la_date(now)
-    if period == "month":
+    if period == "today":
+        start = end = today
+        label = today.strftime("%a %d %b %Y")
+    elif period == "month":
         start, end = month_bounds(today)
         label = today.strftime("%B %Y")
     elif period == "year":
@@ -3320,18 +3328,28 @@ def _handle_team_leaderboard(
         and s.puzzle_date <= today
         and (game is None or s.game == game)
     ]
-    from .jobs import team_standings_lines
+    from .jobs import safe_team_view
+    from .scheduler import _weekly_leaderboard_lines
+
+    view = safe_team_view(repo, group_id=group_id)
+    if view is None:
+        return "No teams in this group yet. Send `team` for how to make one."
 
     scope = f" ({GAME_DISPLAY[game]})" if game else ""
-    lines = team_standings_lines(
-        repo, filtered, group_id=group_id,
-        title=f"Team standings{scope} — {label}:",
+    title = f"Team standings{scope} — {label}"
+    # A ``today`` board is already the day, so the per-row daily tail
+    # would just repeat the total.
+    lines = _weekly_leaderboard_lines(
+        filtered,
+        title=title,
+        teams=view,
+        day_scores=(
+            None if period == "today"
+            else [s for s in filtered if s.puzzle_date == today]
+        ),
     )
     if not lines:
-        return "No teams in this group yet. Send `team` for how to make one."
-    if not filtered:
-        lines.append("")
-        lines.append("(No scores in this period yet.)")
+        return f"{title}:\n\n(No scores in this period yet.)"
     return "\n".join(lines)
 
 
@@ -3367,9 +3385,9 @@ def _handle_team(
             repo, settings, now, tail, group_id=group_id,
             from_=from_, profile_name=profile_name,
         )
-    # ``team month`` / ``team year`` / ``team queens`` — leaderboard
+    # ``team today`` / ``team month`` / ``team queens`` — leaderboard
     # scopes usable without spelling out "leaderboard".
-    if head_lower in ("week", "month", "mtd", "year", "ytd") or (
+    if head_lower in ("today", "day", "week", "month", "mtd", "year", "ytd") or (
         _parse_single_game_key(head_lower) is not None
         and repo.find_team_by_name(group_id=group_id, name=head) is None
     ):
