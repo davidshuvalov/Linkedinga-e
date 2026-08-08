@@ -51,7 +51,14 @@ def _settings(games=("queens", "zip")) -> Settings:
     )
 
 
-def _stats(player_id: int, name: str, points: float, submissions: int = 0):
+def _stats(
+    player_id: int,
+    name: str,
+    points: float,
+    submissions: int = 0,
+    total_time: int = 0,
+    time_based_submissions: int = 0,
+):
     return PlayerWeeklyStats(
         player_id=player_id,
         player_name=name,
@@ -59,6 +66,8 @@ def _stats(player_id: int, name: str, points: float, submissions: int = 0):
         distinct_games=1,
         days_played=1,
         submissions=submissions,
+        total_time=total_time,
+        time_based_submissions=time_based_submissions,
     )
 
 
@@ -171,6 +180,26 @@ class TestTeamStandings:
         ]
         standings = team_standings(lb, {1: 100, 2: 100}, {100: "Reds"})
         assert standings[0].submissions == 7
+
+    def test_time_sums_across_the_roster(self):
+        """A team's clock is its members' clocks added together — same
+        units and same pinpoint exclusion as the per-player field,
+        since it's built straight off those."""
+        lb = [
+            _stats(1, "Alice", 10.0, submissions=4,
+                   total_time=240, time_based_submissions=4),
+            _stats(2, "Bob", 6.0, submissions=3,
+                   total_time=180, time_based_submissions=3),
+        ]
+        standings = team_standings(lb, {1: 100, 2: 100}, {100: "Reds"})
+        assert standings[0].total_time == 420
+        assert standings[0].time_based_submissions == 7
+        assert standings[0].average_time == 60.0
+
+    def test_average_time_zero_without_timed_rounds(self):
+        lb = [_stats(1, "Alice", 5.0, submissions=1)]
+        standings = team_standings(lb, {1: 100}, {100: "Reds"})
+        assert standings[0].average_time == 0.0
 
     def test_scoring_members_sorted_by_points(self):
         lb = [_stats(1, "Alice", 4.0), _stats(2, "Bob", 9.0)]
@@ -521,7 +550,7 @@ class TestTeamLeaderboard:
         }
         reds_total = lb["Alice"] + lb["Bob"]
         assert "Team standings — week of Mon 03 Aug 2026:" in reply
-        assert f"1. Reds — {reds_total:g} pts (2 players" in reply
+        assert f"1. Reds: {reds_total:g} pts (T: " in reply
         assert "Alice" in reply and "Bob" in reply
 
     def test_unteamed_players_are_listed_separately(self, crew):
@@ -569,8 +598,9 @@ class TestTeamLeaderboard:
         _send(repo, settings, "team Reds: Alice")
         _send(repo, settings, "team Solos: Erin")
         reply = _send(repo, settings, "team leaderboard")
-        assert "Solos — 0 pts (1 player, 0 avg)" in reply
-        assert "Erin 0" in reply
+        # A team that sat the period out drops to the bottom on zero
+        # rather than disappearing, which would read as "disbanded".
+        assert "2. Solos: 0 pts (T: 0:00, G:0)" in reply
 
     def test_no_peek_gate_blocks_a_sender_who_hasnt_played_today(self, repo):
         settings = _settings()
@@ -639,25 +669,27 @@ def _block_order(body: str, *headings: str) -> list:
 
 
 class TestWrapTeamBlock:
-    def test_wrap_gains_a_team_block(self, crew):
+    def test_wrap_gains_a_team_section(self, crew):
         repo, settings, _ = crew
         _send(repo, settings, "team Reds: Alice, Bob")
         body, _targets = render_wrap(
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
-        assert "Team standings:" in body
-        assert "1. Reds —" in body
+        assert "Week totals:" in body
+        assert "1. Reds: " in body
 
-    def test_teams_sit_above_the_individual_board(self, crew):
+    def test_teams_sit_above_the_players_in_one_table(self, crew):
+        """Teams aren't a separate block any more — they're the top
+        section of the same standings table, in the same row format."""
         repo, settings, _ = crew
         _send(repo, settings, "team Reds: Alice, Bob")
         body, _targets = render_wrap(
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
-        teams_at, players_at = _block_order(
-            body, "Team standings:", "Week totals:"
+        totals_at, teams_at, players_at = _block_order(
+            body, "Week totals:", "  Teams:", "  Players:"
         )
-        assert teams_at < players_at
+        assert totals_at < teams_at < players_at
 
     def test_wrap_keeps_the_roomy_per_game_layout(self):
         """The wrap is a once-a-week read, so it deliberately keeps the
@@ -687,7 +719,10 @@ class TestWrapTeamBlock:
         body, _targets = render_wrap(
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
-        assert "Team standings" not in body
+        assert "Teams:" not in body
+        assert "Players:" not in body
+        # The flat one-row-per-player table, exactly as before teams.
+        assert "  1. Alice: " in body
 
     def test_wrap_survives_a_failing_teams_backend(self, crew, monkeypatch):
         """A pre-migration schema raises on the teams table. The wrap
@@ -703,38 +738,94 @@ class TestWrapTeamBlock:
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
         assert "Week totals:" in body
-        assert "Team standings" not in body
+        assert "Teams:" not in body
 
 
 class TestRecapTeamBlock:
     """Teams in the scheduled / on-demand daily recap."""
 
-    def test_recap_gains_a_team_block(self, crew):
+    def test_recap_gains_a_team_section(self, crew):
         repo, settings, _ = crew
         _send(repo, settings, "team Reds: Alice, Bob")
         body, _targets = render_daily(
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
-        assert "Team standings (week):" in body
-        assert "1. Reds —" in body
+        assert "Week so far:" in body
+        assert "1. Reds: " in body
 
-    def test_teams_sit_above_the_individual_board(self, crew):
+    def test_teams_sit_above_the_players_in_one_table(self, crew):
         repo, settings, _ = crew
         _send(repo, settings, "team Reds: Alice, Bob")
         body, _targets = render_daily(
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
-        teams_at, players_at = _block_order(
-            body, "Team standings (week):", "Week so far:"
+        week_at, teams_at, players_at = _block_order(
+            body, "Week so far:", "  Teams:", "  Players:"
         )
-        assert teams_at < players_at
+        assert week_at < teams_at < players_at
+
+    def test_team_rows_carry_time_and_round_counts(self, crew):
+        """A team row uses the player row's format — points, cumulative
+        seconds, rounds played — so the two read as one table."""
+        repo, settings, players = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        lb = {
+            p.player_id: p
+            for p in weekly_leaderboard(
+                repo.list_scores(date_from=MONDAY, date_to=LA_TODAY)
+            )
+        }
+        alice, bob = lb[players["Alice"].id], lb[players["Bob"].id]
+        secs = alice.total_time + bob.total_time
+        rounds = alice.submissions + bob.submissions
+        assert (
+            f"1. Reds: {alice.total_points + bob.total_points:g} pts "
+            f"(T: {secs // 60}:{secs % 60:02d}, G:{rounds})"
+        ) in body
+
+    def test_team_row_shows_the_days_score(self, crew):
+        """The running total answers "how's the week going"; the tail
+        answers "what did we put on the board today"."""
+        repo, settings, players = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        today_lb = {
+            p.player_id: p.total_points
+            for p in weekly_leaderboard(
+                repo.list_scores(date_from=LA_TODAY, date_to=LA_TODAY)
+            )
+        }
+        today_total = today_lb[players["Alice"].id] + today_lb[players["Bob"].id]
+        assert f"· today +{today_total:g}" in body
+
+    def test_team_total_is_the_sum_of_the_rows_beneath_it(self, crew):
+        """Both sections are folded out of one leaderboard, so the
+        arithmetic in the table always closes."""
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        body, _targets = render_daily(
+            repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
+        )
+        rows = dict(
+            re.findall(r"\d+\. (\w+): ([\d.]+) pts", body)
+        )
+        assert float(rows["Reds"]) == pytest.approx(
+            float(rows["Alice"]) + float(rows["Bob"])
+        )
 
     def test_recap_unchanged_without_teams(self, crew):
         repo, settings, _ = crew
         body, _targets = render_daily(
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
-        assert "Team standings" not in body
+        assert "Teams:" not in body
+        assert "Players:" not in body
+        assert "  1. Alice: " in body
 
     def test_recap_survives_a_failing_teams_backend(self, crew, monkeypatch):
         repo, settings, _ = crew
@@ -748,11 +839,11 @@ class TestRecapTeamBlock:
             repo, settings, LA_TODAY, group_id=repo.default_group.id, now=NOW
         )
         assert "Week so far:" in body
-        assert "Team standings" not in body
+        assert "Teams:" not in body
 
     def test_past_day_recap_excludes_later_scores(self, crew):
         """A past-day recap's team totals must match the individual
-        board it sits above — both are "as of" that day, so scores
+        rows beneath them — both are "as of" that day, so scores
         submitted after it can't leak in."""
         repo, settings, players = crew
         _send(repo, settings, "team Reds: Alice")
@@ -766,7 +857,7 @@ class TestRecapTeamBlock:
             )
             if p.player_id == players["Alice"].id
         ][0]
-        assert f"1. Reds — {monday_only:g} pts" in body
+        assert f"1. Reds: {monday_only:g} pts" in body
 
 
 class TestLeaderboardTeamBlock:
@@ -776,24 +867,66 @@ class TestLeaderboardTeamBlock:
         repo, settings, _ = crew
         _send(repo, settings, "team Reds: Alice, Bob")
         reply = _send(repo, settings, "leaderboard")
-        teams_at, players_at = _block_order(
-            reply, "Team standings (week):", "Week so far —"
+        week_at, teams_at, players_at = _block_order(
+            reply, "Week so far —", "  Teams:", "  Players:"
         )
-        assert teams_at < players_at
+        assert week_at < teams_at < players_at
+
+    def test_leaderboard_team_row_shows_todays_score(self, crew):
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        assert "· today +" in _send(repo, settings, "leaderboard")
 
     def test_leaderboard_unchanged_without_teams(self, crew):
         repo, settings, _ = crew
         reply = _send(repo, settings, "leaderboard")
-        assert "Team standings" not in reply
+        assert "Teams:" not in reply
         assert reply.startswith("Week so far —")
 
-    def test_per_game_leaderboard_has_no_team_block(self, crew):
-        """``leaderboard queens`` is a single-game view; the team block
-        is week-wide, so mixing them would misread as a per-game team
-        standing."""
+    def test_per_game_leaderboard_has_no_team_section(self, crew):
+        """``leaderboard queens`` is a single-game view; the team
+        section is week-wide, so mixing them would misread as a
+        per-game team standing."""
         repo, settings, _ = crew
         _send(repo, settings, "team Reds: Alice, Bob")
-        assert "Team standings" not in _send(repo, settings, "leaderboard queens")
+        assert "Teams:" not in _send(repo, settings, "leaderboard queens")
+
+
+class TestTeamDayScore:
+    """The day's team score — both as a tail on the running total and
+    as a standalone ``team today`` board."""
+
+    def test_team_today_scopes_to_the_day(self, crew):
+        repo, settings, players = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        reply = _send(repo, settings, "team today")
+        assert "Team standings — Wed 05 Aug 2026:" in reply
+
+        today_lb = {
+            p.player_id: p.total_points
+            for p in weekly_leaderboard(
+                repo.list_scores(date_from=LA_TODAY, date_to=LA_TODAY)
+            )
+        }
+        expected = today_lb[players["Alice"].id] + today_lb[players["Bob"].id]
+        assert f"1. Reds: {expected:g} pts" in reply
+
+    def test_team_today_omits_the_redundant_daily_tail(self, crew):
+        """The whole board is already the day — repeating it per row
+        would just restate the total."""
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice, Bob")
+        assert "· today +" not in _send(repo, settings, "team today")
+
+    def test_day_alias(self, crew):
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice")
+        assert "Wed 05 Aug 2026" in _send(repo, settings, "team leaderboard day")
+
+    def test_today_is_a_known_scope_word(self, crew):
+        repo, settings, _ = crew
+        _send(repo, settings, "team Reds: Alice")
+        assert "Don't know" not in _send(repo, settings, "team leaderboard today")
 
 
 class TestDailyPerGameLayout:

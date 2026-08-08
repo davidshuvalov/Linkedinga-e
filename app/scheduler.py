@@ -15,6 +15,7 @@ weekly wrap can reconcile the final standings.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
@@ -29,11 +30,37 @@ from .puzzles import (
 from .scoring import (
     _NON_TIME_GAMES,
     NP_SCORE,
+    PlayerWeeklyStats,
     assign_daily_points,
     game_leaders,
     prize_allocations,
+    team_standings,
     weekly_leaderboard,
 )
+
+
+@dataclass(frozen=True)
+class TeamView:
+    """A group's team rosters, in the shape the pure formatters need.
+
+    Built by :func:`app.jobs.team_view` (which does the repo reads) and
+    handed down so the formatters can fold teams out of the *same*
+    leaderboard they're already rendering. That's the point of passing
+    rosters rather than pre-rendered lines: a team's total is by
+    construction the sum of the player rows in the same table, so the
+    two can't drift apart the way two independently-computed blocks
+    could.
+
+    ``team_names`` maps ``team_id -> name``; ``memberships`` maps
+    ``player_id -> team_id``. An empty ``team_names`` means the group
+    never opted into teams, and every team-flavoured line disappears.
+    """
+
+    team_names: Dict[int, str] = field(default_factory=dict)
+    memberships: Dict[int, int] = field(default_factory=dict)
+
+    def __bool__(self) -> bool:
+        return bool(self.team_names)
 
 _ALL_GAMES = frozenset(GAME_DISPLAY)
 
@@ -280,6 +307,83 @@ def _rank_delta_suffix(
     return f" ↓{current_rank - prev}"
 
 
+def _standings_row(
+    indent: str,
+    rank: int,
+    name: str,
+    points: float,
+    total_time: int,
+    submissions: int,
+    suffix: str = "",
+) -> str:
+    """One standings row — the single shared line format.
+
+    Teams and players both render through here, which is what makes a
+    team row read as "just another competitor" in the same table:
+    ``1. Reds: 24 pts (T: 12:40, G:14)``. ``T`` is cumulative seconds
+    across time-based games, ``G`` the number of rounds played.
+    """
+    return (
+        f"{indent}{rank}. {name}: {_pts(points)} "
+        f"(T: {_format_seconds(total_time)}, G:{submissions}){suffix}"
+    )
+
+
+def _team_rows(
+    leaderboard: Sequence["PlayerWeeklyStats"],
+    teams: "TeamView",
+    day_scores: Optional[Sequence[ScoreRow]],
+    active_players: Optional[Dict[int, str]],
+    prior_leaderboard: Sequence["PlayerWeeklyStats"],
+) -> List[str]:
+    """Render the team rows that head the standings table.
+
+    Folded out of ``leaderboard`` — the very rows printed underneath —
+    so a team's points, time, and round count are always exactly its
+    members' added together.
+
+    ``day_scores`` is the single day the surrounding view is about (the
+    recap's day, the wrap's final day, today for a live leaderboard).
+    When given, each team row carries a ``· today +N`` tail with that
+    day's team score, which is the number people actually want off a
+    running total: what did we put on the board today.
+    """
+    standings = team_standings(leaderboard, teams.memberships, teams.team_names)
+
+    day_points: Dict[int, float] = {}
+    if day_scores:
+        day_lb = weekly_leaderboard(list(day_scores), active_players=active_players)
+        day_points = {
+            t.team_id: t.total_points
+            for t in team_standings(day_lb, teams.memberships, teams.team_names)
+        }
+
+    prior_ranks: Dict[int, int] = {}
+    if prior_leaderboard:
+        prior_ranks = {
+            t.team_id: i
+            for i, t in enumerate(
+                team_standings(
+                    prior_leaderboard, teams.memberships, teams.team_names
+                ),
+                start=1,
+            )
+        }
+
+    rows: List[str] = []
+    for i, t in enumerate(standings, start=1):
+        suffix = _rank_delta_suffix(prior_ranks, t.team_id, i) if prior_ranks else ""
+        if t.team_id in day_points:
+            suffix = f" · today +{compact_points(day_points[t.team_id])}{suffix}"
+        rows.append(
+            _standings_row(
+                "    ", i, t.team_name, t.total_points,
+                t.total_time, t.submissions, suffix,
+            )
+        )
+    return rows
+
+
 def _weekly_leaderboard_lines(
     week_scores: Sequence[ScoreRow],
     title: str = "Week so far",
@@ -287,6 +391,8 @@ def _weekly_leaderboard_lines(
     *,
     absent_player_names: Optional[Sequence[str]] = None,
     active_players: Optional[Dict[int, str]] = None,
+    teams: Optional["TeamView"] = None,
+    day_scores: Optional[Sequence[ScoreRow]] = None,
 ) -> List[str]:
     """Render the cumulative weekly leaderboard as a compact list.
 
@@ -306,6 +412,13 @@ def _weekly_leaderboard_lines(
 
     ``active_players``, when provided, is forwarded to
     :func:`weekly_leaderboard` so not-played points are included.
+
+    ``teams`` turns this into one table with two sections — ``Teams``
+    above ``Players``, both in the row format above — instead of the
+    separate team-standings block teams used to get. A group with no
+    teams passes ``None`` and the output is byte-for-byte what it
+    always was. ``day_scores`` is only read for the team rows' daily
+    score; see :func:`_team_rows`.
     """
     lb = weekly_leaderboard(week_scores, active_players=active_players)
     if not lb:
@@ -316,6 +429,21 @@ def _weekly_leaderboard_lines(
     show_arrows = bool(prior_lb)
 
     lines: List[str] = [f"{title}:"]
+
+    team_rows = (
+        _team_rows(lb, teams, day_scores, active_players, prior_lb)
+        if teams
+        else []
+    )
+    # Player rows drop a level of indent under the "Players:" subhead
+    # when teams are present; without teams the table is flat and keeps
+    # exactly the shape it's always had.
+    indent = "    " if team_rows else "  "
+    if team_rows:
+        lines.append("  Teams:")
+        lines.extend(team_rows)
+        lines.append("  Players:")
+
     for i, p in enumerate(lb, start=1):
         suffix = (
             _rank_delta_suffix(prior_ranks, p.player_id, i)
@@ -323,9 +451,21 @@ def _weekly_leaderboard_lines(
             else ""
         )
         lines.append(
-            f"  {i}. {p.player_name}: {_pts(p.total_points)} "
-            f"(T: {_format_seconds(p.total_time)}, G:{p.submissions}){suffix}"
+            _standings_row(
+                indent, i, p.player_name, p.total_points,
+                p.total_time, p.submissions, suffix,
+            )
         )
+
+    # Players whose points sit on the board but in nobody's team total
+    # — without this the team rows look like they've lost points.
+    if team_rows:
+        unteamed = [
+            p.player_name for p in lb if p.player_id not in teams.memberships
+        ]
+        if unteamed:
+            lines.append(f"  Not on a team: {', '.join(unteamed)}")
+
     if absent_player_names:
         lines.append("Haven't played this week:")
         for name in absent_player_names:
@@ -404,6 +544,9 @@ def period_summary(
     title: str,
     scores: Sequence[ScoreRow],
     enabled_games: FrozenSet[str] = _ALL_GAMES,
+    *,
+    teams: Optional["TeamView"] = None,
+    day_scores: Optional[Sequence[ScoreRow]] = None,
 ) -> List[str]:
     """Render a full period summary — leaderboard + game winners +
     prizes — as lines the caller joins.
@@ -412,9 +555,15 @@ def period_summary(
     period recap appendage so the monthly/yearly view mirrors the
     weekly wrap's shape. Returns empty list when there are no scores
     in the filtered period.
+
+    ``teams`` / ``day_scores`` pass straight through to
+    :func:`_weekly_leaderboard_lines`, so a month or year board carries
+    the same team section as the weekly one.
     """
     filtered = [s for s in scores if s.game in enabled_games]
-    lb = _weekly_leaderboard_lines(filtered, title=title)
+    lb = _weekly_leaderboard_lines(
+        filtered, title=title, teams=teams, day_scores=day_scores
+    )
     if not lb:
         return []
     lines = list(lb)
@@ -551,7 +700,7 @@ def daily_recap(
     lock_aggregates: bool = False,
     absent_player_names: Optional[Sequence[str]] = None,
     day_is_complete: bool = False,
-    team_lines: Optional[Sequence[str]] = None,
+    teams: Optional["TeamView"] = None,
 ) -> str:
     """Format a daily recap for ``day``.
 
@@ -576,14 +725,15 @@ def daily_recap(
     games — they see rankings for the games they've played but no
     aggregate competitive data they haven't earned access to yet.
 
-    ``team_lines`` is a pre-rendered team-standings block (see
-    :func:`app.jobs.team_standings_lines`). It's passed in rather than
-    computed here because it needs repo reads and this formatter is
-    pure. When present it sits **above** the "Week so far" leaderboard:
-    for a group that plays in teams the team result is the headline and
-    the individual board is the detail behind it. Groups with no teams
-    pass ``None`` and see no change. Suppressed under
-    ``lock_aggregates`` along with every other aggregate.
+    ``teams`` is the group's rosters (see :func:`app.jobs.team_view`),
+    passed in rather than read here because this formatter is pure.
+    When present, the "Week so far" table gains a ``Teams`` section
+    above its ``Players`` section — teams first, because for a group
+    that plays in teams the team result is the headline and the
+    individual board is the detail behind it. Each team row also shows
+    what the team scored on ``day`` itself. Groups with no teams pass
+    ``None`` and see no change. Suppressed under ``lock_aggregates``
+    along with every other aggregate.
     """
     header = f"Daily recap — {day.strftime('%a %d %b %Y')}"
 
@@ -642,12 +792,9 @@ def daily_recap(
         prior_scores=prior_scores,
         absent_player_names=absent_player_names,
         active_players=active_players,
+        teams=teams,
+        day_scores=day_scores,
     )
-    # Teams first when the group has them — the individual board reads
-    # as the breakdown underneath, not the other way round.
-    if team_lines:
-        lines.append("")
-        lines.extend(team_lines)
     if lb_lines:
         lines.append("")
         lines.extend(lb_lines)
@@ -655,14 +802,16 @@ def daily_recap(
     # Month / year totals — opt-in via params. Caller-driven so the
     # formatter stays pure (no date math to decide when to include).
     month_block = _period_totals_block(
-        month_scores, enabled_games, f"Month totals — {day.strftime('%b %Y')}"
+        month_scores, enabled_games, f"Month totals — {day.strftime('%b %Y')}",
+        teams=teams, day_scores=day_scores,
     )
     if month_block:
         lines.append("")
         lines.extend(month_block)
 
     year_block = _period_totals_block(
-        year_scores, enabled_games, f"Year totals — {day.year}"
+        year_scores, enabled_games, f"Year totals — {day.year}",
+        teams=teams, day_scores=day_scores,
     )
     if year_block:
         lines.append("")
@@ -687,6 +836,9 @@ def _period_totals_block(
     scores: Optional[Sequence[ScoreRow]],
     enabled_games: FrozenSet[str],
     title: str,
+    *,
+    teams: Optional["TeamView"] = None,
+    day_scores: Optional[Sequence[ScoreRow]] = None,
 ) -> List[str]:
     """Render a period summary (Month / Year) — leaderboard + game
     winners + prizes — or empty list.
@@ -699,7 +851,9 @@ def _period_totals_block(
     """
     if not scores:
         return []
-    return period_summary(title, scores, enabled_games)
+    return period_summary(
+        title, scores, enabled_games, teams=teams, day_scores=day_scores
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -717,7 +871,7 @@ def weekly_wrap(
     year_scores: Optional[Sequence[ScoreRow]] = None,
     absent_player_names: Optional[Sequence[str]] = None,
     day_is_complete: bool = False,
-    team_lines: Optional[Sequence[str]] = None,
+    teams: Optional["TeamView"] = None,
 ) -> str:
     """Format a weekly wrap covering ``[week_start, week_end]`` inclusive.
 
@@ -726,7 +880,8 @@ def weekly_wrap(
     - Per-game rankings for ``week_end`` (the final day — usually
       Sunday LA — so Sunday's scores still get their own spotlight).
     - Final "Week totals" leaderboard (same shape as the daily
-      "Week so far" block, but named differently to signal closure).
+      "Week so far" block, but named differently to signal closure) —
+      including its ``Teams`` section when ``teams`` is given.
     - Per-game **weekly** winners — who accumulated the most points
       in each game across the whole week.
     - Three prizes: Most firsts, Most lasts, Best average.
@@ -765,19 +920,16 @@ def weekly_wrap(
         lines.extend(_per_game_sections(week_end, final_day_scores, active_players=active_players))
         lines.append("")
 
-    # Final team standings, above the individual board — same
-    # reasoning as daily_recap: teams are the headline result for a
-    # group that plays in them.
-    if team_lines:
-        lines.extend(team_lines)
-        lines.append("")
-
-    # Week totals leaderboard
+    # Week totals leaderboard — teams lead it when the group has them.
+    # The daily tail on each team row covers ``week_end``, the day the
+    # per-game block above just walked through.
     lines.extend(_weekly_leaderboard_lines(
         week_filtered,
         title="Week totals",
         absent_player_names=absent_player_names,
         active_players=active_players,
+        teams=teams,
+        day_scores=final_day_scores,
     ))
 
     # Per-game weekly winners
@@ -799,13 +951,16 @@ def weekly_wrap(
         month_scores,
         enabled_games,
         f"Month totals — {week_end.strftime('%b %Y')}",
+        teams=teams,
+        day_scores=final_day_scores,
     )
     if month_block:
         lines.append("")
         lines.extend(month_block)
 
     year_block = _period_totals_block(
-        year_scores, enabled_games, f"Year totals — {week_end.year}"
+        year_scores, enabled_games, f"Year totals — {week_end.year}",
+        teams=teams, day_scores=final_day_scores,
     )
     if year_block:
         lines.append("")

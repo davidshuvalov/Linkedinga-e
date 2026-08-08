@@ -342,7 +342,8 @@ forwardable message.
 ### Message length
 
 The daily recap is long — with 5 games and 6 players the per-game
-rankings alone run ~35 lines, and team standings add more.
+rankings alone run ~35 lines, and the team section adds one row per
+team on top of that.
 
 A folded one-line-per-game layout was tried to fix that:
 
@@ -495,8 +496,9 @@ colliding, and you can't put someone from another group on your team.
 | `team delete <name>` / `team disband <name>` | Disband a team. Every score stays exactly where it was. |
 | `teams` | List this group's teams, their rosters, and anyone not on a team. |
 | `team <name>` | One team's roster. |
-| `team leaderboard` / `team standings` | Combined team standings for the week — each team's total, roster size, points-per-player, and the per-member breakdown. Anyone with points but no team gets a "Not on a team" line so their score doesn't just vanish. |
+| `team leaderboard` / `team standings` | Combined team standings for the week — team rows on top, the player rows they're built from underneath. Anyone with points but no team gets a "Not on a team" line so their score doesn't just vanish. |
 | `team leaderboard <game>` | Same, restricted to one game (e.g. `team leaderboard queens`). |
+| `team today` / `team day` | Just today's team scores. |
 | `team month` / `team year` | Same, over the month or year to date. |
 
 Separators are flexible: `team Reds: Alice, Bob`, `team Reds: Alice and
@@ -505,15 +507,36 @@ names with spaces in them.
 
 A team's total is the plain sum of its members' points on the ordinary
 player leaderboard — there's no separate scoring path, so a bigger
-roster is a real advantage. The `(N players, X avg)` suffix on each
-row shows the size-adjusted view alongside it.
+roster is a real advantage.
 
-Once a group has at least one team, a **Team standings** block appears
-automatically in the daily recap, the weekly wrap, and the
-`leaderboard` command — positioned **above** the individual
-leaderboard, since for a group playing in teams the team result is the
-headline and the per-player board is the detail behind it. Groups with
-no teams see no change anywhere.
+Once a group has at least one team, the standings table in the daily
+recap, the weekly wrap, and the `leaderboard` command splits into two
+sections — **Teams** above **Players** — instead of one flat list:
+
+```
+Week so far:
+  Teams:
+    1. Reds: 36 pts (T: 8:44, G:8) · today +18
+    2. Blues: 12 pts (T: 5:28, G:4) · today +6
+  Players:
+    1. Alice: 20 pts (T: 4:00, G:4)
+    2. Bob: 16 pts (T: 4:44, G:4)
+    3. Carol: 12 pts (T: 5:28, G:4)
+  Not on a team: Dave
+```
+
+Both sections use the same row format — points, `T:` cumulative
+seconds across time-based games, `G:` rounds played — so a team reads
+as just another competitor. Teams go first because for a group playing
+in teams the team result is the headline and the per-player rows are
+the detail behind it. Both are folded out of the *same* leaderboard,
+so a team's total is always exactly the rows beneath it added up.
+
+The `· today +N` tail is the team's score for that day alone: the
+total answers "how's the week going", the tail answers "what did we
+put on the board today". `team today` pulls the day's board on its
+own. Groups with no teams see no change anywhere — same flat table as
+before.
 
 `team leaderboard` sits behind the same no-peek gate as the player
 leaderboard (see below); `teams` and `team <name>` don't, since a
