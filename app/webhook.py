@@ -3540,9 +3540,18 @@ def handle_inbound(
     # Override settings.enabled_games with this group's specific game list
     # if the group has its own games configured. This propagates automatically
     # to every handler that receives ``settings``.
+    #
+    # The score path below reads the ``enabled_games`` *argument* rather
+    # than ``settings``, so it needs the same override applied — without
+    # it, a group that ran ``track`` was still judged against the global
+    # env default. A group that added Wend got told "(Not tracked for the
+    # leaderboard.)" on every Wend share, and its day-complete scorecard
+    # fired as soon as the five default games were in, while Wend was
+    # still outstanding.
     if settings is not None and sender_group.enabled_games is not None:
         from dataclasses import replace as _dc_replace
         settings = _dc_replace(settings, enabled_games=sender_group.enabled_games)
+        enabled_games = sender_group.enabled_games
 
     # Check for commands before attempting score parsing
     if lower in ("help", "?", "commands"):
@@ -4001,6 +4010,7 @@ def handle_inbound(
             player=player,
             today=puzzle_date,
             enabled_games=enabled_games,
+            triggering_game=parsed.game,
             deliver=False,
             group_id=group_id,
         )

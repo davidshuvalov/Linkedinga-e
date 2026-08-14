@@ -2255,6 +2255,92 @@ class TestConfirmationConsolidation:
         # bodies are consolidated into the TwiML reply.
         assert mock_dm.call_count == 0
 
+    def test_day_complete_waits_for_a_group_tracked_extra_game(self, repo):
+        """Regression: the score path judged submissions against the
+        *global* enabled_games, ignoring the group's ``track`` list.
+
+        A group that added Wend got the day-complete scorecard as soon
+        as the five default games were in — while Wend was still
+        outstanding — and every Wend share was wrongly annotated
+        "(Not tracked for the leaderboard.)".
+        """
+        from unittest.mock import patch
+        settings = _settings_with_default_games()
+        handle_inbound(
+            repo, from_="whatsapp:+61400000001",
+            body="track queens tango zip patches mini_sudoku wend",
+            profile_name="Alice", now=NOW,
+            enabled_games=settings.enabled_games, settings=settings,
+        )
+        submissions = [
+            ("Queens #714", "0:42"),
+            ("Tango #614", "1:10"),
+            ("Zip #414", "0:33"),
+            ("Patches #214", "1:55"),
+            ("Mini Sudoku #114", "0:50"),  # last of the *global* five
+        ]
+        with patch("app.notifications.send_dm"):
+            for header, score in submissions:
+                last_reply = handle_inbound(
+                    repo,
+                    from_="whatsapp:+61400000001",
+                    body=f"{header}\n{score}",
+                    profile_name="Alice", now=NOW,
+                    enabled_games=settings.enabled_games,
+                    settings=settings,
+                )
+            assert last_reply is not None
+            assert "Day done, Alice" not in last_reply
+
+            wend_reply = handle_inbound(
+                repo,
+                from_="whatsapp:+61400000001",
+                body="Wend #67\n0:42",
+                profile_name="Alice", now=NOW,
+                enabled_games=settings.enabled_games,
+                settings=settings,
+            )
+        assert wend_reply is not None
+        # Tracked by this group, so it scores like any other game.
+        assert "(Not tracked for the leaderboard.)" not in wend_reply
+        assert "Day done, Alice" in wend_reply
+        assert "Wend: 0:42" in wend_reply
+
+    def test_day_complete_does_not_re_fire_on_an_untracked_game(self, repo):
+        # Alice finishes the tracked five, then plays Crossclimb — which
+        # the group doesn't track. That's not a second "day done".
+        from unittest.mock import patch
+        settings = _settings_with_default_games()
+        submissions = [
+            ("Queens #714", "0:42"),
+            ("Tango #614", "1:10"),
+            ("Zip #414", "0:33"),
+            ("Patches #214", "1:55"),
+            ("Mini Sudoku #114", "0:50"),
+        ]
+        with patch("app.notifications.send_dm"):
+            for header, score in submissions:
+                done_reply = handle_inbound(
+                    repo,
+                    from_="whatsapp:+61400000001",
+                    body=f"{header}\n{score}",
+                    profile_name="Alice", now=NOW,
+                    enabled_games=settings.enabled_games,
+                    settings=settings,
+                )
+            assert "Day done, Alice" in done_reply
+
+            extra_reply = handle_inbound(
+                repo,
+                from_="whatsapp:+61400000001",
+                body="Crossclimb #722\n1:05",
+                profile_name="Alice", now=NOW,
+                enabled_games=settings.enabled_games,
+                settings=settings,
+            )
+        assert extra_reply is not None
+        assert "Day done, Alice" not in extra_reply
+
 
 # ---------------------------------------------------------------------------
 # No-peek gate on today's recap / leaderboard

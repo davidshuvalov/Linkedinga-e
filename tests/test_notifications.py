@@ -709,6 +709,30 @@ class TestMaybeNotifyDayComplete:
          group_id=repo.default_group.id,)
         assert body is None
 
+    def test_untracked_triggering_game_does_not_re_fire(self):
+        # Alice finished and got her card; Crossclimb isn't tracked, so
+        # submitting it later isn't a second completion of the day.
+        repo = TestRepo()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        repo.insert_score(
+            player_id=alice.id, game="queens", puzzle_no=714,
+            puzzle_date=TUE, raw_score=30, share_text="",
+        )
+        enabled = frozenset({"queens"})
+        assert maybe_notify_day_complete(
+            repo, None, player=alice, today=TUE, enabled_games=enabled,
+            triggering_game="queens", group_id=repo.default_group.id,
+        ) is not None
+
+        repo.insert_score(
+            player_id=alice.id, game="crossclimb", puzzle_no=722,
+            puzzle_date=TUE, raw_score=60, share_text="",
+        )
+        assert maybe_notify_day_complete(
+            repo, None, player=alice, today=TUE, enabled_games=enabled,
+            triggering_game="crossclimb", group_id=repo.default_group.id,
+        ) is None
+
     def test_silent_when_no_enabled_games(self):
         repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+1", "Alice")

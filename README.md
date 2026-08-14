@@ -268,6 +268,14 @@ re-enable them later), but they don't appear in recaps, wraps, or the
 leaderboard. The webhook reply adds a note when a disabled game is
 submitted.
 
+A group can override the list for itself with the `track` command —
+`track queens tango zip patches mini_sudoku wend` picks up Wend without
+touching `ENABLED_GAMES` or any other group. **The tracked list is the
+whole definition of a day**: it decides what scores, and equally what
+the bot waits for. Adding a game means the "day done" scorecard and the
+early-fire group recap both hold until that game is in, and the morning
+/ pre-reset nags keep asking for it.
+
 ## Weekly prize categories
 
 The wrap shows a compact leaderboard (one line per player, sorted by
@@ -586,6 +594,7 @@ roster carries no scores.
 | `undo`             | Delete your most recent submission for today (LA). Older days are locked. |
 | `name <new>`       | Change your display name (overrides WhatsApp profile name). |
 | `notify on` / `off` | Opt in/out of daily recap DMs. Scores still accepted when off. |
+| `track <game> ...` | Set which games your group plays. They score, and the daily wrap waits for all of them. `track all` / `track reset` for every game / the global default. |
 | `help` / `?`       | Show the full command list. |
 | `unparsed`         | Last 10 unparsed messages (admin debugging). |
 

@@ -1747,6 +1747,7 @@ def maybe_notify_day_complete(
     player: Player,
     today: date,
     enabled_games: FrozenSet[str],
+    triggering_game: Optional[str] = None,
     deliver: bool = True,
     group_id: int,
 ) -> Optional[str]:
@@ -1756,9 +1757,12 @@ def maybe_notify_day_complete(
 
     Idempotent-in-practice: "has every game" only becomes true once
     per day per player (further submissions for an already-done game
-    bounce off the uniqueness constraint). Callers still wrap the
-    invocation in try/except so a transient DB hiccup can't mask the
-    webhook ack.
+    bounce off the uniqueness constraint). The exception is a game the
+    group doesn't track — someone who plays Crossclimb after finishing
+    re-trips the check — so callers pass ``triggering_game`` and a
+    submission outside the tracked set is ignored. Callers still wrap
+    the invocation in try/except so a transient DB hiccup can't mask
+    the webhook ack.
 
     ``deliver`` toggles whether a separate Twilio DM goes out. The
     webhook calls this with ``deliver=False`` so the summary can
@@ -1767,6 +1771,8 @@ def maybe_notify_day_complete(
     """
     if not enabled_games:
         return None
+    if triggering_game is not None and triggering_game not in enabled_games:
+        return None  # untracked — can't be what completed the day
 
     today_scores = repo.list_scores(
         date_from=today, date_to=today, group_id=group_id
