@@ -12,7 +12,7 @@ interface, not on Supabase directly. Two implementations are provided:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace as _dc_replace
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
@@ -32,11 +32,6 @@ class Group:
     name_lower: str
     recap_to: Optional[str] = None
     enabled_games: Optional[frozenset] = None
-    # Games this group plays but doesn't score. They hold the day open
-    # (no "day done" scorecard, no early recap) without entering the
-    # leaderboard. ``None`` inherits ``Settings.wait_games``; an empty
-    # frozenset is an explicit "wait for nothing extra" override.
-    wait_games: Optional[frozenset] = None
 
 
 @dataclass(frozen=True)
@@ -149,19 +144,6 @@ class Repository(Protocol):
         Pass ``None`` to remove the override and fall back to the global
         ``Settings.enabled_games`` value. Games are stored as a frozenset
         of game keys (e.g. ``frozenset({'queens', 'zip', 'tango'})``).
-        """
-        ...
-
-    def set_group_wait_games(
-        self, group_id: int, games: Optional[frozenset]
-    ) -> None:
-        """Set the waited-for (played but unscored) games for ``group_id``.
-
-        These hold the day open — the "day done" scorecard and the
-        early-fire recap wait for them — without ever reaching the
-        leaderboard. Pass ``None`` to drop the override and inherit
-        ``Settings.wait_games``; pass an empty frozenset to wait for
-        nothing beyond the tracked games.
         """
         ...
 
@@ -508,24 +490,14 @@ class InMemoryRepository:
         existing = self._groups.get(group_id)
         if existing is None:
             return
-        self._groups[group_id] = _dc_replace(
-            existing,
+        updated = Group(
+            id=existing.id,
+            name=existing.name,
+            name_lower=existing.name_lower,
+            recap_to=existing.recap_to,
             enabled_games=frozenset(games) if games else None,
         )
-
-    def set_group_wait_games(
-        self, group_id: int, games: Optional[frozenset]
-    ) -> None:
-        existing = self._groups.get(group_id)
-        if existing is None:
-            return
-        # ``None`` clears the override; an empty set is a real value
-        # ("wait for nothing"), so it must survive the round-trip —
-        # hence the explicit ``is None`` test rather than truthiness.
-        self._groups[group_id] = _dc_replace(
-            existing,
-            wait_games=None if games is None else frozenset(games),
-        )
+        self._groups[group_id] = updated
 
     # ---- teams -----------------------------------------------------------
 
@@ -928,8 +900,6 @@ class SupabaseRepository:
         # at the migration, rather than every `team` command blowing up
         # with a raw Postgres error.
         self._has_team_tables = self._detect_team_tables()
-        # ``groups.wait_games`` is newer than the groups table itself.
-        self._has_group_wait_column = self._detect_group_wait_column()
 
     def _detect_notifications_column(self) -> bool:
         """Probe whether ``players.notifications_enabled`` exists.
@@ -985,34 +955,6 @@ class SupabaseRepository:
             )
             return False
 
-    def _detect_group_wait_column(self) -> bool:
-        """Probe whether ``groups.wait_games`` exists.
-
-        Landed after the groups table itself, so it gets its own probe:
-        on a pre-migration schema the column is dropped from the SELECT
-        list and every group simply inherits ``Settings.wait_games``.
-        """
-        if not self._has_group_columns:
-            return False
-        try:
-            (
-                self._client.table("groups")
-                .select("wait_games")
-                .limit(1)
-                .execute()
-            )
-            return True
-        except Exception as exc:  # noqa: BLE001
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "groups.wait_games column missing (%s). Run `db/schema.sql` "
-                "to enable per-group waited-for games. Until then every "
-                "group inherits the global WAIT_FOR_GAMES setting.",
-                exc,
-            )
-            return False
-
     def _detect_team_tables(self) -> bool:
         """Probe whether the teams / team_members tables exist."""
         try:
@@ -1053,14 +995,6 @@ class SupabaseRepository:
             group_id=row.get("group_id"),
         )
 
-    def _group_select_cols(self) -> str:
-        """SELECT column list for reads against ``groups`` — omits
-        ``wait_games`` on schemas that predate it."""
-        base = "id, name, name_lower, recap_to, enabled_games"
-        if self._has_group_wait_column:
-            base += ", wait_games"
-        return base
-
     def _row_to_group(self, row: Dict[str, Any]) -> Group:
         import json
         raw_games = row.get("enabled_games")
@@ -1070,24 +1004,12 @@ class SupabaseRepository:
                 enabled_games = frozenset(json.loads(raw_games))
             except Exception:
                 pass
-        # ``wait_games`` distinguishes NULL (inherit the global setting)
-        # from ``'[]'`` (an explicit "wait for nothing"), so the empty
-        # JSON array must decode to an empty frozenset rather than to
-        # ``None`` the way ``enabled_games`` treats its own empty value.
-        raw_wait = row.get("wait_games")
-        wait_games: Optional[frozenset] = None
-        if raw_wait is not None:
-            try:
-                wait_games = frozenset(json.loads(raw_wait))
-            except Exception:
-                pass
         return Group(
             id=row["id"],
             name=row["name"],
             name_lower=row["name_lower"],
             recap_to=row.get("recap_to"),
             enabled_games=enabled_games,
-            wait_games=wait_games,
         )
 
     def get_or_create_group(self, name: str) -> Group:
@@ -1099,7 +1021,7 @@ class SupabaseRepository:
         key = name.lower()
         resp = (
             self._client.table("groups")
-            .select(self._group_select_cols())
+            .select("id, name, name_lower, recap_to, enabled_games")
             .eq("name_lower", key)
             .limit(1)
             .execute()
@@ -1118,7 +1040,7 @@ class SupabaseRepository:
             return None
         resp = (
             self._client.table("groups")
-            .select(self._group_select_cols())
+            .select("id, name, name_lower, recap_to, enabled_games")
             .eq("name_lower", name.lower())
             .limit(1)
             .execute()
@@ -1132,7 +1054,7 @@ class SupabaseRepository:
             return None
         resp = (
             self._client.table("groups")
-            .select(self._group_select_cols())
+            .select("id, name, name_lower, recap_to, enabled_games")
             .eq("id", group_id)
             .limit(1)
             .execute()
@@ -1146,7 +1068,7 @@ class SupabaseRepository:
             return []
         resp = (
             self._client.table("groups")
-            .select(self._group_select_cols())
+            .select("id, name, name_lower, recap_to, enabled_games")
             .order("id")
             .execute()
         )
@@ -1187,26 +1109,6 @@ class SupabaseRepository:
         (
             self._client.table("groups")
             .update({"enabled_games": value})
-            .eq("id", group_id)
-            .execute()
-        )
-
-    def set_group_wait_games(
-        self, group_id: int, games: Optional[frozenset]
-    ) -> None:
-        if not self._has_group_wait_column:
-            raise RuntimeError(
-                "groups.wait_games column missing — run schema migration "
-                "before using the waitfor command"
-            )
-        import json
-        # ``None`` → SQL NULL (inherit the global setting); an empty set
-        # is stored as ``'[]'`` so "wait for nothing" survives a reload
-        # instead of silently reverting to the inherited value.
-        value = None if games is None else json.dumps(sorted(games))
-        (
-            self._client.table("groups")
-            .update({"wait_games": value})
             .eq("id", group_id)
             .execute()
         )

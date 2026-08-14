@@ -1665,7 +1665,6 @@ def render_day_complete_summary(
     today_scores: Sequence[ScoreRow],
     week_scores: Sequence[ScoreRow],
     enabled_games: FrozenSet[str],
-    wait_games: FrozenSet[str] = frozenset(),
 ) -> str:
     """Build the personal "day done" summary body.
 
@@ -1674,11 +1673,6 @@ def render_day_complete_summary(
     :func:`assign_daily_points` (the same helper the daily recap
     uses, so points match). Weekly standing is computed from
     ``week_scores`` via :func:`weekly_leaderboard`.
-
-    ``wait_games`` are games the player played that don't score. They
-    get their own tail section — listed with the raw time so the
-    scorecard reflects the day actually played, but with no rank, no
-    points, and no effect on the totals.
     """
     # Group today's scores by (game, puzzle_no) so per-game points
     # match exactly what the group recap will show.
@@ -1743,25 +1737,6 @@ def render_day_complete_summary(
                 f"currently {week_rank}/{len(lb)}."
             )
 
-    # Waited-for games close the card: they held the day open, so the
-    # player should see them acknowledged — but they carry no rank and
-    # no points, and never touched ``total_today`` or the week line.
-    unscored = [
-        s
-        for game in GAME_DISPLAY_ORDER
-        if game in wait_games and game not in enabled_games
-        for s in today_scores
-        if s.game == game and s.player_id == player.id
-    ]
-    if unscored:
-        lines.append("")
-        lines.append("Not scored:")
-        for s in unscored:
-            lines.append(
-                f"  {GAME_DISPLAY[s.game]}: "
-                f"{format_raw_score(s.game, s.raw_score)}"
-            )
-
     return "\n".join(lines)
 
 
@@ -1772,28 +1747,22 @@ def maybe_notify_day_complete(
     player: Player,
     today: date,
     enabled_games: FrozenSet[str],
-    wait_games: FrozenSet[str] = frozenset(),
     triggering_game: Optional[str] = None,
     deliver: bool = True,
     group_id: int,
 ) -> Optional[str]:
     """DM ``player`` a summary when this submission means they've now
-    played every game of the day for ``today``. Returns the DM body
+    played every enabled game for ``today``. Returns the DM body
     sent, or ``None`` when the player isn't done yet.
-
-    "Every game of the day" is ``enabled_games | wait_games``: the
-    scored games plus any the group plays without scoring. A group
-    that plays an untracked game would otherwise get its "day done"
-    card while that game was still outstanding.
 
     Idempotent-in-practice: "has every game" only becomes true once
     per day per player (further submissions for an already-done game
-    bounce off the uniqueness constraint). The exception is a game
-    outside the day set entirely — someone who plays Crossclimb after
-    finishing would re-trip the check — so callers pass
-    ``triggering_game`` and a submission that isn't part of the day is
-    ignored. Callers still wrap the invocation in try/except so a
-    transient DB hiccup can't mask the webhook ack.
+    bounce off the uniqueness constraint). The exception is a game the
+    group doesn't track — someone who plays Crossclimb after finishing
+    re-trips the check — so callers pass ``triggering_game`` and a
+    submission outside the tracked set is ignored. Callers still wrap
+    the invocation in try/except so a transient DB hiccup can't mask
+    the webhook ack.
 
     ``deliver`` toggles whether a separate Twilio DM goes out. The
     webhook calls this with ``deliver=False`` so the summary can
@@ -1802,10 +1771,8 @@ def maybe_notify_day_complete(
     """
     if not enabled_games:
         return None
-
-    required = set(enabled_games) | set(wait_games)
-    if triggering_game is not None and triggering_game not in required:
-        return None  # not part of the day — can't be what completed it
+    if triggering_game is not None and triggering_game not in enabled_games:
+        return None  # untracked — can't be what completed the day
 
     today_scores = repo.list_scores(
         date_from=today, date_to=today, group_id=group_id
@@ -1813,9 +1780,9 @@ def maybe_notify_day_complete(
     played = {
         s.game
         for s in today_scores
-        if s.player_id == player.id and s.game in required
+        if s.player_id == player.id and s.game in enabled_games
     }
-    if played < required:
+    if played < set(enabled_games):
         return None  # still outstanding games, not done yet
 
     # Pull the full week so the summary can render the player's
@@ -1831,7 +1798,6 @@ def maybe_notify_day_complete(
         today_scores=today_scores,
         week_scores=week_scores,
         enabled_games=enabled_games,
-        wait_games=frozenset(wait_games),
     )
 
     if not deliver:

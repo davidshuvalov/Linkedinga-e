@@ -222,33 +222,6 @@ class TestGroupMethods:
         )
 
 
-    def test_wait_games_round_trip_distinguishes_none_from_empty(self):
-        # ``None`` means "inherit the global setting"; an empty set is
-        # the explicit "wait for nothing" the ``waitfor none`` command
-        # writes. Collapsing them would silently re-inherit.
-        repo = InMemoryRepository()
-        g = repo.get_or_create_group("Crew")
-        assert repo.get_group(g.id).wait_games is None
-
-        repo.set_group_wait_games(g.id, frozenset({"wend"}))
-        assert repo.get_group(g.id).wait_games == frozenset({"wend"})
-
-        repo.set_group_wait_games(g.id, frozenset())
-        assert repo.get_group(g.id).wait_games == frozenset()
-
-        repo.set_group_wait_games(g.id, None)
-        assert repo.get_group(g.id).wait_games is None
-
-    def test_setting_tracked_games_leaves_wait_games_alone(self):
-        repo = InMemoryRepository()
-        g = repo.get_or_create_group("Crew")
-        repo.set_group_wait_games(g.id, frozenset({"wend"}))
-        repo.set_group_games(g.id, frozenset({"queens", "zip"}))
-        stored = repo.get_group(g.id)
-        assert stored.enabled_games == frozenset({"queens", "zip"})
-        assert stored.wait_games == frozenset({"wend"})
-
-
 class TestSupabaseSchemaDetection:
     """``SupabaseRepository`` probes for the ``notifications_enabled``
     column once on construction and gracefully omits it from later

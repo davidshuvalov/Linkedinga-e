@@ -709,56 +709,9 @@ class TestMaybeNotifyDayComplete:
          group_id=repo.default_group.id,)
         assert body is None
 
-    def test_silent_when_no_enabled_games(self):
-        repo = TestRepo()
-        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
-        body = maybe_notify_day_complete(
-            repo, None,
-            player=alice,
-            today=TUE,
-            enabled_games=frozenset(),
-         group_id=repo.default_group.id,)
-        assert body is None
-
-    def test_waits_for_an_unscored_game(self):
-        # Regression: "Day done" used to land as soon as the scored
-        # games were in, even when the player still had Wend to play.
-        repo = TestRepo()
-        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
-        repo.insert_score(
-            player_id=alice.id, game="queens", puzzle_no=714,
-            puzzle_date=TUE, raw_score=30, share_text="",
-        )
-        body = maybe_notify_day_complete(
-            repo, None,
-            player=alice,
-            today=TUE,
-            enabled_games=frozenset({"queens"}),
-            wait_games=frozenset({"wend"}),
-            group_id=repo.default_group.id,
-        )
-        assert body is None
-
-        repo.insert_score(
-            player_id=alice.id, game="wend", puzzle_no=67,
-            puzzle_date=TUE, raw_score=42, share_text="",
-        )
-        body = maybe_notify_day_complete(
-            repo, None,
-            player=alice,
-            today=TUE,
-            enabled_games=frozenset({"queens"}),
-            wait_games=frozenset({"wend"}),
-            group_id=repo.default_group.id,
-        )
-        assert body is not None
-        assert "Day done, Alice" in body
-
-
-    def test_a_game_outside_the_day_does_not_re_fire_the_card(self):
-        # Alice finished, got her card, then played Crossclimb — which
-        # the group neither scores nor waits for. That's not a second
-        # "day done".
+    def test_untracked_triggering_game_does_not_re_fire(self):
+        # Alice finished and got her card; Crossclimb isn't tracked, so
+        # submitting it later isn't a second completion of the day.
         repo = TestRepo()
         alice = repo.get_or_create_player("whatsapp:+1", "Alice")
         repo.insert_score(
@@ -780,47 +733,16 @@ class TestMaybeNotifyDayComplete:
             triggering_game="crossclimb", group_id=repo.default_group.id,
         ) is None
 
-
-class TestDayCompleteUnscoredSection:
-    """Waited-for games appear under "Not scored" — acknowledged, but
-    carrying no rank, no points, and no effect on any total."""
-
-    def test_unscored_game_listed_without_points(self):
-        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
-        today_scores = [
-            _s(1, "Alice", "queens", 714, 30),
-            _s(2, "Bob",   "queens", 714, 50),
-            _s(1, "Alice", "wend",   67,  42),
-            _s(2, "Bob",   "wend",   67,  20),
-        ]
-        body = render_day_complete_summary(
+    def test_silent_when_no_enabled_games(self):
+        repo = TestRepo()
+        alice = repo.get_or_create_player("whatsapp:+1", "Alice")
+        body = maybe_notify_day_complete(
+            repo, None,
             player=alice,
             today=TUE,
-            today_scores=today_scores,
-            week_scores=today_scores,
-            enabled_games=frozenset({"queens"}),
-            wait_games=frozenset({"wend"}),
-        )
-        assert "Not scored:" in body
-        assert "Wend: 0:42" in body
-        # Alice beat Bob at Queens 1v1 → 5 pts, and Wend adds nothing
-        # even though Bob was faster at it.
-        assert "Today's total: 5 pts." in body
-        assert "Week: 5 pts" in body
-        # No rank / points annotation on the unscored line.
-        assert "rank" not in body.split("Not scored:")[1]
-
-    def test_section_omitted_when_nothing_is_waited_for(self):
-        alice = Player(id=1, whatsapp_id="whatsapp:+1", display_name="Alice")
-        today_scores = [_s(1, "Alice", "queens", 714, 30)]
-        body = render_day_complete_summary(
-            player=alice,
-            today=TUE,
-            today_scores=today_scores,
-            week_scores=today_scores,
-            enabled_games=frozenset({"queens"}),
-        )
-        assert "Not scored:" not in body
+            enabled_games=frozenset(),
+         group_id=repo.default_group.id,)
+        assert body is None
 
 
 # ---------------------------------------------------------------------------

@@ -246,7 +246,7 @@ class TestRenderHelpers:
 # ---------------------------------------------------------------------------
 
 
-def _make_settings(games, wait_games=()):
+def _make_settings(games):
     return Settings(
         twilio_account_sid="ACfake",
         twilio_auth_token="fake_token",
@@ -257,7 +257,6 @@ def _make_settings(games, wait_games=()):
         supabase_key="",
         timezone_name="Australia/Sydney",
         enabled_games=frozenset(games),
-        wait_games=frozenset(wait_games),
     )
 
 
@@ -345,78 +344,6 @@ class TestMaybeFireEarlyRecap:
         # types in recap_log so a Mon–Sat early-fire on a different day
         # wouldn't accidentally suppress this one.
         assert not repo.has_recap_been_sent(sunday, "daily")
-
-
-class TestEarlyRecapWaitsForUnscoredGames:
-    """Regression: the group added Wend to its daily routine but kept
-    it off the leaderboard, and the recap fired the moment the five
-    scored games landed — while everyone was still playing Wend.
-
-    ``wait_games`` holds the day open without letting the game score.
-    """
-
-    @patch("app.jobs.send_recap")
-    def test_does_not_fire_while_a_waited_for_game_is_outstanding(
-        self, mock_send
-    ):
-        repo = TestRepo()
-        today = date(2026, 4, 14)
-        # Both players finished every *scored* game; neither has sent
-        # Wend yet. Under the old rule this fired immediately.
-        _seed(repo, 1, "Alice", today, ["queens", "tango"])
-        _seed(repo, 2, "Bob",   today, ["queens", "tango"])
-        settings = _make_settings({"queens", "tango"}, wait_games={"wend"})
-        now = datetime(2026, 4, 14, 12, 0, tzinfo=LA)
-
-        assert maybe_fire_early_recap(
-            repo, settings, now=now, group_id=repo.default_group.id
-        ) is None
-        mock_send.assert_not_called()
-        assert not repo.has_recap_been_sent(today, "daily")
-
-    @patch("app.jobs.send_recap")
-    def test_fires_once_the_last_waited_for_game_lands(self, mock_send):
-        repo = TestRepo()
-        today = date(2026, 4, 14)
-        _seed(repo, 1, "Alice", today, ["queens", "tango", "wend"])
-        _seed(repo, 2, "Bob",   today, ["queens", "tango"])
-        settings = _make_settings({"queens", "tango"}, wait_games={"wend"})
-        now = datetime(2026, 4, 14, 12, 0, tzinfo=LA)
-
-        # Bob still owes Wend.
-        assert maybe_fire_early_recap(
-            repo, settings, now=now, group_id=repo.default_group.id
-        ) is None
-
-        repo.insert_score(
-            player_id=2, game="wend", puzzle_no=67,
-            puzzle_date=today, raw_score=42, share_text="x",
-        )
-        body = maybe_fire_early_recap(
-            repo, settings, now=now, group_id=repo.default_group.id
-        )
-        assert body is not None
-        mock_send.assert_called_once()
-        # Held the day open, but stayed out of the scoring: the recap
-        # never names it.
-        assert "Wend" not in body
-
-    @patch("app.jobs.send_recap")
-    def test_group_override_beats_global_wait_list(self, mock_send):
-        # The group ran ``waitfor none`` — an explicit empty override,
-        # which must not be mistaken for "inherit the global list".
-        repo = TestRepo()
-        today = date(2026, 4, 14)
-        repo.set_group_wait_games(repo.default_group.id, frozenset())
-        _seed(repo, 1, "Alice", today, ["queens"])
-        settings = _make_settings({"queens"}, wait_games={"wend"})
-        now = datetime(2026, 4, 14, 12, 0, tzinfo=LA)
-
-        body = maybe_fire_early_recap(
-            repo, settings, now=now, group_id=repo.default_group.id
-        )
-        assert body is not None
-        mock_send.assert_called_once()
 
 
 class TestRunDailyRecapSkipsAfterEarlyFire:
@@ -768,24 +695,6 @@ class TestPreResetWarning:
         settings = _make_settings({"queens"})
         with pytest.raises(ValueError):
             run_pre_reset_warning(repo, settings, stage="bogus")
-
-    @pytest.mark.parametrize("stage", PRE_RESET_STAGES)
-    @patch("app.jobs.send_dm")
-    def test_nags_about_an_outstanding_waited_for_game(self, mock_dm, stage):
-        # The recap is blocked on this player's Wend — going quiet on
-        # them is exactly backwards.
-        from app.puzzles import la_date
-        mock_dm.return_value = True
-        repo = TestRepo()
-        now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
-        today_la = la_date(now)
-        _seed(repo, 1, "Alice", today_la, ["queens"])
-        settings = _make_settings({"queens"}, wait_games={"wend"})
-        warned = run_pre_reset_warning(repo, settings, stage=stage, now=now)
-        assert warned == ["whatsapp:+61400000001"]
-        body = mock_dm.call_args[0][2]
-        assert "Wend" in body
-        assert "Queens" not in body  # already in
 
     @patch("app.jobs.send_dm")
     def test_each_stage_picks_distinct_copy(self, mock_dm):

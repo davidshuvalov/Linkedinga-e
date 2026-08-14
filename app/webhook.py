@@ -88,7 +88,7 @@ _HELP_TEXT = (
     "  You:       stats · pb · streak · vs · history · trends · pace\n"
     "             best day · worst day · by day\n"
     "  Teams:     teams · team <name>: <players> · team leaderboard\n"
-    "  Setup:     group · switch · name · notify · undo · track · waitfor\n"
+    "  Setup:     group · switch · name · notify · undo · track\n"
     "  Misc:      rules · prizes · missing · games\n"
     "  Fun:       brag · gripe · nag · 42\n"
     "\n"
@@ -104,12 +104,6 @@ _ULTRA_HELP_TEXT = (
     "    track <game> [game...] — set which games count for your group\n"
     "    track all — track all available games\n"
     "    track reset — revert to the global default game set\n"
-    "    waitfor <game> [game...] — games you play but don't score:\n"
-    "      they hold the daily wrap open until everyone's submitted\n"
-    "      them, but earn no points and never hit the leaderboard\n"
-    "    waitfor none — the day is done once the tracked games are in\n"
-    "    waitfor reset — revert to the global default\n"
-    "    waitfor — show what the group is currently waiting on\n"
     "    games — show which games your group is currently tracking\n"
     "\n"
     "  Teams (members' points are added together):\n"
@@ -1530,16 +1524,11 @@ def _handle_games(
         group.enabled_games if (group is not None and group.enabled_games is not None)
         else settings.enabled_games
     )
-    waiting = _effective_wait_games(settings, group)
     enabled_display = [
         GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in effective
     ]
-    waiting_display = [
-        GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in waiting
-    ]
     disabled_display = [
-        GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER
-        if g not in effective and g not in waiting
+        GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g not in effective
     ]
     header = "Tracked games (this group):" if (
         group is not None and group.enabled_games is not None
@@ -1547,11 +1536,6 @@ def _handle_games(
     lines = [header]
     for g in enabled_display:
         lines.append(f"  - {g}")
-    if waiting_display:
-        lines.append("")
-        lines.append("Waiting on (not scored, but the day isn't done without them):")
-        for g in waiting_display:
-            lines.append(f"  - {g}")
     if disabled_display:
         lines.append("")
         lines.append("Not tracked (scores still stored, not scored):")
@@ -1615,129 +1599,6 @@ def _handle_track(
     repo.set_group_games(group.id, frozenset(resolved))
     names = ", ".join(GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in resolved)
     return f"Now tracking for this group: {names}"
-
-
-def _effective_wait_games(
-    settings: Optional[Settings], group: Optional[Group]
-) -> FrozenSet[str]:
-    """Waited-for games in force for ``group``: its own list when set,
-    otherwise the global default. Tracked games are subtracted — a game
-    that scores is never merely waited for."""
-    if group is not None and group.wait_games is not None:
-        wait = frozenset(group.wait_games)
-    elif settings is not None:
-        wait = frozenset(settings.wait_games)
-    else:
-        wait = frozenset()
-    enabled = (
-        group.enabled_games
-        if (group is not None and group.enabled_games is not None)
-        else (settings.enabled_games if settings else frozenset())
-    )
-    return wait - frozenset(enabled)
-
-
-def _handle_waitfor(
-    repo: Repository,
-    settings: Optional[Settings],
-    group: Group,
-    raw_words: str,
-    *,
-    global_settings: Optional[Settings] = None,
-) -> str:
-    """Set the games this group plays but doesn't score.
-
-    ``settings`` arrives already narrowed to this group's overrides;
-    ``global_settings`` is the un-narrowed original, needed so
-    ``waitfor reset`` can name what the group will inherit rather than
-    echoing the override it just dropped.
-
-    ``waitfor wend`` — hold the day open until Wend is in, but keep it
-    off the leaderboard.
-    ``waitfor none`` / ``waitfor off`` — wait for the tracked games only.
-    ``waitfor reset`` / ``waitfor default`` — inherit the global setting.
-    Bare ``waitfor`` — show the current list.
-    """
-    words = raw_words.strip().lower().split()
-    current = _effective_wait_games(settings, group)
-
-    if not words:
-        if not current:
-            return (
-                "Not waiting on any extra games — the day is done when "
-                "the tracked games are in.\n"
-                "Add one with: waitfor wend\n"
-                "(Waited-for games hold the daily wrap open but never "
-                "score.)"
-            )
-        names = ", ".join(
-            GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in current
-        )
-        return (
-            f"Waiting on (played, never scored): {names}\n"
-            "The day isn't done — and the wrap doesn't fire — until "
-            "these are in.\n"
-            "Change with: waitfor <game> ... / waitfor none"
-        )
-
-    if words[0] in ("none", "off", "clear"):
-        repo.set_group_wait_games(group.id, frozenset())
-        return (
-            "No longer waiting on any extra games. The day is done "
-            "once the tracked games are in."
-        )
-
-    if words[0] in ("reset", "default"):
-        repo.set_group_wait_games(group.id, None)
-        fallback = _effective_wait_games(global_settings or settings, None)
-        if not fallback:
-            return "Waited-for games reset to global default: none."
-        names = ", ".join(
-            GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in fallback
-        )
-        return f"Waited-for games reset to global default: {names}"
-
-    resolved: List[str] = []
-    unknown: List[str] = []
-    for w in words:
-        key = _parse_single_game_key(w)
-        if key is not None:
-            resolved.append(key)
-        else:
-            unknown.append(w)
-    if unknown:
-        return (
-            f"Unknown game(s): {', '.join(unknown)}. "
-            f"Known games: {', '.join(GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER)}"
-        )
-
-    # A tracked game already holds the day open *and* scores, so asking
-    # to wait for one is a no-op worth naming rather than silently
-    # dropping — the sender probably wanted ``track`` minus that game.
-    enabled = (
-        group.enabled_games
-        if group.enabled_games is not None
-        else (settings.enabled_games if settings else frozenset())
-    )
-    clashing = [g for g in resolved if g in enabled]
-    if clashing:
-        names = ", ".join(GAME_DISPLAY[g] for g in clashing)
-        return (
-            f"{names} already tracked for this group — tracked games "
-            f"score AND hold the day open.\n"
-            f"To make one wait-only, drop it from tracking first "
-            f"(track <the games you want scored>)."
-        )
-
-    repo.set_group_wait_games(group.id, frozenset(resolved))
-    names = ", ".join(
-        GAME_DISPLAY[g] for g in GAME_DISPLAY_ORDER if g in resolved
-    )
-    return (
-        f"Now waiting on: {names}.\n"
-        f"Scores are stored but never counted — the day just isn't "
-        f"done (and the wrap doesn't fire) until they're in."
-    )
 
 
 # Static scoring explanation. Stable text — kept inline so it's easy
@@ -3676,34 +3537,21 @@ def handle_inbound(
 
     group_id = sender_group.id
 
-    # Override settings.enabled_games / wait_games with this group's own
-    # lists if it has them configured. This propagates automatically to
-    # every handler that receives ``settings``. The two are independent:
-    # a group can pin its scored games and still inherit the global
-    # waited-for list, or the other way round.
+    # Override settings.enabled_games with this group's specific game list
+    # if the group has its own games configured. This propagates automatically
+    # to every handler that receives ``settings``.
     #
-    # ``global_settings`` keeps the un-narrowed original for the
-    # handlers that have to name what a group would inherit if it
-    # dropped its override.
-    global_settings = settings
-    if settings is not None:
+    # The score path below reads the ``enabled_games`` *argument* rather
+    # than ``settings``, so it needs the same override applied — without
+    # it, a group that ran ``track`` was still judged against the global
+    # env default. A group that added Wend got told "(Not tracked for the
+    # leaderboard.)" on every Wend share, and its day-complete scorecard
+    # fired as soon as the five default games were in, while Wend was
+    # still outstanding.
+    if settings is not None and sender_group.enabled_games is not None:
         from dataclasses import replace as _dc_replace
-        if sender_group.enabled_games is not None:
-            settings = _dc_replace(
-                settings, enabled_games=sender_group.enabled_games
-            )
-            # The score path below reads the ``enabled_games`` argument
-            # rather than ``settings``, so it needs the same override —
-            # otherwise a group that ran ``track`` still gets the global
-            # list for its "(Not tracked)" note and day-complete gate.
-            enabled_games = sender_group.enabled_games
-        if sender_group.wait_games is not None:
-            # A game in both lists is just a tracked game.
-            settings = _dc_replace(
-                settings,
-                wait_games=frozenset(sender_group.wait_games)
-                - frozenset(settings.enabled_games),
-            )
+        settings = _dc_replace(settings, enabled_games=sender_group.enabled_games)
+        enabled_games = sender_group.enabled_games
 
     # Check for commands before attempting score parsing
     if lower in ("help", "?", "commands"):
@@ -3904,14 +3752,6 @@ def handle_inbound(
     if lower in ("track", "tracking") or lower.startswith("track "):
         raw_args = lower[len("track"):].strip() if lower.startswith("track") else ""
         return _handle_track(repo, settings, sender_group, raw_args)
-    if lower in ("waitfor", "wait for", "waiting") or lower.startswith(
-        ("waitfor ", "wait for ")
-    ):
-        raw_args = lower.replace("wait for", "waitfor", 1)[len("waitfor"):].strip()
-        return _handle_waitfor(
-            repo, settings, sender_group, raw_args,
-            global_settings=global_settings,
-        )
     if lower in ("rules", "scoring"):
         return _handle_rules()
     if lower in ("prize", "prizes"):
@@ -4170,9 +4010,6 @@ def handle_inbound(
             player=player,
             today=puzzle_date,
             enabled_games=enabled_games,
-            wait_games=(
-                settings.wait_games if settings is not None else frozenset()
-            ),
             triggering_game=parsed.game,
             deliver=False,
             group_id=group_id,
