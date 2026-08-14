@@ -34,10 +34,28 @@ class Settings:
     supabase_key: str
     timezone_name: str
     enabled_games: frozenset
+    # Games the group plays but doesn't score. They hold the day open —
+    # nothing is "done for today" until these are in — but they never
+    # reach the leaderboard, points, prizes, or badges. See
+    # :attr:`day_games`.
+    wait_games: frozenset = frozenset()
 
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone_name)
+
+    @property
+    def day_games(self) -> frozenset:
+        """Every game that must be submitted before the day counts as
+        finished — the scored games plus the waited-for ones.
+
+        This is the completion set: the "day done" scorecard, the
+        early-fire group recap, and the morning / pre-reset nags all
+        ask "has this player played :attr:`day_games` yet?".
+        :attr:`enabled_games` stays the *scoring* set, so a waited-for
+        game delays the wrap without earning a single point.
+        """
+        return frozenset(self.enabled_games) | frozenset(self.wait_games)
 
     @property
     def has_supabase(self) -> bool:
@@ -89,6 +107,14 @@ def load_settings() -> Settings:
     raw_games = _env("ENABLED_GAMES", _DEFAULT_ENABLED)
     enabled = frozenset(g.strip() for g in raw_games.split(",") if g.strip())
 
+    # Waited-for games are held out of scoring, so a game listed in both
+    # lists is simply a tracked game — drop the overlap rather than let
+    # the two settings contradict each other.
+    raw_wait = _env("WAIT_FOR_GAMES", "")
+    wait = frozenset(
+        g.strip() for g in raw_wait.split(",") if g.strip()
+    ) - enabled
+
     supabase_url = _normalize_supabase_url(_env("SUPABASE_URL"))
     if supabase_url and not supabase_url.startswith(("http://", "https://")):
         # Warn loudly — a bare hostname produces PGRST125 on every call.
@@ -107,5 +133,6 @@ def load_settings() -> Settings:
         supabase_key=_env("SUPABASE_KEY"),
         timezone_name=_env("APP_TIMEZONE", "Australia/Sydney"),
         enabled_games=enabled,
+        wait_games=wait,
     )
 

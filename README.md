@@ -268,6 +268,33 @@ re-enable them later), but they don't appear in recaps, wraps, or the
 leaderboard. The webhook reply adds a note when a disabled game is
 submitted.
 
+### Waited-for games
+
+A game can be part of the group's daily routine without being part of
+the competition. `WAIT_FOR_GAMES` lists those:
+
+```
+WAIT_FOR_GAMES=wend
+```
+
+A waited-for game **holds the day open** — the personal "day done"
+scorecard, the early-fire group recap, and the morning / pre-reset nags
+all wait for it — but it never scores: no points, no ranks, no prizes,
+no badges, nothing in the recap or wrap. The "day done" card lists it
+under a `Not scored:` tail so the player sees it acknowledged.
+
+Without this, a group that picks up Wend gets its wrap the moment the
+five *scored* games land — i.e. while everyone is still mid-round.
+
+The two lists are disjoint: a game named in both is simply a tracked
+game (tracked games already score *and* hold the day open), and the
+overlap is dropped. Per-group overrides use `waitfor` (below), which is
+independent of `track` — setting one never disturbs the other.
+
+Scoring and competitive gating stay on the tracked set: the no-peek
+gate on today's recap / leaderboard still unlocks once a player has
+finished the games that actually count.
+
 ## Weekly prize categories
 
 The wrap shows a compact leaderboard (one line per player, sorted by
@@ -567,7 +594,7 @@ roster carries no scores.
 | `leaderboard <game>` (e.g. `leaderboard queens`) | Per-game weekly standings. Gated; see above. |
 | `prizes`                                     | Live snapshot of who's winning each prize. |
 | `missing` / `who` / `ghosts`                 | Players who played earlier this week but not today. |
-| `games` / `enabled`                          | Which games are tracked vs parsed-but-untracked. |
+| `games` / `enabled`                          | Which games are tracked, which are only waited for, and which are parsed-but-untracked. |
 | `rules` / `scoring`                          | How points are calculated. |
 
 **About you**
@@ -586,6 +613,9 @@ roster carries no scores.
 | `undo`             | Delete your most recent submission for today (LA). Older days are locked. |
 | `name <new>`       | Change your display name (overrides WhatsApp profile name). |
 | `notify on` / `off` | Opt in/out of daily recap DMs. Scores still accepted when off. |
+| `track <game> ...` | Set which games your group scores. `track all` / `track reset` for every game / the global default. |
+| `waitfor <game> ...` | Games your group plays but doesn't score — they hold the daily wrap open until everyone's submitted them, and earn nothing. Bare `waitfor` shows the current list. |
+| `waitfor none` | The day is done once the tracked games are in. `waitfor reset` inherits the global default instead. |
 | `help` / `?`       | Show the full command list. |
 | `unparsed`         | Last 10 unparsed messages (admin debugging). |
 

@@ -59,11 +59,25 @@ _ACTIVE_WINDOW_DAYS = 7
 
 
 def _settings_for_group(settings: Settings, group: Group) -> Settings:
-    """Return ``settings`` with ``enabled_games`` overridden by the group's
-    own game list when the group has one configured, otherwise unchanged."""
+    """Return ``settings`` with ``enabled_games`` / ``wait_games``
+    overridden by the group's own lists when it has them configured,
+    otherwise unchanged.
+
+    The two overrides are independent: a group can pin its scored games
+    while inheriting the global waited-for list, or vice versa.
+    """
+    overrides: Dict[str, Any] = {}
     if group.enabled_games is not None:
-        return _dc_replace(settings, enabled_games=group.enabled_games)
-    return settings
+        overrides["enabled_games"] = group.enabled_games
+    if group.wait_games is not None:
+        # A waited-for game that's also tracked is just a tracked game;
+        # dropping the overlap keeps ``day_games`` honest either way.
+        overrides["wait_games"] = frozenset(group.wait_games) - frozenset(
+            overrides.get("enabled_games", settings.enabled_games)
+        )
+    if not overrides:
+        return settings
+    return _dc_replace(settings, **overrides)
 
 
 def _is_sunday(day: date) -> bool:
@@ -1180,7 +1194,13 @@ def _everyone_done_today(
     repo: Repository, settings: Settings, today: date, *, group_id: int
 ) -> bool:
     """Has every recently-active player in ``group_id`` submitted every
-    enabled game for ``today`` (LA)? Drives the early-fire decision."""
+    game of the day for ``today`` (LA)? Drives the early-fire decision.
+
+    "Game of the day" is :attr:`Settings.day_games` — the tracked games
+    plus any waited-for ones. A group that plays an untracked game (say
+    Wend) would otherwise get its recap the moment the *scored* games
+    landed, i.e. while everyone was still mid-round.
+    """
     if not settings.enabled_games:
         return False
 
@@ -1189,17 +1209,17 @@ def _everyone_done_today(
     if not active_players:
         return False
 
+    required = set(settings.day_games)
     today_scores = repo.list_scores(
         date_from=today, date_to=today, group_id=group_id
     )
     games_by_player: dict[int, set[str]] = {}
     for s in today_scores:
-        if s.game in settings.enabled_games:
+        if s.game in required:
             games_by_player.setdefault(s.player_id, set()).add(s.game)
 
-    enabled = set(settings.enabled_games)
     return all(
-        games_by_player.get(p.id, set()) >= enabled
+        games_by_player.get(p.id, set()) >= required
         for p in active_players
     )
 
@@ -1598,7 +1618,11 @@ def _build_morning_nudge(
 ) -> str:
     """Render the per-player nudge body. ``played_games`` is the set of
     games the player has already submitted today; the message lists
-    only the enabled games they still owe.
+    only the games they still owe.
+
+    Callers pass the day's full requirement set as ``enabled_games``
+    (:attr:`Settings.day_games` — tracked plus waited-for), so a game
+    that holds the recap open still shows under "Still to play".
 
     ``today`` drives the day-ordinal rotation across the opener and
     sign-off pools so the same player doesn't read identical copy
@@ -1670,6 +1694,11 @@ def _send_nudges_to_lagging_players(
     enabled = settings.enabled_games
     if not enabled:
         return [], 0
+    # "Finished today" means the whole day set — tracked games plus
+    # waited-for ones — so the nudge stays in step with the recap.
+    # ``enabled`` still scopes the competitive context lines below:
+    # an unscored game has no leaderboard position to riff on.
+    required = settings.day_games
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
     active_players = repo.list_players_active_since(since, group_id=group_id)
@@ -1681,7 +1710,7 @@ def _send_nudges_to_lagging_players(
     )
     games_by_player: dict[int, set[str]] = {}
     for s in today_scores:
-        if s.game in enabled:
+        if s.game in required:
             games_by_player.setdefault(s.player_id, set()).add(s.game)
 
     # Pull two date ranges once, reuse per player for the contextual
@@ -1711,7 +1740,7 @@ def _send_nudges_to_lagging_players(
         if not player.notifications_enabled:
             continue
         played = games_by_player.get(player.id, set())
-        if played >= set(enabled):
+        if played >= set(required):
             continue  # they're already done — nothing to nudge about
 
         context_line: Optional[str] = None
@@ -1735,7 +1764,7 @@ def _send_nudges_to_lagging_players(
             )
 
         body = _build_morning_nudge(
-            player.display_name, enabled, played,
+            player.display_name, required, played,
             today=today,
             context_line=context_line,
         )
@@ -2081,9 +2110,13 @@ def _run_pre_reset_warning_for_group(
     now: datetime,
 ) -> List[str]:
     today = la_date(now)
-    enabled = settings.enabled_games
-    if not enabled:
+    if not settings.enabled_games:
         return []
+    # Nag on the full day set, not just the scored games — the day
+    # isn't over until the waited-for games are in either, and going
+    # quiet on someone the recap is still blocked on is the opposite
+    # of what this cron is for.
+    required = settings.day_games
 
     since = today - timedelta(days=_ACTIVE_WINDOW_DAYS)
     active_players = repo.list_players_active_since(since, group_id=group.id)
@@ -2095,7 +2128,7 @@ def _run_pre_reset_warning_for_group(
     )
     games_by_player: dict[int, set[str]] = {}
     for s in today_scores:
-        if s.game in enabled:
+        if s.game in required:
             games_by_player.setdefault(s.player_id, set()).add(s.game)
 
     warned: List[str] = []
@@ -2104,7 +2137,7 @@ def _run_pre_reset_warning_for_group(
             continue
         played = games_by_player.get(player.id, set())
         missing_ids = [
-            g for g in GAME_DISPLAY_ORDER if g in enabled and g not in played
+            g for g in GAME_DISPLAY_ORDER if g in required and g not in played
         ]
         if not missing_ids:
             continue  # player is done — no warning needed

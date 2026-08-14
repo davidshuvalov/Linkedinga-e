@@ -24,8 +24,42 @@ def _clean_env(monkeypatch):
         "SUPABASE_KEY",
         "APP_TIMEZONE",
         "ENABLED_GAMES",
+        "WAIT_FOR_GAMES",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+class TestWaitForGames:
+    """``WAIT_FOR_GAMES`` lists games the group plays but doesn't score.
+    They belong to ``day_games`` (the completion set) and never to
+    ``enabled_games`` (the scoring set)."""
+
+    def test_unset_means_no_waiting(self):
+        settings = load_settings()
+        assert settings.wait_games == frozenset()
+        assert settings.day_games == settings.enabled_games
+
+    def test_wait_game_joins_day_games_but_not_enabled(self, monkeypatch):
+        monkeypatch.setenv("ENABLED_GAMES", "queens,tango")
+        monkeypatch.setenv("WAIT_FOR_GAMES", "wend")
+        settings = load_settings()
+        assert settings.wait_games == frozenset({"wend"})
+        assert settings.enabled_games == frozenset({"queens", "tango"})
+        assert settings.day_games == frozenset({"queens", "tango", "wend"})
+
+    def test_overlap_with_enabled_is_dropped(self, monkeypatch):
+        # A game listed in both is simply a tracked game — it already
+        # scores and already holds the day open.
+        monkeypatch.setenv("ENABLED_GAMES", "queens,tango")
+        monkeypatch.setenv("WAIT_FOR_GAMES", "tango,wend")
+        settings = load_settings()
+        assert settings.wait_games == frozenset({"wend"})
+        assert settings.day_games == frozenset({"queens", "tango", "wend"})
+
+    def test_whitespace_and_empty_entries_tolerated(self, monkeypatch):
+        monkeypatch.setenv("WAIT_FOR_GAMES", " wend , , crossclimb ")
+        settings = load_settings()
+        assert settings.wait_games == frozenset({"wend", "crossclimb"})
 
 
 class TestEmptyEnvVars:

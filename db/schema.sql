@@ -200,6 +200,16 @@ update groups
 set enabled_games = '["mini_sudoku","patches","queens","tango","zip"]'
 where enabled_games is null;
 
+-- ``wait_games`` is a JSON array of game keys the group plays but does
+-- NOT score, e.g. '["wend"]'. They hold the day open — no "day done"
+-- scorecard and no early-fire recap until they're submitted — while
+-- staying out of the leaderboard, points, prizes, and badges. NULL
+-- means inherit the global WAIT_FOR_GAMES setting; '[]' is an explicit
+-- "wait for nothing beyond the tracked games". No column DEFAULT: a
+-- fresh group inherits rather than being pinned to today's list.
+alter table groups
+    add column if not exists wait_games text;
+
 -- ---------- teams ----------
 -- A team is a named subset of a group whose members' points are
 -- summed into a single standing. Teams live inside a group (two

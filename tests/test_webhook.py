@@ -1189,10 +1189,15 @@ class TestUnparsedCommand:
 # ---------------------------------------------------------------------------
 
 
-def _settings_with_default_games():
-    """Settings with a real enabled_games set (needed by recap/wrap)."""
+def _settings_with_default_games(wait_games=()):
+    """Settings with a real enabled_games set (needed by recap/wrap).
+
+    ``wait_games`` are played-but-unscored games — they hold the day
+    open without entering the leaderboard.
+    """
     from app.config import Settings
     return Settings(
+        wait_games=frozenset(wait_games),
         twilio_account_sid="",
         twilio_auth_token="",
         twilio_whatsapp_from="",
@@ -2254,6 +2259,47 @@ class TestConfirmationConsolidation:
         # No separate Twilio DM — both trigger and day-complete
         # bodies are consolidated into the TwiML reply.
         assert mock_dm.call_count == 0
+
+    def test_day_complete_waits_for_an_unscored_game(self, repo):
+        # The group plays Wend but doesn't score it. The scorecard must
+        # hold until Wend is in, then show it under "Not scored".
+        from unittest.mock import patch
+        settings = _settings_with_default_games(wait_games={"wend"})
+        submissions = [
+            ("Queens #714", "0:42"),
+            ("Tango #614", "1:10"),
+            ("Zip #414", "0:33"),
+            ("Patches #214", "1:55"),
+            ("Mini Sudoku #114", "0:50"),  # last *scored* game
+        ]
+        last_reply = None
+        with patch("app.notifications.send_dm"):
+            for header, score in submissions:
+                last_reply = handle_inbound(
+                    repo,
+                    from_="whatsapp:+61400000001",
+                    body=f"{header}\n{score}",
+                    profile_name="Alice", now=NOW,
+                    enabled_games=settings.enabled_games,
+                    settings=settings,
+                )
+            assert last_reply is not None
+            assert "Day done, Alice" not in last_reply
+
+            wend_reply = handle_inbound(
+                repo,
+                from_="whatsapp:+61400000001",
+                body="Wend #67\n0:42",
+                profile_name="Alice", now=NOW,
+                enabled_games=settings.enabled_games,
+                settings=settings,
+            )
+        assert wend_reply is not None
+        assert "Day done, Alice" in wend_reply
+        # Still explicitly out of the scoring.
+        assert "(Not tracked for the leaderboard.)" in wend_reply
+        assert "Not scored:" in wend_reply
+        assert "Wend: 0:42" in wend_reply
 
 
 # ---------------------------------------------------------------------------
@@ -3390,6 +3436,24 @@ class TestTrackCommand:
         assert group is not None
         assert group.enabled_games == frozenset(GAMES)
 
+    def test_track_preserves_the_wait_list(self, repo):
+        # The two overrides are independent — re-running ``track``
+        # must not silently drop what the group is waiting on.
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor wend",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        handle_inbound(
+            repo, from_="whatsapp:+1", body="track queens zip",
+            profile_name="Alice", now=NOW,
+        )
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.enabled_games == frozenset({"queens", "zip"})
+        assert group.wait_games == frozenset({"wend"})
+
     def test_group_games_override_used_in_trends(self, repo):
         """After track sets group games, only those games appear in trends."""
         from datetime import date, timedelta
@@ -3430,6 +3494,105 @@ class TestTrackCommand:
         # Zip should show trend; Queens should NOT appear (not tracked)
         assert "Zip" in reply
         assert "Queens" not in reply
+
+
+class TestWaitForCommand:
+    """``waitfor`` names the games a group plays but doesn't score.
+    They hold the daily wrap open; they never reach the leaderboard."""
+
+    def test_waitfor_sets_group_wait_games(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor wend",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Wend" in reply
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.wait_games == frozenset({"wend"})
+        # Untouched: waiting for a game never scores it.
+        assert group.enabled_games is None
+
+    def test_bare_waitfor_shows_current_list(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        settings = _settings_with_default_games()
+        handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor wend",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Wend" in reply
+
+    def test_waitfor_none_is_an_explicit_empty_override(self, repo):
+        # Distinct from ``waitfor reset``: "wait for nothing" must not
+        # fall back to inheriting the global list.
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        settings = _settings_with_default_games(wait_games={"wend"})
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor none",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "No longer waiting" in reply
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.wait_games == frozenset()
+
+    def test_waitfor_reset_restores_inheritance(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        settings = _settings_with_default_games(wait_games={"wend"})
+        handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor crossclimb",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor reset",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        assert "Wend" in reply  # the inherited global list
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.wait_games is None
+
+    def test_waitfor_rejects_a_tracked_game(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor queens",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "already tracked" in reply
+        group = repo.get_group(repo.default_group.id)
+        assert group is not None
+        assert group.wait_games is None
+
+    def test_waitfor_unknown_game_returns_error(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor widgets",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Unknown" in reply
+
+    def test_games_command_lists_the_wait_set_separately(self, repo):
+        repo.get_or_create_player("whatsapp:+1", "Alice")
+        settings = _settings_with_default_games()
+        handle_inbound(
+            repo, from_="whatsapp:+1", body="waitfor wend",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        reply = handle_inbound(
+            repo, from_="whatsapp:+1", body="games",
+            profile_name="Alice", now=NOW, settings=settings,
+        )
+        waiting_block = reply.split("Waiting on")[1]
+        assert "Wend" in waiting_block
+        # And it's no longer listed as merely untracked.
+        assert "Wend" not in reply.split("Not tracked")[-1]
 
 
 # ---------------------------------------------------------------------------
