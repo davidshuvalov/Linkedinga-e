@@ -37,6 +37,7 @@ from fastapi import Depends, FastAPI, Form, Response
 
 from typing import Callable, Optional
 
+from . import errors as error_log
 from .config import Settings, load_settings
 from .db import InMemoryRepository, Repository, SupabaseRepository
 from .puzzles import expected_puzzle_no as _expected_puzzle_no
@@ -376,6 +377,26 @@ _handler_pool = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+def _diagnostics_reply(body_stripped: str) -> Optional[str]:
+    """Answer the ``errors`` admin command, or None if this isn't one.
+
+    ``errors`` lists the recent failures with their references;
+    ``errors <ref>`` prints one full traceback. Both read only the
+    in-process buffer in :mod:`app.errors`, so they still answer while
+    the database is the thing that's broken — which is exactly when
+    someone asks.
+    """
+    lower = body_stripped.lower()
+    if lower in ("errors", "error", "error log", "errorlog"):
+        return error_log.format_recent()
+    for prefix in ("errors ", "error "):
+        if lower.startswith(prefix):
+            ref = body_stripped[len(prefix):].strip()
+            if ref:
+                return error_log.format_one(ref)
+    return None
+
+
 @app.post("/webhook")
 def webhook(
     from_: str = Form(..., alias="From"),
@@ -402,6 +423,19 @@ def webhook(
     # (visible in Railway logs), and return a valid TwiML apology. Same
     # for a handler that's merely slow: answer with an apology before
     # Twilio gives up on us.
+    now = datetime.now(settings.tz)
+
+    # ``errors`` is answered here rather than in handle_inbound because
+    # it has to work when the handler itself can't run: a Supabase
+    # outage or an unapplied migration fails every message, including
+    # the one asking what's wrong. This path touches no database.
+    diag = _diagnostics_reply((body or "").strip())
+    if diag is not None:
+        return Response(
+            content=_twiml(diag, settings.twilio_status_callback_url or None),
+            media_type="application/xml",
+        )
+
     try:
         future = _handler_pool.submit(
             handle_inbound,
@@ -409,28 +443,39 @@ def webhook(
             from_=from_,
             body=body,
             profile_name=profile_name,
-            now=datetime.now(settings.tz),
+            now=now,
             enabled_games=settings.enabled_games,
             expected_puzzle_no=puzzle_validator,
             settings=settings,
         )
         reply: Optional[str] = future.result(timeout=_HANDLER_TIMEOUT_SECONDS)
     except concurrent.futures.TimeoutError:
+        ref = error_log.record_timeout(
+            whatsapp_id=from_,
+            body=body,
+            when=now,
+            seconds=_HANDLER_TIMEOUT_SECONDS,
+        )
         logger.warning(
-            "handle_inbound exceeded %.0fs for from=%s body=%r — "
+            "handle_inbound exceeded %.0fs for from=%s body=%r (ref %s) — "
             "returning timeout apology (handler keeps running)",
             _HANDLER_TIMEOUT_SECONDS,
             from_,
             (body or "")[:200],
+            ref,
         )
         reply = _TIMEOUT_REPLY
-    except Exception:
+    except Exception as exc:
+        ref = error_log.record_exception(
+            exc, whatsapp_id=from_, body=body, when=now
+        )
         logger.exception(
-            "handle_inbound failed for from=%s body=%r",
+            "handle_inbound failed for from=%s body=%r (ref %s)",
             from_,
             (body or "")[:200],
+            ref,
         )
-        reply = _ERROR_REPLY
+        reply = f"{_ERROR_REPLY}\n\n(ref {ref} — send `errors` to see what broke.)"
     return Response(
         content=_twiml(reply, settings.twilio_status_callback_url or None),
         media_type="application/xml",

@@ -329,6 +329,40 @@ them; All-rounder is visible as the `(N games)` suffix on each row.
    `https://<your-railway-app>.up.railway.app/webhook` (method: POST).
 5. Health check is at `GET /health`.
 
+### When the bot replies "hit an error processing your message"
+
+That reply is the catch-all in `POST /webhook`: `handle_inbound` raised,
+and rather than let Twilio see a 500 (which the sender experiences as
+total silence), the route swallows the exception and apologises. The
+apology carries a short reference:
+
+```
+Sorry, the bot hit an error processing your message. The admins have
+been notified — please try again in a bit.
+
+(ref 4f1a8c — send `errors` to see what broke.)
+```
+
+Text **`errors`** back to the bot for the recent failures — what broke,
+where, and which message caused each one — and **`errors 4f1a8c`** for
+one full traceback. Both are answered before the handler runs and touch
+no database, so they still work when the database is the problem (which
+a blanket failure on every message usually means: Supabase down or
+unreachable, `SUPABASE_URL` / `SUPABASE_KEY` wrong, or `db/schema.sql`
+not applied after a feature that added tables).
+
+The log lives in the process, so a redeploy or restart clears it. The
+durable copy is in the Railway deploy logs — the same failures are
+logged there with full tracebacks and the same reference:
+
+```
+handle_inbound failed for from=whatsapp:+61... body='...' (ref 4f1a8c)
+```
+
+A different apology — "that took too long to put together" — means the
+handler overran its 12s budget rather than raising. Those are recorded
+too, and show up in `errors` as `Timeout`.
+
 ### Scheduled jobs
 
 A single APScheduler cron runs inside the same process as the web
@@ -597,6 +631,7 @@ roster carries no scores.
 | `track <game> ...` | Set which games your group plays. They score, and the daily wrap waits for all of them. `track all` / `track reset` for every game / the global default. |
 | `help` / `?`       | Show the full command list. |
 | `unparsed`         | Last 10 unparsed messages (admin debugging). |
+| `errors`           | Recent handler failures with their reference + where they blew up. `errors <ref>` prints one full traceback (admin debugging). |
 
 **Easter eggs** (once each per day per sender)
 

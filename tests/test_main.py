@@ -722,3 +722,112 @@ class TestTwilioStatusEndpoint:
             data={"MessageStatus": "queued"},
         )
         assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Error log — the generic "the bot hit an error" apology is useless on its
+# own, so every failure is also kept in an in-process buffer that the
+# ``errors`` command reads back. That command must answer even when the
+# database is the thing that's broken.
+# ---------------------------------------------------------------------------
+
+
+def _twiml_text(response) -> str:
+    root = ET.fromstring(response.text)
+    return "\n".join(m.text or "" for m in root.findall("Message"))
+
+
+class TestErrorLog:
+    @pytest.fixture(autouse=True)
+    def _clear_log(self):
+        from app import errors as error_log
+
+        error_log.clear()
+        yield
+        error_log.clear()
+
+    def _post(self, client, body: str, from_: str = "whatsapp:+61400000001"):
+        return client.post(
+            "/webhook",
+            data={"From": from_, "Body": body, "ProfileName": "Alice"},
+        )
+
+    def test_failure_apology_carries_a_reference(self):
+        app.dependency_overrides[get_repository] = lambda: _ExplodingRepo()
+        app.dependency_overrides[get_puzzle_validator] = lambda: None
+        try:
+            client = TestClient(app)
+            text = _twiml_text(self._post(client, "Queens #365 | 1:23"))
+            assert "ref " in text
+            assert "send `errors`" in text
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_errors_command_reports_the_failure_while_db_is_down(self):
+        # Same broken repo for both messages: the diagnostic has to work
+        # in exactly the situation that produced the failure.
+        app.dependency_overrides[get_repository] = lambda: _ExplodingRepo()
+        app.dependency_overrides[get_puzzle_validator] = lambda: None
+        try:
+            client = TestClient(app)
+            self._post(client, "Queens #365 | 1:23")
+            text = _twiml_text(self._post(client, "errors"))
+        finally:
+            app.dependency_overrides.clear()
+
+        assert "RuntimeError: supabase blew up" in text
+        assert "Queens #365" in text  # the message that failed
+        assert "whatsapp:+61400000001" in text
+
+    def test_errors_ref_returns_the_full_traceback(self):
+        app.dependency_overrides[get_repository] = lambda: _ExplodingRepo()
+        app.dependency_overrides[get_puzzle_validator] = lambda: None
+        try:
+            client = TestClient(app)
+            apology = _twiml_text(self._post(client, "Queens #365 | 1:23"))
+            ref = apology.split("(ref ", 1)[1].split(" ", 1)[0]
+            text = _twiml_text(self._post(client, f"errors {ref}"))
+        finally:
+            app.dependency_overrides.clear()
+
+        assert "Traceback (most recent call last)" in text
+        assert "supabase blew up" in text
+
+    def test_errors_command_is_not_forwarded_to_the_handler(
+        self, client, monkeypatch
+    ):
+        import app.main as main_mod
+
+        def boom(*args, **kwargs):  # pragma: no cover - must never run
+            raise AssertionError("handle_inbound should not be called")
+
+        monkeypatch.setattr(main_mod, "handle_inbound", boom)
+        text = _twiml_text(self._post(client, "errors"))
+        assert "No errors recorded" in text
+
+    def test_unknown_reference_says_so(self, client):
+        text = _twiml_text(self._post(client, "errors deadbeef"))
+        assert "No error with reference" in text
+
+    def test_timeout_is_recorded_too(self, client, monkeypatch):
+        import time
+
+        import app.main as main_mod
+
+        def slow_handler(*args, **kwargs):
+            time.sleep(1.0)
+            return "too late"
+
+        monkeypatch.setattr(main_mod, "handle_inbound", slow_handler)
+        monkeypatch.setattr(main_mod, "_HANDLER_TIMEOUT_SECONDS", 0.1)
+        self._post(client, "recap")
+
+        monkeypatch.undo()
+        text = _twiml_text(self._post(client, "errors"))
+        assert "Timeout" in text
+        assert "'recap'" in text
+
+    def test_ordinary_message_still_reaches_the_handler(self, client, repo):
+        # "error" as a prefix mustn't swallow real traffic.
+        text = _twiml_text(self._post(client, "Queens #365 | 1:23"))
+        assert "Queens" in text
