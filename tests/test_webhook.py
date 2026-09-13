@@ -3882,3 +3882,51 @@ class TestBackdatedSubmissions:
         )
         assert "Got it" in reply
         assert repo.scores[0]["puzzle_date"] == self.TODAY_LA
+
+
+class TestRecordsAndDowCommands:
+    """`records <game>` / `dow <game>` read scores with the repo's
+    ``game=`` filter — the one query path the shared TestRepo fixture
+    used to drop on the floor, so neither command had any coverage.
+    """
+
+    def _seed_queens(self, repo):
+        from app.puzzles import la_date
+        today = la_date(NOW)
+        alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
+        bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")
+        for offset, (player, raw) in enumerate(
+            [(alice, 30), (bob, 45), (alice, 20)]
+        ):
+            repo.insert_score(
+                player_id=player.id, game="queens", puzzle_no=700 + offset,
+                puzzle_date=today - timedelta(days=offset),
+                raw_score=raw, share_text="",
+            )
+
+    def test_records_ranks_all_time_bests(self, repo):
+        self._seed_queens(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="records queens",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Queens — all-time top scores:" in reply
+        assert "Alice" in reply and "Bob" in reply
+
+    def test_records_with_no_scores_says_so(self, repo):
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="records queens",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "No Queens scores yet" in reply
+
+    def test_dow_groups_by_weekday(self, repo):
+        self._seed_queens(repo)
+        reply = handle_inbound(
+            repo, from_="whatsapp:+61400000001", body="dow queens",
+            profile_name="Alice", now=NOW,
+            settings=_settings_with_default_games(),
+        )
+        assert "Queens — top 3 by day of week (all time):" in reply

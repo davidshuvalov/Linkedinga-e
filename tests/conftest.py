@@ -91,11 +91,13 @@ class TestRepo(InMemoryRepository):
         date_from: date,
         date_to: date,
         group_id: Optional[int] = None,
+        game: Optional[str] = None,
     ) -> List[ScoreRow]:
         return super().list_scores(
             date_from=date_from,
             date_to=date_to,
             group_id=group_id if group_id is not None else self.default_group.id,
+            game=game,
         )
 
     def list_active_whatsapp_ids(
