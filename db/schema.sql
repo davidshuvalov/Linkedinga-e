@@ -59,7 +59,7 @@ create index if not exists players_group_id_idx on players (group_id);
 
 -- ---------- scores ----------
 -- raw_score convention:
---   queens/tango/crossclimb/zip/patches/mini_sudoku → seconds (lower is better)
+--   queens/tango/crossclimb/zip/patches/mini_sudoku/wend/sumbreak → seconds (lower is better)
 --   pinpoint                                        → guess count 1..5 (lower is better)
 create table if not exists scores (
     id          bigserial primary key,
@@ -87,7 +87,8 @@ alter table scores add constraint scores_game_check
         'zip',
         'patches',
         'mini_sudoku',
-        'wend'
+        'wend',
+        'sumbreak'
     ));
 
 create index if not exists scores_puzzle_date_idx on scores (puzzle_date);

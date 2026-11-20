@@ -50,6 +50,7 @@ PUZZLE_EPOCH: Dict[str, Tuple[date, int]] = {
     "patches":     (date(2026, 4, 22), 36),
     "mini_sudoku": (date(2026, 4, 22), 254),
     "wend":        (date(2026, 6, 9), 1),   # Wend #1 confirmed 2026-06-09
+    "sumbreak":    (date(2026, 11, 20), 3), # Sumbreak #3 confirmed 2026-11-20
 }
 
 

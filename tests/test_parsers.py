@@ -410,3 +410,24 @@ class TestRealSamples:
         r = parse_pinpoint(self.REAL_PINPOINT)
         assert r is not None
         assert r.raw_score == 4  # from "4 guesses", not the keycaps
+
+
+class TestSumbreak:
+    REAL = "Sumbreak #3 | 0:03 🔢\nWith no hints & no backtracks\nlnkd.in/sumbreak."
+
+    def test_real_sample(self):
+        from app.parsers import parse_sumbreak
+        assert parse_sumbreak(self.REAL) == ParsedScore("sumbreak", 3, 3, self.REAL)
+
+    def test_parse_any_dispatches(self):
+        from app.parsers import parse_any
+        r = parse_any(self.REAL)
+        assert r is not None and r.game == "sumbreak"
+
+    def test_looks_like_score(self):
+        from app.parsers import looks_like_score
+        assert looks_like_score("Sumbreak #4 something")
+
+    def test_does_not_steal_other_games(self):
+        from app.parsers import parse_sumbreak
+        assert parse_sumbreak("Queens #1 | 0:30") is None
