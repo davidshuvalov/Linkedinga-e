@@ -134,3 +134,38 @@ def test_wired_in_without_duplicates(key):
     extra = getattr(message_bank, key)
     assert pool[-len(extra):] == extra
     assert len(set(pool)) == len(pool), key
+
+
+# Facts a line in each pool must always state — the existing copy (and
+# tests elsewhere, e.g. "new PB mentions the prior") rely on them.
+REQUIRED = {
+    "NEW_PB": {"game", "new", "prior"},
+    "NEW_WORST": {"game", "new", "prior"},
+    "TIED_PB": {"game", "new"},
+    "TIED_WORST": {"game", "new"},
+    "DOW_PB": {"game", "new", "prior", "weekday"},
+    "DOW_WORST": {"game", "new", "prior", "weekday"},
+    "YEAR_PB": {"game", "new", "prior", "year"},
+    "GROUP_DOW_RECORD": {"game", "new", "prior", "prior_holder", "weekday"},
+    "ABOVE_FLOOR_TODAY": {"new", "prior", "prior_holder"},
+    "VS_USUAL_BETTER": {"game", "new", "usual"},
+    "VS_USUAL_WORSE": {"game", "new", "usual"},
+    "PHOTO_FINISH": {"p1", "p2", "gap", "game"},
+    "PRE_RESET_2H": {"missing"},
+    "PRE_RESET_1H": {"missing"},
+    "PRE_RESET_30MIN": {"missing"},
+    "PRE_RESET_5MIN": {"missing"},
+    "MORNING_OPENERS_PARTIAL": {"played"},
+}
+
+
+@pytest.mark.parametrize("key", sorted(REQUIRED))
+def test_required_facts_present(key):
+    for line in getattr(message_bank, key):
+        used = {f for _, f, _, _ in string.Formatter().parse(line) if f}
+        assert REQUIRED[key] <= used, (key, line)
+
+
+def test_new_games_keep_the_get_in_it_hook():
+    for line in message_bank.NEW_GAMES:
+        assert "get in it" in line.lower(), line
