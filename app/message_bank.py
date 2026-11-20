@@ -1189,3 +1189,487 @@ MISSING_TODAY_PLURAL: Tuple[str, ...] = (
     "{names} ghosted the puzzles.",
     "Didn't play: {names}. We'll be talking about this.",
 )
+
+
+# ---------------------------------------------------------------------------
+# Tone layers
+# ---------------------------------------------------------------------------
+# The pools above lean cheeky. These add the other registers so a
+# message can land as mean, comforting or wildly supportive:
+#   bad results  → + comforting, + super supportive
+#   good results → + super supportive, + mean / backhanded
+# Each is folded into its pool at the bottom of the file.
+
+_NEW_PB_SUPPORTIVE = (
+    "{name}!!! New {game} PB: {new}! From {prior} to {new} — we are so proud of you.",
+    "{name}, {new} on {game} is your best ever (was {prior}). All that practice is paying off. Brilliant.",
+    "Look at you, {name}! {game} PB of {new}, beating {prior}. You deserve every bit of this.",
+    "{name}, you just bettered your {game} best ({prior}) with {new}. Genuinely brilliant work.",
+    "This is what improvement looks like: {name}, {game}, {prior} → {new}. So well done.",
+    "{name}, new {game} PB ({new}, was {prior})! Take a moment and enjoy it — you earned it.",
+    "So happy for you, {name}. {game} in {new} is a personal best. {prior} was hard to beat and you did it.",
+    "{name}, {new} on {game}! A new PB! The whole group should be cheering. (Old best: {prior}.)",
+    "Proud moment, {name}: {game} PB of {new}, past your {prior}. Keep believing in yourself.",
+    "{name}, you've never done {game} better than {new}. {prior} is behind you now. Amazing.",
+)
+_NEW_PB_MEAN = (
+    "{name}, new {game} PB: {new}. Took you long enough to beat {prior}.",
+    "A {game} PB for {name}: {new}. Still not top of the group, but sure, celebrate. (Was {prior}.)",
+    "{name} finally beats {prior} on {game} with {new}. The rest of us did that months ago.",
+    "{new} on {game}, a PB for {name}. Low bar, cleared. Old bar: {prior}.",
+    "{name}, {game} PB of {new}. Don't let it go to your head. It will. Old best {prior}.",
+    "Congrats on the {game} PB, {name} ({new}, was {prior}). Shame it'll never happen again.",
+    "{name} PBs on {game}: {new}. Was the puzzle easy today? (Asking because {prior}.)",
+    "{name}, {new} on {game} is your best. Your best. Not the best. Previous: {prior}.",
+    "Oh look, {name} got a {game} PB: {new}. Even a stopped clock, etc. Old one: {prior}.",
+    "{name}, beating {prior} with {new} on {game}. Enjoy it, it's all downhill from here.",
+)
+_TIED_PB_SUPPORTIVE = (
+    "{name}, {new} on {game} matches your best ever! That's elite consistency. So proud.",
+    "Equalling your {game} PB ({new}) is a big deal, {name}. The breakthrough is coming.",
+    "{name}, you matched your best {game} at {new}. You're right at the top of your game.",
+    "Another {new} on {game}, {name}! Doing your best twice is harder than doing it once. Well done.",
+    "{name}, {game} PB equalled at {new}. Keep going — you've got even more in you.",
+)
+_TIED_PB_MEAN = (
+    "{name}, {new} on {game}. Same as your PB. So, no improvement then.",
+    "Tied PB on {game}, {name}: {new}. Couldn't find one extra second, eh?",
+    "{name}, {new} on {game} equals your best. Plateau achieved.",
+    "{game} {new}, {name}. Exactly your PB. Exactly as good as you've ever been. No better.",
+    "{name} ties their {game} best at {new}. So close. So, so close. Not close enough.",
+)
+_NEW_WORST_COMFORT = (
+    "{name}, {new} on {game} is your slowest yet (was {prior}). Tough one — everyone has them. Be kind to yourself.",
+    "Rough {game} today, {name}: {new}. Your old worst was {prior}. One puzzle doesn't define you.",
+    "{name}, {game} took {new} today (previous worst {prior}). It happens to the best. Tomorrow's fresh.",
+    "Hey {name} — {new} on {game} is a personal worst, but you still finished it. That counts. (Was {prior}.)",
+    "{name}, sometimes the puzzle just wins. {game}: {new} (old worst {prior}). You'll bounce back.",
+    "{name}, {new} on {game} isn't the number you wanted (worst was {prior}). Shake it off — you're still good at this.",
+    "Not your day on {game}, {name} ({new}, was {prior}). Grab a cuppa. It's only a puzzle.",
+    "{name}, a new {game} low of {new} (from {prior}). Bad days make the good ones sweeter.",
+    "{name}, {game} in {new} — your slowest. Previous: {prior}. Brains have off days too. Rest up.",
+    "{name}, {new} on {game} is a personal worst ({prior} before). Don't stress it — you showed up and did it.",
+)
+_NEW_WORST_SUPPORTIVE = (
+    "{name}, {new} on {game} (worst was {prior}) — and you STILL finished. That's grit. Proud of you.",
+    "{name}, personal worst on {game} ({new}, was {prior}), but you never gave up on it. Legend behaviour.",
+    "{name}, a slow {game} ({new}; old worst {prior}) just means a comeback is coming. We believe in you!",
+    "{new} on {game}, {name}. Your worst yet (was {prior}), but persistence is the real skill here. Well done for sticking with it.",
+    "{name}, sticking with a {game} that long ({new}, was {prior}) takes determination. Tomorrow you'll fly.",
+    "{name}! Worst {game} yet ({new}, was {prior}) but you're still in the game, and that's what matters. Go you.",
+    "Every great player has a {new} on {game} in them, {name}. (Old worst: {prior}.) Onwards and upwards!",
+    "{name}, {game} in {new} — tough, but the fact you finished it is a win. Old worst {prior}. Keep going!",
+    "{name}, {new} on {game} (prev worst {prior}). You'll look back on this from the top of the board. Chin up!",
+    "{name}, worst {game} ({new}, was {prior})? Doesn't matter. You're still one of the best in this group.",
+)
+_TIED_WORST_COMFORT = (
+    "{name}, {new} on {game} ties your slowest, but it didn't get worse. Small wins.",
+    "Tough {game} again, {name} ({new}). It's okay — tomorrow's a new grid.",
+    "{name}, equal-worst {game} at {new}. Happens. Breathe. Move on.",
+    "{name}, {new} on {game} — not your best day, but you got through it.",
+    "{name}, {game} in {new}, matching your worst. Don't be hard on yourself.",
+)
+_TIED_WORST_SUPPORTIVE = (
+    "{name}, {new} on {game} — equal worst, but you finished it! That's what counts. Proud of you.",
+    "{name}, tied worst on {game} ({new}), and you still came back to play. Absolute commitment!",
+    "{name}, {game} at {new} today. You've bounced back from this before and you will again!",
+    "{name}! {new} on {game} isn't the end of anything. Your best days are ahead. Go get them!",
+    "{name}, matching your slowest {game} ({new}) just sets up the comeback story. We're rooting for you.",
+)
+_WORST_OF_DAY_COMFORT = (
+    "{name}, {new} puts you last on {game} today, but it's one puzzle. You're doing fine.",
+    "Slowest {game} today, {name} ({new}). Someone always has to be — no shame in it.",
+    "{name}, last on {game} ({new}), but there's a whole week of points still to play for.",
+    "{name}, {game} in {new} — bottom today, but you played, which is more than nothing.",
+    "Not your {game} today, {name} ({new}). Tomorrow's leaderboard is a clean slate.",
+    "{name}, {new} on {game} is last for now. Plenty of people still to play — and it's just a game.",
+    "{name}, bringing up the rear on {game} ({new}). Be gentle on yourself. It's meant to be fun.",
+    "{name}, {game} today: {new}, last place. One day doesn't make a week.",
+    "{name}, {new} on {game}. Slowest today, but you're still very much in this.",
+    "{name}, last on today's {game} ({new}). Have a biscuit. You deserve one anyway.",
+)
+_WORST_OF_DAY_SUPPORTIVE = (
+    "{name}, {new} on {game} — last today, but you showed up and played! That matters. 💪",
+    "{name}! Bottom of {game} today ({new}) but top of our hearts. Keep going!",
+    "{name}, {game} in {new}. Last place is just the start of the comeback arc. We believe!",
+    "{name}, slowest {game} today ({new}), but you're consistent, you're here, and you're improving. Proud of you.",
+    "{name}, {new} on {game}! Every puzzle you play makes you better. Tomorrow's yours.",
+    "{name}, last on {game} ({new}) — and still one of the most dedicated players we've got. Respect.",
+    "{name}, {game} in {new}. Not the top today, but you never quit. That's a champion's habit.",
+    "{name}, {new} on {game} — the leaderboard doesn't show heart, but we see it. Go you!",
+    "{name}! Last on {game} today ({new}) but you'll be flying up the board soon. We know it.",
+    "{name}, {game} {new}. Every legend has a last-place day. This is yours. The rise starts now!",
+)
+_ANTI_RECORD_COMFORT = (
+    "{name}, {new} on {game} is the group's slowest ever, but finishing it at all was the point.",
+    "{name}, {game} in {new} — a record nobody wants, but a story everyone will laugh about. It's okay.",
+    "{name}, group's slowest {game} ({new}). Honestly, the puzzle was probably brutal today.",
+    "{name}, {new} on {game} — it's one bad day in a long run of good ones.",
+    "{name}, slowest {game} in group history ({new}). Shrug it off. It's a game, not a verdict.",
+)
+_ANTI_RECORD_SUPPORTIVE = (
+    "{name}, {new} on {game} — group's slowest ever — and you STILL saw it through. Hero.",
+    "{name}! Longest {game} on record ({new}), but you didn't give up. That's real determination.",
+    "{name}, {game} in {new}. You've made history and you've got nowhere to go but up!",
+    "{name}, slowest {game} ever ({new}), but that's the most stubborn finish we've seen. Love it.",
+    "{name}, {new} on {game}. Anyone can quit. You didn't. That's worth celebrating.",
+)
+_DOW_WORST_COMFORT = (
+    "{name}, {weekday} {game} was tough ({new}; old {weekday} worst {prior}). {weekday}s are like that.",
+    "{name}, slowest {weekday} {game} ({new}, was {prior}). Next {weekday} will be kinder.",
+    "{name}, {game} on a {weekday} in {new} (prior {weekday} worst {prior}). Rest up, it's fine.",
+    "Not the best {weekday}, {name}: {game} {new} (was {prior}). One day of the week doesn't matter much.",
+    "{name}, {new} on {weekday} {game} (old low {prior}). Everyone has a day that doesn't suit them.",
+)
+_DOW_WORST_SUPPORTIVE = (
+    "{name}, {weekday} {game} in {new} (was {prior}) — you'll own {weekday}s soon. We believe in you!",
+    "{name}! Slow {weekday} {game} ({new}, old {prior}), but you showed up. That's the habit that wins.",
+    "{name}, {new} on {weekday} {game} (worst was {prior}). Next {weekday}: comeback time!",
+    "{name}, toughest {weekday} {game} yet ({new}, was {prior}) and you finished it. Proud of you.",
+    "{name}, {weekday} {game} {new} (prev {prior}). You've got this — {weekday}s don't stand a chance.",
+)
+_BOTTOM_Q_COMFORT = (
+    "{name}, {new} on {game} is on the slower side for you, but it's just one game.",
+    "{name}, {game} in {new} — not your quickest, but nothing to worry about.",
+    "{name}, an off day on {game} ({new}). Everyone has them. Tomorrow's a reset.",
+    "{name}, {new} on {game}. Not your best, but you'll be back to form soon.",
+    "{name}, {game} took a little longer today ({new}). Totally normal.",
+    "{name}, slower {game} today ({new}). Don't sweat it — the average evens out.",
+    "{name}, {new} on {game}. Some days the brain's just warming up.",
+    "{name}, {game} in {new} — you've done better and you'll do better again.",
+)
+_BOTTOM_Q_SUPPORTIVE = (
+    "{name}, {new} on {game} — slower than usual, but you played! Consistency wins in the end.",
+    "{name}! {game} in {new}. Off days build champions. You'll smash it tomorrow.",
+    "{name}, {new} on {game}. You're better than this score and we all know it. Go again tomorrow!",
+    "{name}, slower {game} ({new}), but you keep turning up. That's the real skill. Proud of you.",
+    "{name}, {game} {new}. Not your best, but your best is brilliant, and it's coming back.",
+    "{name}! {new} on {game}. Every slow day teaches you something. Keep at it!",
+    "{name}, {game} in {new} — chin up! You're still a force on this leaderboard.",
+    "{name}, {new} on {game}. Bad game, great player. Back at it tomorrow!",
+)
+_DOW_BOTTOM_Q_COMFORT = (
+    "{name}, {weekday} {game} in {new} — {weekday}s are just tricky. No stress.",
+    "{name}, {new} on {game}. Slow for a {weekday}, but it's only one day.",
+    "{name}, {weekday}s and {game} ({new}) — not always friends. That's fine.",
+    "{name}, {game} on a {weekday}: {new}. Rest up for next {weekday}.",
+)
+_DOW_BOTTOM_Q_SUPPORTIVE = (
+    "{name}, {weekday} {game} at {new} — you'll crack {weekday}s yet! We believe in you.",
+    "{name}! {new} on {game} this {weekday}. Next {weekday} is your comeback.",
+    "{name}, {weekday} {game}: {new}. You keep showing up on {weekday}s. That's how you win them.",
+    "{name}, {new} on a {weekday} {game}. Tough day, great effort. Go you!",
+)
+_ABOVE_FLOOR_COMFORT = (
+    "{name}, {new} on {game} wasn't your best, but you're not last ({prior_holder}: {prior}). You're doing fine.",
+    "{name}, {game} in {new} — a bit slow, but {prior_holder} found it hard too ({prior}). Tricky puzzle today.",
+    "{name}, {new} on {game}. If {prior_holder} took {prior}, the puzzle was clearly a tough one. Go easy on yourself.",
+    "{name}, not your quickest {game} ({new}), but plenty of people struggled today. {prior_holder}: {prior}.",
+    "{name}, {new} on {game}. {prior_holder}'s {prior} says it all — hard day for everyone.",
+    "{name}, {game} {new}. Tough one. {prior_holder} ({prior}) agrees. Tomorrow will be better.",
+)
+_ABOVE_FLOOR_SUPPORTIVE = (
+    "{name}, {new} on {game} and still ahead of {prior_holder} ({prior})! Keep climbing!",
+    "{name}! {game} in {new}. Not your best, but you're above {prior_holder}'s {prior}. Onwards!",
+    "{name}, {new} on {game} — slow-ish, but you beat {prior_holder} ({prior}). Every place counts!",
+    "{name}, {game} {new}. You're out of the basement ({prior_holder}: {prior}). Up you go!",
+    "{name}, {new} on {game}. Tough puzzle, and you still beat {prior_holder} ({prior}). Proud of you.",
+    "{name}! {game} in {new}, ahead of {prior_holder}'s {prior}. The climb starts here.",
+)
+_VS_USUAL_WORSE_COMFORT = (
+    "{name}, {new} on {game} — a bit off your usual {usual}, but it's no big deal.",
+    "{name}, {game} in {new} today (usually {usual}). Off days are part of it.",
+    "{name}, slightly slower {game} than your {usual} norm ({new}). Totally fine.",
+    "{name}, {new} on {game} vs a usual {usual}. Tomorrow you'll be back on it.",
+    "{name}, {game} today: {new}. Normally {usual}. Everyone has these days — relax.",
+    "{name}, {new} on {game} (usual {usual}). Not to worry, one game.",
+    "{name}, a little behind your usual {usual} on {game} ({new}). Brain's allowed a rest.",
+    "{name}, {game} {new} today, {usual} on a normal day. Nothing to fret about.",
+)
+_VS_USUAL_WORSE_SUPPORTIVE = (
+    "{name}, {new} on {game} — not your usual {usual}, but you played! Back to it tomorrow!",
+    "{name}! {game} in {new} (normally {usual}). You'll be back to your best in no time.",
+    "{name}, {new} on {game}. Your usual is {usual}, and that's who you really are. Go you!",
+    "{name}, off-day {game} ({new} vs {usual}), but your consistency is amazing. Keep it up!",
+    "{name}, {game} {new} (usual {usual}). Tiny blip, big player. We believe in you!",
+    "{name}! {new} on {game} today. Your normal {usual} is coming right back. Proud of you for playing.",
+    "{name}, {new} on {game}, a touch off {usual}. Champions have off days too!",
+    "{name}, {game} in {new} vs a {usual} usual. Tomorrow, you're back. Can't wait to see it!",
+)
+_GRIPE_COMFORT = (
+    "{sender} is having a rough puzzle day. Send them some love.",
+    "{sender} had a tough one today. Be nice — it could've been you. It will be you, some day.",
+    "Group hug for {sender}, who's had a puzzle day to forget.",
+    "{sender} is struggling today. A kind word wouldn't go amiss.",
+    "{sender} had a stinker. It's okay, {sender}. It's just a puzzle.",
+    "{sender} is feeling defeated. Remind them they're brilliant, please.",
+    "{sender} had a bad day on the grids. We've all been there.",
+    "Be gentle with {sender} today. The puzzles were not.",
+)
+_GRIPE_SUPPORTIVE = (
+    "{sender} had a rough day — but {sender} always bounces back. Tomorrow's yours! 💪",
+    "{sender} is down but never out. Cheer them on, everyone!",
+    "{sender} had a bad one, and still showed up. That's commitment. Proud of you, {sender}.",
+    "Everyone send {sender} good vibes. Comeback incoming!",
+    "{sender} struggled today, but they're one of the best players here. Don't forget it.",
+    "{sender} had a tough day. Next round: {sender} redemption arc. We believe!",
+    "{sender} is having a moment. Let's lift them up — they'd do it for you.",
+    "One bad day for {sender}, a lifetime of good ones ahead. Go {sender}!",
+)
+_MORNING_NO_PROGRESS_SUPPORTIVE = (
+    "Morning {name}! You're going to smash today's puzzles. Can't wait to see your scores.",
+    "{name}, today's the day. Fresh puzzles, and you're ready for them. Go get them!",
+    "Good morning {name}! No pressure — just play, enjoy it, and send them through.",
+    "{name}, we believe in you. Today's puzzles don't stand a chance.",
+    "Hey {name}, whenever you're ready, the puzzles are there. You've got this!",
+    "{name}! A whole fresh day of puzzles to enjoy. Have fun with them.",
+    "Morning {name}. You're a great player — today's a chance to show it.",
+    "{name}, take your time, enjoy your coffee, and crush those puzzles when you're ready.",
+    "Rise and shine {name}! Your best scores might be today. Only one way to find out.",
+    "{name}, cheering for you today. Go play!",
+)
+_MORNING_PARTIAL_SUPPORTIVE = (
+    "Love it, {name} — {played} done already! You're on fire.",
+    "{name}, great start with {played}! Keep that momentum going.",
+    "So proud of you {name}: {played} in. You've totally got the rest.",
+    "{name}, {played} done! You're smashing it today.",
+    "Brilliant start, {name} ({played}). The rest will be a breeze.",
+    "{name}, {played} already! Look at you go.",
+    "{name}, great work on {played}. Finish strong — we're cheering!",
+    "{played} done, {name}! Amazing. Keep going, superstar.",
+)
+_PRE_RESET_2H_SUPPORTIVE = (
+    "{name}, two hours left and you've got loads of time for {missing}. You've got this!",
+    "No stress {name} — {missing} still to go and two hours to do it. Enjoy them!",
+    "{name}, still time for {missing}. Two hours. Go show them how it's done!",
+    "Just a friendly nudge {name}: {missing} is waiting, 2h left. Cheering for you!",
+)
+_PRE_RESET_1H_SUPPORTIVE = (
+    "{name}, one hour left for {missing}. Plenty of time — go smash it!",
+    "{name}, you can do {missing} in an hour easily. Go on, we believe in you!",
+    "One hour, {name}. {missing}. You've totally got this.",
+    "{name}, an hour to go and {missing} left. Finish strong!",
+)
+_PRE_RESET_30MIN_SUPPORTIVE = (
+    "{name}, 30 minutes for {missing}. You're fast — you'll make it!",
+    "Half an hour, {name}! {missing} is very doable. Go go go!",
+    "{name}, still time! {missing}, 30 minutes. Rooting for you!",
+    "{name}, 30 mins and {missing} to go. Let's finish the day strong!",
+)
+_PRE_RESET_5MIN_SUPPORTIVE = (
+    "{name}, 5 minutes! {missing}! You can do it — GO!",
+    "{name}!! 5 mins for {missing}. Believe! RUN!",
+    "Five minutes, {name}. {missing}. You've been faster than this before — GO!",
+    "{name}, 5 minutes, {missing}. Clutch time. We believe in you!",
+)
+_MISSING_SINGULAR_COMFORT = (
+    "{names} didn't play — hope all's well. We missed you.",
+    "No scores from {names}. Hope you're having a good day, wherever you are.",
+    "{names} sat this one out. Totally fine — come back when you can!",
+    "Missed {names} on the board. See you tomorrow, hopefully!",
+    "{names} wasn't with us today. Life happens. The puzzles will wait.",
+    "Thinking of {names}, who didn't play. Hope you're okay!",
+)
+_MISSING_PLURAL_COMFORT = (
+    "{names} didn't play — hope all's well. We missed you.",
+    "No scores from {names}. Hope you're all having a good day.",
+    "{names} sat this one out. Totally fine — come back when you can!",
+    "Missed {names} on the board. See you tomorrow, hopefully!",
+    "{names} weren't with us today. Life happens. The puzzles will wait.",
+    "Thinking of {names}, who didn't play. Hope everyone's okay!",
+)
+_BEST_OF_DAY_SUPPORTIVE = (
+    "{name}, {new} on {game} — best in the group today! Absolutely brilliant. 🌟",
+    "{name}!!! Top of {game} today with {new}! So, so well done.",
+    "{name}, you're leading {game} with {new}. You make this look easy. Amazing work.",
+    "Best {game} today: {name}, {new}. We're all in awe. Genuinely.",
+    "{name}, {new} on {game} is the one to beat. Superstar performance!",
+    "{name}! {game} in {new}, top of the day. You absolute star.",
+    "So proud of you {name} — {new} on {game} leads the group!",
+    "{name}, fastest {game} today ({new}). Incredible. Keep shining!",
+    "{name}, {game} leader with {new}! You deserve this so much.",
+    "{name}, best {game} of the day: {new}! What a player. What a person.",
+)
+_BEST_OF_DAY_MEAN = (
+    "{name} leads {game} today with {new}. Enjoy it. It won't last.",
+    "{name}, best {game} today at {new}. Nobody good has played yet.",
+    "Top of {game} today: {name}, {new}. A weak field, to be fair.",
+    "{name}, leading {game} with {new}. Don't get used to it.",
+    "{name} has the best {game} today ({new}). Must've been an easy one.",
+    "{new} on {game}, best today. {name}, savour it — this is your peak.",
+    "{name} on top of {game} ({new}). The others are clearly having an off day.",
+    "{name}, best {game} so far ({new}). 'So far' doing a lot of work there.",
+    "{name} leads {game} ({new}). The group's standards have slipped.",
+    "{name}, {new} on {game} is top. For the next five minutes, probably.",
+)
+_ALL_TIME_RECORD_SUPPORTIVE = (
+    "🏆 {name}!!! Fastest {game} this group has EVER seen: {new}. Absolutely phenomenal.",
+    "🏆 {name}, {new} on {game} is the group's all-time best. You're a legend. Genuinely.",
+    "🏆 Group record for {name} on {game}: {new}! Take it all in — you earned it.",
+    "🏆 {name}, nobody here has ever done {game} faster than {new}. We're so proud.",
+    "🏆 {name}! All-time {game} record, {new}. History made by the best of us.",
+)
+_ALL_TIME_RECORD_MEAN = (
+    "🏆 {name} sets the {game} group record ({new}). Probably a fluke. {prior_holder} thinks so.",
+    "🏆 {name}, {new} on {game}, the all-time best. Did you have help? Be honest.",
+    "🏆 {game} record: {name}, {new}. Enjoy it before {prior_holder} takes it back.",
+    "🏆 {name} beats {prior_holder}'s {game} record with {new}. The puzzle must've been tiny.",
+    "🏆 {name} holds the {game} record now ({new}). Insufferable from here on, presumably.",
+)
+_DOW_PB_SUPPORTIVE = (
+    "{name}, best {weekday} {game} ever: {new} (was {prior})! You're getting better every week!",
+    "{name}! {weekday} {game} PB at {new}, beating {prior}. Love to see it.",
+    "So proud, {name}: {weekday} {game} in {new}, a new best (old {prior}).",
+    "{name}, {new} on {weekday} {game} — your best yet (was {prior}). Brilliant!",
+    "{name}, you've never had a better {weekday} on {game}: {new}, from {prior}. Amazing.",
+)
+_DOW_PB_MEAN = (
+    "{name}, best {weekday} {game}: {new} (was {prior}). Shame it's only a {weekday} record.",
+    "{weekday} {game} PB for {name}: {new}. A very niche achievement. Old: {prior}.",
+    "{name}, {new} on {weekday} {game} beats {prior}. Nobody's counting {weekday}s except you.",
+    "{name}, {weekday} {game} best of {new} (was {prior}). Your other days are still mediocre.",
+    "{name}, {weekday} PB on {game}: {new}, from {prior}. Pick a better day to peak next time.",
+)
+_YEAR_PB_SUPPORTIVE = (
+    "{name}, best {game} of {year}: {new} (was {prior})! What a year you're having!",
+    "{name}! {year} best on {game} — {new}, beating {prior}. Fantastic.",
+    "So happy for you, {name}: {game} in {new}, your best of {year} (old {prior}).",
+    "{name}, {new} on {game} tops your {year} (was {prior}). Keep this going!",
+    "{name}, {year} {game} PB of {new}, past {prior}. You're flying this year!",
+)
+_YEAR_PB_MEAN = (
+    "{name}, best {game} of {year}: {new} (was {prior}). Took most of the year to get there.",
+    "{year} best on {game} for {name}: {new}. Not a lifetime best, though. Old: {prior}.",
+    "{name}, {new} on {game}, best of {year} (was {prior}). Not saying much about {year}.",
+    "{name}, {game} {year} PB: {new}, past {prior}. Last year's you would still win.",
+    "{name}, {year}'s best {game}: {new} (prior {prior}). Low expectations met.",
+)
+_TOP_Q_SUPPORTIVE = (
+    "{name}, {new} on {game} is one of your best! So good to see.",
+    "{name}! {game} in {new} — top form. Love it.",
+    "{name}, {new} on {game}. You're absolutely flying. Proud of you!",
+    "{name}, top-quarter {game} ({new})! The hard work shows.",
+    "{name}, {game} {new}. One of your finest. Keep it up, star!",
+    "{name}, {new} on {game} — brilliant. You make it look easy.",
+    "{name}! {new} on {game}. You're in amazing form right now.",
+    "{name}, {game} in {new}. That's quality. Well done!",
+)
+_TOP_Q_MEAN = (
+    "{name}, {new} on {game} is good for you. For you.",
+    "{name}, {game} in {new}. Top quarter of your history. Low bar, but sure.",
+    "{name}, {new} on {game}. Good, by your standards. Your standards, mind.",
+    "{name}, one of your better {game}s ({new}). Still not a PB though, is it.",
+    "{name}, {game} {new}. Above your average. Your average is the problem.",
+    "{name}, {new} on {game} — decent. Don't make a song and dance about it.",
+    "{name}, top quartile {game} ({new}). Somebody had to beat your other 75%.",
+    "{name}, {game} in {new}. Good. Not great. Good.",
+)
+_VS_USUAL_BETTER_SUPPORTIVE = (
+    "{name}, {new} on {game} beats your usual {usual}! You're improving so much.",
+    "{name}! {game} in {new} vs a usual {usual}. Brilliant work today!",
+    "{name}, better than your normal {usual} on {game} ({new}). Love to see it!",
+    "{name}, {new} on {game}, ahead of your {usual}. You're on the up!",
+    "{name}, {game} {new} (usually {usual}). Keep this energy!",
+    "{name}! {new} on {game} — better than usual ({usual}). Proud of you!",
+    "{name}, {game} in {new}, beating your {usual} norm. Fantastic.",
+    "{name}, {new} vs a usual {usual} on {game}. You're getting so good at this!",
+)
+_VS_USUAL_BETTER_MEAN = (
+    "{name}, {new} on {game}. Better than your usual {usual}. Your usual is slow, to be fair.",
+    "{name}, {game} in {new} (usually {usual}). Finally pulling your weight.",
+    "{name}, beat your {usual} median on {game} with {new}. Took a while.",
+    "{name}, {new} on {game} vs {usual}. Even you have good days.",
+    "{name}, {game} {new}. Better than your typical {usual}. Low bar, cleared.",
+    "{name}, {new} on {game} (normally {usual}). Don't expect a medal.",
+    "{name}, {game} in {new} beats your usual {usual}. Lucky day?",
+    "{name}, above your {usual} norm on {game} with {new}. Mark the calendar, it's rare.",
+)
+_VS_USUAL_PAR_SUPPORTIVE = (
+    "{name}, {new} on {game}, right on your usual {usual}. Rock solid. Love it.",
+    "{name}! Consistent as ever on {game}: {new}. That reliability is a superpower.",
+    "{name}, {game} in {new} — your usual {usual}. Steady and brilliant.",
+    "{name}, {new} on {game}. Dependable every single day. Proud of you.",
+    "{name}, bang on your {usual} norm on {game} ({new}). Consistency wins weeks!",
+)
+_VS_USUAL_PAR_MEAN = (
+    "{name}, {new} on {game}. Exactly your usual. Thrilling.",
+    "{name}, {game} in {new}, same as always ({usual}). Any chance of improving?",
+    "{name}, {new} on {game}. Average. As usual. As ever.",
+    "{name}, {game} {new}. Your usual {usual}. The definition of 'fine'.",
+    "{name}, {new} on {game}. Same old. Ever thought of trying harder?",
+)
+_FIRST_TODAY_SUPPORTIVE = (
+    "{name}, first on {game} today with {new}! Love the enthusiasm!",
+    "{name}! Leading off {game} at {new}. What a way to start the day!",
+    "{name}, first {game} in ({new}) — setting the tone. Brilliant!",
+    "{name}, {new} on {game}, first of the day. You're an inspiration to us all.",
+    "Go {name}! First {game} on the board: {new}. Great start!",
+    "{name}, up early and smashing {game}: {new}. Love it!",
+    "{name}, first {game} today, {new}. You set the bar, now let's see the rest!",
+    "{name}! {game} in {new}, first in. Superstar energy.",
+)
+_FIRST_TODAY_MEAN = (
+    "{name}, first {game} today ({new}). Leading a field of one. Impressive.",
+    "{name}, {new} on {game}. First! Also last. Also middle. Only you've played.",
+    "{name} gets the first {game} in ({new}). Don't you have a job?",
+    "{name}, first on {game} at {new}. Enjoy the lead. It's very temporary.",
+    "{name}, {game} {new}, first in. Eager, aren't we.",
+    "{name}, first {game} of the day ({new}). Someone will beat that by lunch.",
+    "{name}, top of {game} with {new}, by default. Wins don't come cheaper.",
+    "{name}, first on {game} ({new}). The others are still asleep. Low competition.",
+)
+_NTH_BEST_SUPPORTIVE = (
+    "{name}, your {rank} best {game} ever: {new}! You're in brilliant form.",
+    "{name}! {new} on {game} — {rank} best of all time. So well done.",
+    "{name}, {game} in {new}, your {rank} best. A PB is coming. We can feel it!",
+    "{name}, {rank}-best {game} ever ({new}). Fantastic work!",
+    "{name}, {new} on {game} ranks {rank} in your history. Proud of you!",
+)
+_NTH_BEST_MEAN = (
+    "{name}, {rank} best {game} ever ({new}). So not the best, then.",
+    "{name}, {new} on {game}. Your {rank} best. Nobody remembers {rank} place.",
+    "{name}, {game} in {new}, {rank} best. Close, but no PB.",
+    "{name}, {rank}-best {game} ({new}). Almost good enough.",
+    "{name}, {new} on {game}: {rank} best ever. Choked it at the end, did we?",
+)
+_BRAG_MEAN = (
+    "{sender} is bragging again. Someone humble them, please.",
+    "{sender} pressed brag. Quick, everyone post better scores.",
+    "{sender} thinks they're good today. Prove them wrong.",
+    "Brag from {sender}. Let's see how long that lasts.",
+    "{sender} is showing off. It's unbecoming, {sender}.",
+    "{sender} wants applause. {sender} gets this message instead.",
+    "{sender} is bragging. Statistically, a collapse is due.",
+    "{sender} is feeling smug. It's a good look on nobody.",
+)
+
+NEW_PB = NEW_PB + _NEW_PB_SUPPORTIVE + _NEW_PB_MEAN
+TIED_PB = TIED_PB + _TIED_PB_SUPPORTIVE + _TIED_PB_MEAN
+NEW_WORST = NEW_WORST + _NEW_WORST_COMFORT + _NEW_WORST_SUPPORTIVE
+TIED_WORST = TIED_WORST + _TIED_WORST_COMFORT + _TIED_WORST_SUPPORTIVE
+BEST_OF_DAY = BEST_OF_DAY + _BEST_OF_DAY_SUPPORTIVE + _BEST_OF_DAY_MEAN
+WORST_OF_DAY = WORST_OF_DAY + _WORST_OF_DAY_COMFORT + _WORST_OF_DAY_SUPPORTIVE
+ALL_TIME_RECORD = ALL_TIME_RECORD + _ALL_TIME_RECORD_SUPPORTIVE + _ALL_TIME_RECORD_MEAN
+ALL_TIME_ANTI_RECORD = ALL_TIME_ANTI_RECORD + _ANTI_RECORD_COMFORT + _ANTI_RECORD_SUPPORTIVE
+DOW_PB = DOW_PB + _DOW_PB_SUPPORTIVE + _DOW_PB_MEAN
+DOW_WORST = DOW_WORST + _DOW_WORST_COMFORT + _DOW_WORST_SUPPORTIVE
+YEAR_PB = YEAR_PB + _YEAR_PB_SUPPORTIVE + _YEAR_PB_MEAN
+FIRST_TODAY = FIRST_TODAY + _FIRST_TODAY_SUPPORTIVE + _FIRST_TODAY_MEAN
+NTH_BEST = NTH_BEST + _NTH_BEST_SUPPORTIVE + _NTH_BEST_MEAN
+TOP_QUARTILE = TOP_QUARTILE + _TOP_Q_SUPPORTIVE + _TOP_Q_MEAN
+BOTTOM_QUARTILE = BOTTOM_QUARTILE + _BOTTOM_Q_COMFORT + _BOTTOM_Q_SUPPORTIVE
+DOW_BOTTOM_QUARTILE = DOW_BOTTOM_QUARTILE + _DOW_BOTTOM_Q_COMFORT + _DOW_BOTTOM_Q_SUPPORTIVE
+ABOVE_FLOOR_TODAY = ABOVE_FLOOR_TODAY + _ABOVE_FLOOR_COMFORT + _ABOVE_FLOOR_SUPPORTIVE
+VS_USUAL_BETTER = VS_USUAL_BETTER + _VS_USUAL_BETTER_SUPPORTIVE + _VS_USUAL_BETTER_MEAN
+VS_USUAL_WORSE = VS_USUAL_WORSE + _VS_USUAL_WORSE_COMFORT + _VS_USUAL_WORSE_SUPPORTIVE
+VS_USUAL_PAR = VS_USUAL_PAR + _VS_USUAL_PAR_SUPPORTIVE + _VS_USUAL_PAR_MEAN
+MORNING_OPENERS_NO_PROGRESS = MORNING_OPENERS_NO_PROGRESS + _MORNING_NO_PROGRESS_SUPPORTIVE
+MORNING_OPENERS_PARTIAL = MORNING_OPENERS_PARTIAL + _MORNING_PARTIAL_SUPPORTIVE
+PRE_RESET_2H = PRE_RESET_2H + _PRE_RESET_2H_SUPPORTIVE
+PRE_RESET_1H = PRE_RESET_1H + _PRE_RESET_1H_SUPPORTIVE
+PRE_RESET_30MIN = PRE_RESET_30MIN + _PRE_RESET_30MIN_SUPPORTIVE
+PRE_RESET_5MIN = PRE_RESET_5MIN + _PRE_RESET_5MIN_SUPPORTIVE
+BRAG = BRAG + _BRAG_MEAN
+GRIPE = GRIPE + _GRIPE_COMFORT + _GRIPE_SUPPORTIVE
+MISSING_TODAY_SINGULAR = MISSING_TODAY_SINGULAR + _MISSING_SINGULAR_COMFORT
+MISSING_TODAY_PLURAL = MISSING_TODAY_PLURAL + _MISSING_PLURAL_COMFORT

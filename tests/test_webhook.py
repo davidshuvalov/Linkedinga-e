@@ -1924,9 +1924,13 @@ class TestTauntCommands:
         # same day got byte-identical brags. With random + stat-
         # aware, two different senders should produce different
         # rendered text (different stats + random selection).
+        import random
         from unittest.mock import patch
         from app.puzzles import la_date
 
+        # Two independent random picks can legitimately collide; pin
+        # the seed so the test checks the per-sender behaviour, not luck.
+        random.seed(1234)
         today_la = la_date(NOW)
         alice = repo.get_or_create_player("whatsapp:+61400000001", "Alice")
         bob = repo.get_or_create_player("whatsapp:+61400000002", "Bob")

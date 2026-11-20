@@ -106,7 +106,7 @@ TARGET = {
 def _bank_pools():
     return {
         k: v for k, v in vars(message_bank).items()
-        if k.isupper() and isinstance(v, tuple)
+        if k.isupper() and not k.startswith("_") and isinstance(v, tuple)
     }
 
 
@@ -114,8 +114,26 @@ def test_every_pool_is_mapped():
     assert set(_bank_pools()) == set(ALLOWED) == set(TARGET)
 
 
-def test_thousand_new_lines():
-    assert sum(len(v) for v in _bank_pools().values()) == 1000
+def test_new_line_count():
+    # 1,000 original lines + 340 tone-layer lines (comforting /
+    # supportive / mean).
+    assert sum(len(v) for v in _bank_pools().values()) == 1340
+
+
+# Each pool should carry more than one register. Lines from the tone
+# layers are spot-checked here so a refactor can't silently drop them.
+@pytest.mark.parametrize("key,tone", [
+    ("NEW_WORST", "_NEW_WORST_COMFORT"),
+    ("NEW_WORST", "_NEW_WORST_SUPPORTIVE"),
+    ("WORST_OF_DAY", "_WORST_OF_DAY_SUPPORTIVE"),
+    ("NEW_PB", "_NEW_PB_MEAN"),
+    ("BEST_OF_DAY", "_BEST_OF_DAY_MEAN"),
+    ("GRIPE", "_GRIPE_COMFORT"),
+    ("BRAG", "_BRAG_MEAN"),
+])
+def test_tone_layers_reach_live_pools(key, tone):
+    for line in getattr(message_bank, tone):
+        assert line in TARGET[key], (key, line)
 
 
 @pytest.mark.parametrize("key", sorted(ALLOWED))
