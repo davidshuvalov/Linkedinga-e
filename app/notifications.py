@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
+from . import message_bank as _bank
 from .config import Settings
 from .db import Player, Repository, ScoreRow
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER, format_raw_score
@@ -80,7 +81,7 @@ _NEW_PB_TEMPLATES = (
     "{name}, the {game} gods smiled: {new} (was {prior}). Down. Done. Documented.",
     "PB, {name}. {game} in {new}. The {prior} is in your rear-view mirror and shrinking.",
     "{name} dropped a {game} PB nobody asked for but everyone respects: {new} (was {prior}).",
-)
+) + _bank.NEW_PB
 _TIED_PB_TEMPLATES = (
     "Matched your {game} PB ({new}). Consistency is a skill.",
     "Tied your {game} best ({new}). Annoyingly reliable.",
@@ -92,7 +93,7 @@ _TIED_PB_TEMPLATES = (
     "{name}, you tied your {game} record ({new}). The universe is consistent.",
     "Mirror match — {name}'s {game} in {new} ties their own personal best.",
     "{name}: {new} on {game}, dead level with your PB. Repeatable.",
-)
+) + _bank.TIED_PB
 _NEW_WORST_TEMPLATES = (
     "Yikes. Worst-ever {game} ({new}). Previous low was {prior}. Wasn't your day.",
     "{name} put up a new personal-worst {game}: {new}. The old shame was {prior}.",
@@ -115,7 +116,7 @@ _NEW_WORST_TEMPLATES = (
     "{name} just redefined their {game} floor: {new}. The old {prior} now feels like a triumph.",
     "{name}, {game} in {new}. New personal worst. The {prior} didn't deserve to be beaten like this.",
     "The puzzle won comprehensively, {name}: {new} on {game} (was {prior}). Tomorrow is another day.",
-)
+) + _bank.NEW_WORST
 _TIED_WORST_TEMPLATES = (
     "Tied your worst-ever {game} ({new}). At least you're predictable.",
     "{name}, you equalled your personal-worst {game} ({new}). Consistency is still technically a skill.",
@@ -125,7 +126,7 @@ _TIED_WORST_TEMPLATES = (
     "{name}, you tied your slowest-ever {game} ({new}). Reliable, just at the wrong end.",
     "Equal worst on {game} for {name}: {new}. The streak of disappointment continues.",
     "{name}, that's a tied personal worst on {game} ({new}). At least it can't get any worse. Probably.",
-)
+) + _bank.TIED_WORST
 
 # "Best of today" — fastest score on this game for the current LA day
 # across every player who's submitted. Implies a real beat, not a
@@ -154,7 +155,7 @@ _BEST_OF_DAY_TEMPLATES = (
     "{name} takes today's {game} crown: {new}. Everyone else is now playing catch-up.",
     "{name}, today's {game} benchmark is set at {new}. Most won't beat it. Enjoy.",
     "First in quality on {game} today: {name}, {new}. The others have a number to chase.",
-)
+) + _bank.BEST_OF_DAY
 
 _WORST_OF_DAY_TEMPLATES = (
     "{name}, {new} on {game} is currently the slowest of the day. Floor is yours.",
@@ -176,7 +177,7 @@ _WORST_OF_DAY_TEMPLATES = (
     "Dead last on {game} today, {name}: {new}. That's not nothing. It's just last.",
     "{name}, the {game} board has your name at the bottom: {new}. Proudly yours.",
     "Last man standing on {game} today — standing at the bottom: {name}, {new}.",
-)
+) + _bank.WORST_OF_DAY
 
 # All-time record — fastest score for this game across all players,
 # all time. Single message; no margin needed (the previous record is
@@ -194,7 +195,7 @@ _ALL_TIME_RECORD_TEMPLATES = (
     "The book is rewritten. {name} took {game}'s all-time record with {new}. (Was {prior_holder}, {prior}.)",
     "{name}, that's not just a PB — it's the {game} ALL-TIME record. {new}. Trophy room only just big enough.",
     "{name} just etched their name into the {game} hall of fame: {new}, eclipsing {prior_holder}'s {prior}.",
-)
+) + _bank.ALL_TIME_RECORD
 
 # All-time anti-record — slowest score for this game ever recorded.
 # Lighter touch than a personal worst — this is rare and notable.
@@ -211,7 +212,7 @@ _ALL_TIME_ANTI_RECORD_TEMPLATES = (
     "{name}, {new} on {game} is the slowest score in this group's history. Unique distinction. Sort of.",
     "All-time anti-record alert: {name}'s {game} in {new} eclipses {prior_holder}'s {prior} for sheer footdragging.",
     "{name} just made history (the wrong kind): {new} on {game}, slowest ever in this group.",
-)
+) + _bank.ALL_TIME_ANTI_RECORD
 
 
 # Group DOW record — fastest score for this game on this weekday
@@ -229,7 +230,7 @@ _GROUP_DOW_RECORD_TEMPLATES = (
     "New {weekday} {game} high-water mark for the group — {name} with {new}. {prior_holder}'s old {prior} is retired.",
     "History made on a {weekday}: {name} posted {new} on {game}, best this group has ever seen on this day (was {prior_holder}, {prior}).",
     "{name} just carved their name into {weekday} {game} history: {new}. {prior_holder}'s {prior} finally falls.",
-)
+) + _bank.GROUP_DOW_RECORD
 
 # Phase D triggers — finer slices of personal history.
 #   * dow_pb       — best ever on this game on this weekday
@@ -257,7 +258,7 @@ _DOW_PB_TEMPLATES = (
     "{name}, {game} on {weekday} is officially your thing now: {new} (was {prior}).",
     "Sneakily good, {name}. New {weekday} {game} PB: {new} (was {prior}).",
     "{name}, {weekday}s used to mean {prior} on {game}. Now they mean {new}. Update your CV.",
-)
+) + _bank.DOW_PB
 
 _DOW_WORST_TEMPLATES = (
     "{name}, {game} on a {weekday} just hit a new low: {new} (was {prior}). {weekday}s, hey.",
@@ -270,7 +271,7 @@ _DOW_WORST_TEMPLATES = (
     "{game} on {weekday}s is your kryptonite, {name}: new low {new} (was {prior}).",
     "{name}, {new} on {game} is the slowest {weekday} you've ever played. (Old shame: {prior}.)",
     "Tough {weekday}, {name}. New {game} {weekday}-low: {new} (was {prior}).",
-)
+) + _bank.DOW_WORST
 
 _YEAR_PB_TEMPLATES = (
     "{name}, that's your fastest {game} of {year}: {new} (was {prior}).",
@@ -285,7 +286,7 @@ _YEAR_PB_TEMPLATES = (
     "{name} drops a {year} {game} best: {new}. Your old {year} record ({prior}) had a good run.",
     "Calendar's noticed, {name}: {new} on {game} is your {year} fastest (was {prior}).",
     "{name}, {game} {year} edition: {new}, your fastest of the year (was {prior}).",
-)
+) + _bank.YEAR_PB
 
 _FIRST_TODAY_TEMPLATES = (
     "{name}, you broke the seal on today's {game}: {new}. The board's open.",
@@ -299,7 +300,7 @@ _FIRST_TODAY_TEMPLATES = (
     "{name} kicks today's {game} off at {new}. Everyone else is playing for second already.",
     "{name}, you're the early bird on today's {game}: {new}. Worm acquired.",
     "{name}, opening salvo on today's {game}: {new}. Lonely at the top, until it isn't.",
-)
+) + _bank.FIRST_TODAY
 
 
 # 2nd–5th best in personal all-time history for this game.
@@ -323,7 +324,7 @@ _NTH_BEST_TEMPLATES = (
     "{name}, {new} on {game} makes the all-time {rank}. You are, statistically, decent.",
     "{rank} best ever on {game}, {name}: {new}. The numbers note your existence.",
     "Not a disaster, not a triumph: {new} on {game} is your {rank} best, {name}.",
-)
+) + _bank.NTH_BEST
 
 # Top 25% of player's own all-time history — not a PB.
 _TOP_QUARTILE_TEMPLATES = (
@@ -339,7 +340,7 @@ _TOP_QUARTILE_TEMPLATES = (
     "One of your better {game} performances: {new}, {name}. Top quartile.",
     "Upper echelon of your own {game} history: {new}, {name}. You can do this.",
     "{name} delivers a top-quartile {game}: {new}. The data agrees.",
-)
+) + _bank.TOP_QUARTILE
 
 # Bottom 25% of player's own all-time history — not a worst.
 _BOTTOM_QUARTILE_TEMPLATES = (
@@ -356,7 +357,7 @@ _BOTTOM_QUARTILE_TEMPLATES = (
     "Not one of your better {game} days, {name}: {new}. Bottom 25% personally. We say this with love.",
     "{name}, that {game} in {new} is bottom quartile for you. But at least you're a good person. Unlike the score.",
     "Lower end for you on {game}: {new}. {name}, the data is not rooting for you today.",
-)
+) + _bank.BOTTOM_QUARTILE
 
 # Top 25% of player's same-weekday history.
 _DOW_TOP_QUARTILE_TEMPLATES = (
@@ -366,7 +367,7 @@ _DOW_TOP_QUARTILE_TEMPLATES = (
     "{name}, that {new} on {game} makes it one of your better {weekday}s. Top quartile.",
     "Strong {weekday} {game}, {name}: {new} is upper quartile for you on {weekday}s.",
     "{name}: a good {weekday} for {game}. {new} is top 25% of your {weekday} history.",
-)
+) + _bank.DOW_TOP_QUARTILE
 
 # Bottom 25% of player's same-weekday history.
 _DOW_BOTTOM_QUARTILE_TEMPLATES = (
@@ -376,7 +377,7 @@ _DOW_BOTTOM_QUARTILE_TEMPLATES = (
     "{name}: {new} on {game} on a {weekday}. Historically, {weekday}s are not your {game} day.",
     "{weekday}-{game} lows, {name}: {new} is bottom quartile for you on {weekday}s. Maybe it's the vibes.",
     "{name}, the data suggests {weekday} is not your {game} day. {new} confirms it.",
-)
+) + _bank.DOW_BOTTOM_QUARTILE
 
 # Player had a bad score but wasn't the worst of the day — there's
 # someone worse to point at. ``{prior_holder}`` is the actual worst;
@@ -398,7 +399,7 @@ _ABOVE_FLOOR_TODAY_TEMPLATES = (
     "{name}: {new} on {game}. Underwhelming. But {prior_holder} ({prior}) somehow makes {new} look quick.",
     "The puzzle won, {name}. {new} on {game} is slow. But {prior_holder} gave it {prior}. You're not alone at the bottom. Just adjacent.",
     "{name}, {new} wasn't pretty on {game}. At least {prior_holder} is down there too ({prior}). Solidarity. Sort of.",
-)
+) + _bank.ABOVE_FLOOR_TODAY
 
 
 _RIVALRY_TEMPLATES = (
@@ -422,7 +423,7 @@ _RIVALRY_TEMPLATES = (
     "It appears {rival} has adopted you as their personal benchmark. {weeks} weeks within {gap} pts. You're welcome?",
     "The closest thing to a rivalry you didn't know you had: {name} vs {rival}. {weeks} weeks within {gap} pts.",
     "Filed under: unwanted competition. {rival} within {gap} pts for {weeks} weeks. They're not going anywhere.",
-)
+) + _bank.RIVALRY
 
 
 _PODIUM_STREAK_TEMPLATES = (
@@ -434,7 +435,7 @@ _PODIUM_STREAK_TEMPLATES = (
     "Top 3 for {weeks} weeks? That's not luck, {name}. That's dominance.",
     "{name} is on a {weeks}-week podium streak. Someone's built for this.",
     "Podium streak alert — {name}, {weeks} weeks and no sign of stopping.",
-)
+) + _bank.PODIUM_STREAK
 
 # Everyday "how did that compare to your norm" commentary. Fires on most
 # submissions once a player has some history, so a run-of-the-mill score
@@ -449,7 +450,7 @@ _VS_USUAL_BETTER_TEMPLATES = (
     "{name} beat their own {game} median ({usual}) with {new}. Nice and tidy.",
     "{game} {new}, {name}. That's ahead of your typical {usual}. Keep it rolling.",
     "Today's {name} > usual {name} on {game}: {new} vs {usual}.",
-)
+) + _bank.VS_USUAL_BETTER
 
 _VS_USUAL_WORSE_TEMPLATES = (
     "{name}: {new} on {game}. Your usual is {usual}. Today was not usual.",
@@ -460,7 +461,7 @@ _VS_USUAL_WORSE_TEMPLATES = (
     "{name} vs their own {game} median ({usual}): median wins today. {new}.",
     "{game} {new}, {name}. Slower than your typical {usual}. We won't tell anyone. We will.",
     "Usual {name} would've had this {game} in {usual}. Today's {name}: {new}.",
-)
+) + _bank.VS_USUAL_WORSE
 
 _VS_USUAL_PAR_TEMPLATES = (
     "{name}: {new} on {game}. Bang on your usual ({usual}). Reliable as ever.",
@@ -469,7 +470,7 @@ _VS_USUAL_PAR_TEMPLATES = (
     "{name}, {new} on {game}. Right on your average. Consistency is a skill. Allegedly.",
     "{new} on {game} for {name}. That's your {usual}-ish norm. Steady hands.",
     "Par for the course, {name}: {new} on {game} (usual {usual}).",
-)
+) + _bank.VS_USUAL_PAR
 
 
 _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
@@ -1284,7 +1285,7 @@ _PHOTO_FINISH_TEMPLATES = (
     "🔥 {p1} and {p2} are {gap} pts apart. One {game} left. Don't blink.",
     "🏁 {p1} is {gap} pts ahead of {p2} — with {game} still to play. Not over yet.",
     "📍 Final game: {game}. The gap between {p1} and {p2} is just {gap} pts.",
-)
+) + _bank.PHOTO_FINISH
 
 _COMEBACK_TEMPLATES = (
     "⚡ Comeback alert! {name} just moved from outside the top 2 to first place.",
@@ -1294,7 +1295,7 @@ _COMEBACK_TEMPLATES = (
     "⚡ {name} just jumped to first. {prior_leader}'s {days_held}-{day_word} lead is gone.",
     "🏆 Leaderboard flip! {name} takes #1. {prior_leader} drops.",
     "🔥 {name} climbed to the top! {prior_leader} was leading for {days_held} {day_word}.",
-)
+) + _bank.COMEBACK
 
 
 def _photo_finish_message(
@@ -1303,8 +1304,7 @@ def _photo_finish_message(
     gap: float,
     game: str,
 ) -> str:
-    idx = hash((p1_name, p2_name, game)) % len(_PHOTO_FINISH_TEMPLATES)
-    return _PHOTO_FINISH_TEMPLATES[idx].format(
+    return random.choice(_PHOTO_FINISH_TEMPLATES).format(
         p1=p1_name, p2=p2_name,
         gap=f"{gap:.1f}",
         game=GAME_DISPLAY.get(game, game),
@@ -1316,9 +1316,8 @@ def _comeback_message(
     prior_leader: str,
     days_held: int,
 ) -> str:
-    idx = hash((name, prior_leader, days_held)) % len(_COMEBACK_TEMPLATES)
     day_word = "day" if days_held == 1 else "days"
-    return _COMEBACK_TEMPLATES[idx].format(
+    return random.choice(_COMEBACK_TEMPLATES).format(
         name=name,
         prior_leader=prior_leader,
         days_held=days_held,

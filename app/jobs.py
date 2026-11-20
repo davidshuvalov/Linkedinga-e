@@ -33,6 +33,7 @@ from dataclasses import dataclass, replace as _dc_replace
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
+from . import message_bank as _bank
 from .config import Settings
 from .db import Group, Player, Repository, ScoreRow
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER
@@ -1309,7 +1310,7 @@ _MORNING_OPENERS_NO_PROGRESS = (
     "Quiet morning for {name}. Too quiet. No puzzles, no points, no bragging rights. Fixable.",
     "{name} — puzzle-free zone. Let's change that before someone else gets too far ahead.",
     "Morning {name}. The scoreboard has your name. It just doesn't have your score yet.",
-)
+) + _bank.MORNING_OPENERS_NO_PROGRESS
 
 _MORNING_OPENERS_PARTIAL = (
     "Morning {name}! Done so far: {played}.",
@@ -1347,7 +1348,7 @@ _MORNING_OPENERS_PARTIAL = (
     "Morning {name}. Marked off so far: {played}. Unmarked: the rest. You know what to do.",
     "{name} — solid start. {played} in. A few more submissions and you're complete.",
     "Halfway there and then some, {name}. Done: {played}. Just a nudge toward the finish.",
-)
+) + _bank.MORNING_OPENERS_PARTIAL
 
 _MORNING_SIGN_OFFS = (
     "DM your shares back to me when you're done.",
@@ -1375,7 +1376,7 @@ _MORNING_SIGN_OFFS = (
     "DM your shares as you finish them. Don't sit on them.",
     "Done with a puzzle? DM me the share. That's the whole process.",
     "Paste the shares in here and the leaderboard updates automatically.",
-)
+) + _bank.MORNING_SIGN_OFFS
 
 
 # Contextual riff pools — one of these can prepend the rotating
@@ -1394,7 +1395,7 @@ _NUDGE_CTX_LEADER_TEMPLATES: Tuple[str, ...] = (
     "{name}, leaderboard says you. {points}. Try to look surprised.",
     "Crown's still yours, {name} — {points} on the week. Don't drop it.",
     "{name} sits atop the weekly board with {points}. Earn it again today.",
-)
+) + _bank.NUDGE_CTX_LEADER
 _NUDGE_CTX_LAST_DAY_TEMPLATES: Tuple[str, ...] = (
     # ``{period}`` interpolates "week" / "month" / "year".
     "Heads up {name} — last day of the {period}. Standings lock at midnight.",
@@ -1407,7 +1408,7 @@ _NUDGE_CTX_LAST_DAY_TEMPLATES: Tuple[str, ...] = (
     "{name}, the {period} doesn't get rewritten after midnight. Your move.",
     "Final-of-the-{period} energy required, {name}. The bot will be watching.",
     "{name} — last day of the {period}. Tomorrow's standings are decided today.",
-)
+) + _bank.NUDGE_CTX_LAST_DAY
 _NUDGE_CTX_STREAK_TEMPLATES: Tuple[str, ...] = (
     # ``{game}`` and ``{streak}`` (an int) get interpolated.
     "{name}, you've won {game} {streak} days running. Don't blow it now.",
@@ -1420,7 +1421,7 @@ _NUDGE_CTX_STREAK_TEMPLATES: Tuple[str, ...] = (
     "{name}, your {game} streak sits at {streak}. Today's the test.",
     "{streak} on the trot, {name} — {game} crown still yours. Don't choke.",
     "{name} has owned {game} for {streak} days. Reign continues today, or doesn't.",
-)
+) + _bank.NUDGE_CTX_STREAK
 
 
 @dataclass
@@ -1977,7 +1978,7 @@ _PRE_RESET_TEMPLATES: dict = {
         "All systems go. Pilot is you. Plane is the puzzles. Move.",
         "{name}, 2-hour heads-up. {missing}. "
         "You can do this in 15 minutes flat. The other 1h45 is yours.",
-    ),
+    ) + _bank.PRE_RESET_2H,
     "1h": (
         "60 minutes, {name}. Outstanding: {missing}. "
         "The leaderboard is watching. So am I.",
@@ -2004,7 +2005,7 @@ _PRE_RESET_TEMPLATES: dict = {
         "Quick reminder: glory does not wait. Glory specifically does not wait.",
         "{name}: 1h, {missing}. "
         "This is your sign. This is THE sign. Go.",
-    ),
+    ) + _bank.PRE_RESET_1H,
     "30min": (
         "Thirty minutes, {name}. Still mocking the streak: {missing}. "
         "Get. In. There.",
@@ -2030,7 +2031,7 @@ _PRE_RESET_TEMPLATES: dict = {
         "Pretend midnight is 11:30. Solve them. Surprise yourself.",
         "Half hour, {name}. {missing}. "
         "The window for dignified completion is narrowing.",
-    ),
+    ) + _bank.PRE_RESET_30MIN,
     "5min": (
         "FIVE MINUTES {name}. {missing}. "
         "RUN. RUN NOW. WHY ARE YOU READING THIS. PLAY.",
@@ -2060,7 +2061,7 @@ _PRE_RESET_TEMPLATES: dict = {
         "Win it. Lose it. Just don't ignore it.",
         "{name}: 5 minutes, {missing}. "
         "If you don't play these I will personally bring it up at every future recap until the heat death of the universe.",
-    ),
+    ) + _bank.PRE_RESET_5MIN,
 }
 
 
@@ -2242,7 +2243,7 @@ _NEW_GAMES_TEMPLATES: Tuple[str, ...] = (
     "The games rolled over at midnight. Pick them up where they left off: at the start. Get in it.",
     "Today's puzzles have dropped and they're judging your absence. Get in it.",
     "Morning. The scoreboard is clear. The puzzles are ready. The potential is yours. Get in it.",
-)
+) + _bank.NEW_GAMES
 
 
 _NEW_GAMES_CTX_LAST_DAY_TEMPLATES: Tuple[str, ...] = (
@@ -2465,7 +2466,7 @@ _BRAG_TEMPLATES: Tuple[str, ...] = (
     "{sender} sent the bot an unsolicited flex. We are passing it on at retail.",
     "Notice: {sender} is undefeated in their own head right now. "
     "Provide receipts or accept defeat.",
-)
+) + _bank.BRAG
 
 _GRIPE_TEMPLATES: Tuple[str, ...] = (
     "{sender} bombed today and wants the group to feel it. "
@@ -2489,7 +2490,7 @@ _GRIPE_TEMPLATES: Tuple[str, ...] = (
     "Group is invited to commiserate.",
     "{sender}: today's score was a personal worst. {sender}: needed you to know. "
     "{sender}: regrets nothing.",
-)
+) + _bank.GRIPE
 
 
 # Stat-aware variants — each uses one or more of {best_game} /

@@ -15,10 +15,12 @@ weekly wrap can reconcile the final standings.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
+from . import message_bank as _bank
 from .db import ScoreRow
 from .parsers import GAME_DISPLAY, GAME_DISPLAY_ORDER, format_raw_score
 from .puzzles import (
@@ -93,7 +95,7 @@ _MISSING_TODAY_SINGULAR_TEMPLATES = (
     "The day went by, the puzzles went by, {names} went by. Smooth.",
     "{names} appears to have outsourced their honour today. Refund pending.",
     "Roster of the missing: {names}. That is the entire roster.",
-)
+) + _bank.MISSING_TODAY_SINGULAR
 
 # Rotating fillers for the days nobody played a single round. Same
 # day-ordinal selection — keeps the empty-state from being a flat
@@ -149,7 +151,7 @@ _MISSING_TODAY_PLURAL_TEMPLATES = (
     "The day went by, the puzzles went by, {names} all went by. Smooth.",
     "Notable abstainers: {names}. The list is long. The judgement is longer.",
     "Roster of the missing: {names}. That's quite the roster.",
-)
+) + _bank.MISSING_TODAY_PLURAL
 
 
 def _format_seconds(total: int) -> str:
@@ -616,7 +618,7 @@ def _missing_today_line(
         if len(missing) == 1
         else _MISSING_TODAY_PLURAL_TEMPLATES
     )
-    template = pool[day.toordinal() % len(pool)]
+    template = random.choice(pool)
     return template.format(names=", ".join(missing))
 
 
