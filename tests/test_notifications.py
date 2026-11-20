@@ -903,3 +903,46 @@ class TestRivalryTrigger:
         body = render_trigger(t, player_name="Alice", game="queens")
         assert "Bob" in body
         assert "3" in body
+
+
+class TestTriggerVariety:
+    def test_vs_usual_kinds(self):
+        from app.notifications import _detect_vs_usual_trigger
+        prior = [30, 40, 50, 60, 70]
+        assert _detect_vs_usual_trigger(prior, 35).kind == "vs_usual_better"
+        assert _detect_vs_usual_trigger(prior, 65).kind == "vs_usual_worse"
+        assert _detect_vs_usual_trigger(prior, 51).kind == "vs_usual_par"
+        assert _detect_vs_usual_trigger(prior, 20) is None  # PB territory
+        assert _detect_vs_usual_trigger(prior[:4], 45) is None  # too little history
+
+    def test_vs_usual_renders_usual(self):
+        from app.notifications import _detect_vs_usual_trigger, render_trigger
+        t = _detect_vs_usual_trigger([30, 40, 50, 60, 70], 35)
+        body = render_trigger(t, player_name="Ann", game="queens")
+        assert "0:50" in body and "0:35" in body
+
+    def test_first_today_no_longer_dominates(self):
+        from app.notifications import Trigger, _pick_trigger, _recent_kinds
+        triggers = [Trigger("first_today"), Trigger("vs_usual_better")]
+        picks = []
+        for _ in range(400):
+            _recent_kinds.clear()
+            picks.append(_pick_trigger(triggers, player_id=1).kind)
+        assert picks.count("first_today") < 200
+
+    def test_recent_kind_is_down_weighted(self):
+        from app.notifications import Trigger, _pick_trigger, _recent_kinds
+        triggers = [Trigger("top_quartile_personal"), Trigger("nth_best_personal")]
+        repeats = 0
+        for _ in range(300):
+            _recent_kinds.clear()
+            a = _pick_trigger(triggers, player_id=7).kind
+            b = _pick_trigger(triggers, player_id=7).kind
+            repeats += a == b
+        assert repeats < 150
+
+    def test_render_avoids_immediate_template_repeat(self):
+        from app.notifications import Trigger, render_trigger
+        t = Trigger("first_today", {"_new_raw": "30"})
+        bodies = [render_trigger(t, player_name="Zed", game="zip") for _ in range(30)]
+        assert all(a != b for a, b in zip(bodies, bodies[1:]))

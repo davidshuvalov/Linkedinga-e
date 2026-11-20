@@ -436,6 +436,42 @@ _PODIUM_STREAK_TEMPLATES = (
     "Podium streak alert — {name}, {weeks} weeks and no sign of stopping.",
 )
 
+# Everyday "how did that compare to your norm" commentary. Fires on most
+# submissions once a player has some history, so a run-of-the-mill score
+# (or a first-of-the-day one) isn't always narrated the same way.
+# ``{usual}`` is the player's median for this game.
+_VS_USUAL_BETTER_TEMPLATES = (
+    "{name}: {new} on {game}. Your usual is {usual}, so that's a good day at the office.",
+    "Better than your normal {game}, {name} — {new} against a typical {usual}.",
+    "{new} on {game}, {name}. Beats your median of {usual}. Quietly smug is allowed.",
+    "{name}, {game} in {new}. You normally sit around {usual}. Today you didn't.",
+    "Above-average {game} from {name}: {new} (your usual: {usual}).",
+    "{name} beat their own {game} median ({usual}) with {new}. Nice and tidy.",
+    "{game} {new}, {name}. That's ahead of your typical {usual}. Keep it rolling.",
+    "Today's {name} > usual {name} on {game}: {new} vs {usual}.",
+)
+
+_VS_USUAL_WORSE_TEMPLATES = (
+    "{name}: {new} on {game}. Your usual is {usual}. Today was not usual.",
+    "{game} took a bit longer than normal, {name} — {new} against your typical {usual}.",
+    "{new} on {game}, {name}. Your median is {usual}. The median is disappointed.",
+    "{name}, {game} in {new}. You normally manage {usual}. Off day? Off day.",
+    "Below-par {game} from {name}: {new} (usually {usual}). Tomorrow's another puzzle.",
+    "{name} vs their own {game} median ({usual}): median wins today. {new}.",
+    "{game} {new}, {name}. Slower than your typical {usual}. We won't tell anyone. We will.",
+    "Usual {name} would've had this {game} in {usual}. Today's {name}: {new}.",
+)
+
+_VS_USUAL_PAR_TEMPLATES = (
+    "{name}: {new} on {game}. Bang on your usual ({usual}). Reliable as ever.",
+    "{game} in {new}, {name} — almost exactly your median of {usual}. Metronomic.",
+    "Textbook {name} {game}: {new}. Your usual is {usual}. No surprises here.",
+    "{name}, {new} on {game}. Right on your average. Consistency is a skill. Allegedly.",
+    "{new} on {game} for {name}. That's your {usual}-ish norm. Steady hands.",
+    "Par for the course, {name}: {new} on {game} (usual {usual}).",
+)
+
+
 _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "new_pb": _NEW_PB_TEMPLATES,
     "tied_pb": _TIED_PB_TEMPLATES,
@@ -458,6 +494,9 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     "above_floor_today": _ABOVE_FLOOR_TODAY_TEMPLATES,
     "rivalry": _RIVALRY_TEMPLATES,
     "podium_streak": _PODIUM_STREAK_TEMPLATES,
+    "vs_usual_better": _VS_USUAL_BETTER_TEMPLATES,
+    "vs_usual_worse": _VS_USUAL_WORSE_TEMPLATES,
+    "vs_usual_par": _VS_USUAL_PAR_TEMPLATES,
 }
 
 
@@ -467,37 +506,39 @@ _TEMPLATES_BY_KIND: Dict[str, Tuple[str, ...]] = {
 # lede. Same for the worst side. The trump map filters out the
 # subordinate kinds whenever the dominant kind is in the candidate
 # pool; the random pick then runs over the survivors.
+_VS_USUAL_KINDS = frozenset({"vs_usual_better", "vs_usual_worse", "vs_usual_par"})
+
 _TRIGGER_TRUMPS: Dict[str, frozenset] = {
-    "new_pb": frozenset({
+    "new_pb": _VS_USUAL_KINDS | frozenset({
         "dow_pb", "year_pb",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
         "rivalry", "podium_streak",
     }),
-    "tied_pb": frozenset({
+    "tied_pb": _VS_USUAL_KINDS | frozenset({
         "dow_pb", "year_pb",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
         "rivalry", "podium_streak",
     }),
-    "new_worst": frozenset({
+    "new_worst": _VS_USUAL_KINDS | frozenset({
         "dow_worst",
         "bottom_quartile_personal", "dow_bottom_quartile_personal",
     }),
-    "tied_worst": frozenset({
+    "tied_worst": _VS_USUAL_KINDS | frozenset({
         "dow_worst",
         "bottom_quartile_personal", "dow_bottom_quartile_personal",
     }),
-    "all_time_record": frozenset({
+    "all_time_record": _VS_USUAL_KINDS | frozenset({
         "new_pb", "tied_pb", "best_of_day",
         "dow_pb", "year_pb", "group_dow_record",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
         "rivalry", "podium_streak",
     }),
-    "all_time_anti_record": frozenset({
+    "all_time_anti_record": _VS_USUAL_KINDS | frozenset({
         "new_worst", "tied_worst", "worst_of_day",
         "dow_worst",
         "bottom_quartile_personal", "dow_bottom_quartile_personal", "above_floor_today",
     }),
-    "group_dow_record": frozenset({
+    "group_dow_record": _VS_USUAL_KINDS | frozenset({
         "new_pb", "tied_pb", "best_of_day",
         "dow_pb", "year_pb",
         "nth_best_personal", "top_quartile_personal", "dow_top_quartile_personal",
@@ -517,18 +558,65 @@ _TRIGGER_TRUMPS: Dict[str, frozenset] = {
 }
 
 
-def _pick_trigger(triggers: Sequence["Trigger"]) -> "Trigger":
+# Relative weight of each trigger kind in the random pick. Headline
+# moments (records, PBs) stay at 1.0+; the low-information "you were
+# first" / "someone was worse" lines are down-weighted so they don't
+# win every time they happen to fire (being first on Queens most
+# mornings used to mean the same "you broke the seal" line daily).
+_TRIGGER_WEIGHTS: Dict[str, float] = {
+    "all_time_record": 3.0,
+    "all_time_anti_record": 3.0,
+    "group_dow_record": 2.0,
+    "new_pb": 2.0,
+    "new_worst": 1.5,
+    "first_today": 0.35,
+    "above_floor_today": 0.7,
+    "vs_usual_better": 0.8,
+    "vs_usual_worse": 0.8,
+    "vs_usual_par": 0.6,
+}
+
+# Per-player memory of the last few kinds sent, so the same flavour of
+# message isn't picked twice running when alternatives exist. In-process
+# only — a restart just forgets, which is harmless.
+_RECENT_KIND_PENALTY = 0.25
+_RECENT_KIND_MEMORY = 3
+_recent_kinds: Dict[int, List[str]] = {}
+
+
+def _remember_kind(player_id: Optional[int], kind: str) -> None:
+    if player_id is None:
+        return
+    hist = _recent_kinds.setdefault(player_id, [])
+    hist.append(kind)
+    del hist[:-_RECENT_KIND_MEMORY]
+
+
+def _pick_trigger(
+    triggers: Sequence["Trigger"], *, player_id: Optional[int] = None
+) -> "Trigger":
     """Choose one trigger from the candidate list. Lifetime PB / worst
     triggers (``new_pb``, ``tied_pb``, ``new_worst``, ``tied_worst``)
     subsume their narrower siblings (weekday / year variants) so a
-    headline-worthy moment isn't diluted; among the survivors the
-    pick is uniform random."""
+    headline-worthy moment isn't diluted. Among the survivors the pick
+    is weighted random (:data:`_TRIGGER_WEIGHTS`), with kinds this
+    player was recently sent down-weighted so consecutive submissions
+    get different flavours of message."""
     kinds = {t.kind for t in triggers}
     suppressed: set = set()
     for kind in kinds:
         suppressed |= _TRIGGER_TRUMPS.get(kind, frozenset())
-    survivors = [t for t in triggers if t.kind not in suppressed]
-    return random.choice(survivors or list(triggers))
+    survivors = [t for t in triggers if t.kind not in suppressed] or list(triggers)
+    recent = _recent_kinds.get(player_id, []) if player_id is not None else []
+    weights = []
+    for t in survivors:
+        w = _TRIGGER_WEIGHTS.get(t.kind, 1.0)
+        if t.kind in recent:
+            w *= _RECENT_KIND_PENALTY
+        weights.append(w)
+    chosen = random.choices(survivors, weights=weights, k=1)[0]
+    _remember_kind(player_id, chosen.kind)
+    return chosen
 
 
 @dataclass
@@ -760,6 +848,33 @@ def _detect_quartile_trigger(prior_raws: List[int], new_raw: int) -> Optional[Tr
     if better_count / n >= 0.75:
         return Trigger(kind="bottom_quartile_personal", format_data={"_new_raw": str(new_raw)})
     return None
+
+
+def _detect_vs_usual_trigger(prior_raws: List[int], new_raw: int) -> Optional[Trigger]:
+    """Everyday comparison against the player's median for this game.
+
+    Needs ≥ 5 prior scores so "usual" means something. Doesn't fire on
+    a PB / worst (those have their own, louder triggers). Within 10%
+    of the median (or ±1 for small numbers like Pinpoint guesses)
+    counts as on-par.
+    """
+    if len(prior_raws) < 5:
+        return None
+    if new_raw < min(prior_raws) or new_raw > max(prior_raws):
+        return None
+    ordered = sorted(prior_raws)
+    usual = ordered[len(ordered) // 2]
+    tolerance = max(1, round(usual * 0.10))
+    if abs(new_raw - usual) < tolerance or new_raw == usual:
+        kind = "vs_usual_par"
+    elif new_raw < usual:
+        kind = "vs_usual_better"
+    else:
+        kind = "vs_usual_worse"
+    return Trigger(
+        kind=kind,
+        format_data={"_new_raw": str(new_raw), "_usual_raw": str(usual)},
+    )
 
 
 def _detect_dow_quartile_trigger(
@@ -1120,6 +1235,10 @@ def gather_submission_triggers(
     if quartile is not None:
         triggers.append(quartile)
 
+    vs_usual = _detect_vs_usual_trigger(prior_raws, new_raw)
+    if vs_usual is not None:
+        triggers.append(vs_usual)
+
     dow_q = _detect_dow_quartile_trigger(player_game_history, new_raw, today)
     if dow_q is not None:
         triggers.append(dow_q)
@@ -1461,6 +1580,11 @@ def _detect_first_today_trigger(
     )
 
 
+# Last template used per (player, kind) — lets render_trigger skip an
+# exact repeat of yesterday's line. In-process only.
+_last_template: Dict[Tuple[str, str], str] = {}
+
+
 def render_trigger(trigger: Trigger, *, player_name: str, game: str) -> str:
     """Format ``trigger`` into the DM body. Pulls a random template
     from the trigger's pool and resolves placeholders from the format
@@ -1471,7 +1595,10 @@ def render_trigger(trigger: Trigger, *, player_name: str, game: str) -> str:
     ``{weekday}``, ``{year}``.
     """
     pool = _TEMPLATES_BY_KIND[trigger.kind]
-    template = random.choice(pool)
+    last = _last_template.get((player_name, trigger.kind))
+    fresh = [t for t in pool if t != last] or list(pool)
+    template = random.choice(fresh)
+    _last_template[(player_name, trigger.kind)] = template
     game_label = GAME_DISPLAY.get(game, game)
 
     fd = trigger.format_data
@@ -1483,6 +1610,8 @@ def render_trigger(trigger: Trigger, *, player_name: str, game: str) -> str:
         subs["new"] = format_raw_score(game, int(fd["_new_raw"]))
     if "_prior_raw" in fd:
         subs["prior"] = format_raw_score(game, int(fd["_prior_raw"]))
+    if "_usual_raw" in fd:
+        subs["usual"] = format_raw_score(game, int(fd["_usual_raw"]))
     for key in ("prior_holder", "weekday", "year", "rank", "rival", "weeks", "gap"):
         if key in fd:
             subs[key] = fd[key]
@@ -1606,7 +1735,7 @@ def maybe_notify_personal_best(
     if not triggers:
         return None
 
-    chosen = _pick_trigger(triggers)
+    chosen = _pick_trigger(triggers, player_id=player.id)
     body = render_trigger(chosen, player_name=player.display_name, game=game)
 
     if not deliver:

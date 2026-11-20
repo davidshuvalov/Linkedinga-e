@@ -1518,8 +1518,7 @@ def _detect_streak_trigger(
     Threshold: 2+ days (a one-day "streak" isn't a streak).
 
     If multiple games qualify, picks the one with the longest
-    streak. Ties broken by display order in
-    :data:`GAME_DISPLAY_ORDER`.
+    streak. Ties are broken at random.
     """
     # Group recent scores by (game, puzzle_date).
     by_game_day: Dict[Tuple[str, date], List[ScoreRow]] = {}
@@ -1532,6 +1531,7 @@ def _detect_streak_trigger(
 
     best_game: Optional[str] = None
     best_streak = 0
+    ties = 0
     for game in GAME_DISPLAY_ORDER:
         if game not in enabled_games:
             continue
@@ -1551,6 +1551,13 @@ def _detect_streak_trigger(
         if streak > best_streak:
             best_streak = streak
             best_game = game
+            ties = 1
+        elif streak == best_streak and streak > 0:
+            # Reservoir-pick among equally long streaks so Queens
+            # (first in display order) doesn't always get the callout.
+            ties += 1
+            if random.randrange(ties) == 0:
+                best_game = game
 
     if best_game is None or best_streak < 2:
         return None
@@ -1600,10 +1607,8 @@ def _build_morning_nudge(
     games the player has already submitted today; the message lists
     only the enabled games they still owe.
 
-    ``today`` drives the day-ordinal rotation across the opener and
-    sign-off pools so the same player doesn't read identical copy
-    every morning. Falls back to ``date.today()`` for callers that
-    don't pass it (tests, ad-hoc invocations).
+    Opener and sign-off are drawn at random per call. ``today`` is
+    accepted for API compatibility but no longer affects the copy.
 
     ``context_line``, when supplied, prepends a one-line riff before
     the rotating opener — used to call out a leaderboard position,
@@ -1620,18 +1625,18 @@ def _build_morning_nudge(
         if g in enabled_games and g in played_games
     ]
 
-    ordinal = (today or date.today()).toordinal()
-
+    # Random per player rather than a day-ordinal rotation — with the
+    # rotation everyone got the identical opener on the same morning.
     if not played:
-        opener = _MORNING_OPENERS_NO_PROGRESS[
-            ordinal % len(_MORNING_OPENERS_NO_PROGRESS)
-        ].format(name=player_name)
+        opener = random.choice(_MORNING_OPENERS_NO_PROGRESS).format(
+            name=player_name
+        )
     else:
-        opener = _MORNING_OPENERS_PARTIAL[
-            ordinal % len(_MORNING_OPENERS_PARTIAL)
-        ].format(name=player_name, played=", ".join(played))
+        opener = random.choice(_MORNING_OPENERS_PARTIAL).format(
+            name=player_name, played=", ".join(played)
+        )
 
-    sign_off = _MORNING_SIGN_OFFS[ordinal % len(_MORNING_SIGN_OFFS)]
+    sign_off = random.choice(_MORNING_SIGN_OFFS)
 
     lines: List[str] = []
     if context_line:
@@ -1857,7 +1862,8 @@ def run_morning_nudge(
     for group in _iter_groups(repo):
         try:
             nudged, active_count = _send_nudges_to_lagging_players(
-                repo, settings, now=now, group_id=group.id
+                repo, _settings_for_group(settings, group),
+                now=now, group_id=group.id,
             )
         except Exception:
             logger.exception(
@@ -2064,11 +2070,11 @@ def _build_pre_reset_warning(
     today: date,
     stage: str,
 ) -> str:
-    """Render the per-stage nag body. Template choice rotates on the
-    day's ordinal so the same player doesn't get the same zinger two
-    nights in a row at the same stage."""
+    """Render the per-stage nag body. Template is drawn at random so
+    players don't all get the same zinger, nor the same one on a
+    predictable cycle."""
     templates = _PRE_RESET_TEMPLATES[stage]
-    template = templates[today.toordinal() % len(templates)]
+    template = random.choice(templates)
     return template.format(name=player_name, missing=", ".join(missing_games))
 
 
@@ -2080,6 +2086,9 @@ def _run_pre_reset_warning_for_group(
     stage: str,
     now: datetime,
 ) -> List[str]:
+    # The group's own ``track`` list, not the env default — otherwise a
+    # group tracking Wend never sees it in "still owed".
+    settings = _settings_for_group(settings, group)
     today = la_date(now)
     enabled = settings.enabled_games
     if not enabled:
@@ -2185,7 +2194,7 @@ _NEW_GAMES_TEMPLATES: Tuple[str, ...] = (
     "Fresh puzzles, fresh chance to embarrass everyone. "
     "Today's games are out — get in it.",
     "The board is reset. Yesterday is forgotten. New puzzles are LIVE. "
-    "First DM with a Queens share is the leader. Get in it.",
+    "First share in is the leader. Get in it.",
     "New games available. Stop scrolling. Open LinkedIn. Crush them. "
     "Get in it.",
     "Day flipped. Puzzles flipped. Leaderboard flipped. "
@@ -2331,11 +2340,10 @@ def _run_new_games_announcement_for_group(
     *,
     now: datetime,
 ) -> Optional[str]:
+    settings = _settings_for_group(settings, group)
     today = la_date(now)
 
-    base = _NEW_GAMES_TEMPLATES[
-        today.toordinal() % len(_NEW_GAMES_TEMPLATES)
-    ]
+    base = random.choice(_NEW_GAMES_TEMPLATES)
 
     # Gather contextual riffs. ``yesterday_scores`` is bounded to the
     # day before today so the blowout detector sees only the puzzle
@@ -2546,6 +2554,7 @@ class _TauntStats:
 
 _TIME_GAMES_FOR_TAUNT: Tuple[str, ...] = (
     "queens", "tango", "crossclimb", "zip", "patches", "mini_sudoku",
+    "wend", "sumbreak",
 )
 
 

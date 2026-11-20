@@ -451,6 +451,45 @@ class TestMorningNudge:
         assert "Tango" in body.split("Still to play:")[1]
 
 
+class TestNudgesUseGroupTrackedGames:
+    """Regression: the morning nudge and pre-reset warnings used the env
+    default game list, so a group that ran ``track ... wend`` never saw
+    Wend under "Still to play"."""
+
+    @patch("app.jobs.send_dm")
+    def test_morning_nudge_lists_group_only_game(self, mock_dm):
+        from app.puzzles import la_date
+        mock_dm.return_value = True
+        repo = TestRepo()
+        repo.set_group_games(repo.default_group.id, frozenset({"queens", "wend"}))
+        now = datetime(2026, 4, 14, 8, 30, tzinfo=SYDNEY)
+        today_la = la_date(now)
+        _seed(repo, 1, "Charlie", today_la, ["queens"])
+        settings = _make_settings({"queens", "tango"})
+        nudged = run_morning_nudge(repo, settings, now=now)
+        assert nudged == ["whatsapp:+61400000001"]
+        owed = mock_dm.call_args[0][2].split("Still to play:")[1]
+        assert "Wend" in owed
+        assert "Tango" not in owed
+
+    @patch("app.jobs.send_dm")
+    def test_pre_reset_lists_group_only_game(self, mock_dm):
+        from app.puzzles import la_date
+        mock_dm.return_value = True
+        repo = TestRepo()
+        repo.set_group_games(repo.default_group.id, frozenset({"queens", "wend"}))
+        now = datetime(2026, 4, 14, 23, 0, tzinfo=LA)
+        _seed(repo, 1, "Charlie", la_date(now), ["queens"])
+        settings = _make_settings({"queens", "tango"})
+        warned = run_pre_reset_warning(
+            repo, settings, stage=PRE_RESET_STAGES[0], now=now
+        )
+        assert warned == ["whatsapp:+61400000001"]
+        body = mock_dm.call_args[0][2]
+        assert "Wend" in body
+        assert "Tango" not in body
+
+
 class TestMorningNudgeContextTriggers:
     """The morning nudge can prepend a contextual riff before the
     rotating opener — leaderboard leader, last day of period, active

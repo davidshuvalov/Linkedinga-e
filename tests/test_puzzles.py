@@ -57,6 +57,11 @@ class TestEpochCoverage:
         assert PUZZLE_EPOCH["wend"] == (date(2026, 6, 9), 1)
 
 
+    def test_sumbreak_epoch_is_pinned_to_first_seen_share(self):
+        """Sumbreak #3 was shared on 2026-11-20 (LA date)."""
+        assert PUZZLE_EPOCH["sumbreak"] == (date(2026, 11, 20), 3)
+
+
 class TestLaDate:
     def test_sydney_morning_is_previous_la_day(self):
         # 10am Sydney on 22 Apr 2026 = 5pm LA on 21 Apr 2026.

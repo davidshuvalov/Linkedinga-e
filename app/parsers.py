@@ -6,7 +6,7 @@ dispatches across all known games and returns the first hit.
 ``raw_score`` convention:
 
 - ``queens``, ``tango``, ``crossclimb``, ``zip``, ``patches``,
-  ``mini_sudoku``, ``wend`` → duration in **seconds** (lower is better).
+  ``mini_sudoku``, ``wend``, ``sumbreak`` → duration in **seconds** (lower is better).
 - ``pinpoint`` → number of guesses used, 1–5 (lower is better).
 
 The regexes are tuned against real share-text samples captured 2026-04.
@@ -32,6 +32,7 @@ GAMES = (
     "patches",
     "mini_sudoku",
     "wend",
+    "sumbreak",
 )
 
 # Single source of truth for how each game name is rendered in user-facing
@@ -46,6 +47,7 @@ GAME_DISPLAY = {
     "patches": "Patches",
     "mini_sudoku": "Mini Sudoku",
     "wend": "Wend",
+    "sumbreak": "Sumbreak",
 }
 
 # Preferred order for rendering per-game sections in recaps and stats.
@@ -61,6 +63,7 @@ GAME_DISPLAY_ORDER = (
     "patches",
     "mini_sudoku",
     "wend",
+    "sumbreak",
 )
 
 
@@ -92,6 +95,7 @@ _GAME_NAME_PATTERNS: Dict[str, str] = {
     "patches": r"\bpatches\b",
     "mini_sudoku": r"\bmini\s+sudoku\b",
     "wend": r"\bwend\b",
+    "sumbreak": r"\bsumbreak\b",
 }
 
 
@@ -263,6 +267,18 @@ def parse_wend(text: str) -> Optional[ParsedScore]:
     return _match_time_based("wend", text)
 
 
+def parse_sumbreak(text: str) -> Optional[ParsedScore]:
+    """Parse a Sumbreak share.
+
+    Real share-text shape (verified 2026-11)::
+
+        Sumbreak #3 | 0:03 🔢
+        With no hints & no backtracks
+        lnkd.in/sumbreak.
+    """
+    return _match_time_based("sumbreak", text)
+
+
 def parse_pinpoint(text: str) -> Optional[ParsedScore]:
     """Parse a Pinpoint share.
 
@@ -304,6 +320,7 @@ _PARSERS: Dict[str, Callable[[str], Optional[ParsedScore]]] = {
     "patches": parse_patches,
     "mini_sudoku": parse_mini_sudoku,
     "wend": parse_wend,
+    "sumbreak": parse_sumbreak,
 }
 
 
